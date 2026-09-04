@@ -188,6 +188,19 @@ else
   fi
 fi
 
+# four step cards always: the page merges, and the API fills the ladder in
+has "page renders four step cards"     "function fourSteps("
+has "unrun steps pill as not started"  'label:"not started"'
+FIRST_JOB=$(curl -s "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['job_id'] if j else '')" 2>/dev/null)
+if [ -n "$FIRST_JOB" ]; then
+  NSTEPS=$(curl -s "$BASE/api/jobs/$FIRST_JOB" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);s=d.get('steps') or [];print(len(s), sum(1 for x in s if x.get('status')=='not_started'), all(x.get('price_usdc') is not None for x in s))" 2>/dev/null)
+  case "$NSTEPS" in
+    "4 "*" True") ok "API returns all four steps with prices ($NSTEPS: count, not_started, priced)";;
+    *) bad "API returns all four steps with prices" "got: $NSTEPS";;
+  esac
+else
+  bad "API returns all four steps with prices" "no job in the store to test against"
+fi
 JCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/journal?limit=1" 2>/dev/null)
 [ "$JCODE" = "200" ] && ok "GET /api/journal?limit=1 returns 200 (pulse source)" \
   || bad "GET /api/journal?limit=1 returns 200" "HTTP ${JCODE:-no response}"

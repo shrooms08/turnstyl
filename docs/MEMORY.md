@@ -8,7 +8,7 @@ as they happen, one journal event per decision.
 Recall (fresh session): a new process opens the same store, reads `active_jobs`
 and `job:<job_id>` to find where the work stopped, reads `job/<job_id>` to see
 which steps already have output, and reads `buyer/<address>` to see what this
-buyer has paid and is owed — with no state carried in the process it replaced.
+buyer has paid and is owed, with no state carried in the process it replaced.
 
 Changes the agent's decision by: the price it quotes (half when
 `findings/<contract_hash>` already holds that step, 1.5x when
@@ -41,7 +41,7 @@ The chain holds two things: that a payment of some amount arrived under a memo,
 and that some 32-byte output hash was committed. It does not hold the findings,
 the step outputs, the prices quoted or why, the token and time cost history that
 sets those prices, or any of the trust reasoning about a buyer. A memo is
-`keccak256("<job_id>:<step>")` — an opaque hash that only means something if you
+`keccak256("<job_id>:<step>")`, an opaque hash that only means something if you
 already hold the job id it was built from, which is exactly what a deleted
 database no longer has. Reconstruction would recover a list of payments to
 unknown invoices, not an agent that knows what it sold.
@@ -51,12 +51,12 @@ unknown invoices, not an agent that knows what it sold.
 - Database: `./data/turnstyl.db` (SQLite, gitignored, chmod 0600 by the SDK).
   Overridable per process with `TURNSTYL_DB`; the live demo uses
   `./data/demo_live.db`.
-- Tenant: `turnstyl` — a plain string passed to `MemoryClient.local`, not the
+- Tenant: `turnstyl`, a plain string passed to `MemoryClient.local`, not the
   SDK default UUID, so turnstyl's rows never mingle with another local consumer.
 - Size after the nine-beat live demo: `data/demo_live.db` is 384K (335,872
   bytes) holding 3 entities, 2 state documents, 2 reference documents and 1
   journal event. It is small because the demo's last beat deletes the store and
-  starts one fresh job — that is the delete test, and what survives it is the
+  starts one fresh job. That is the delete test, and what survives it is the
   point. A store carrying a finished four-step audit
   (`data/real_run3.db`) is 512K: 6 entities, 1 archived job, 3 state documents,
   2 reference documents, 4 journal events. Most of both figures is SQLite page

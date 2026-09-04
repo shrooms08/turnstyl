@@ -484,10 +484,28 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   }
 
   /* ── render: console ───────────────────────────────────────────── */
+  // Always four cards. The API now returns unrun steps as "not_started" with
+  // their base price; if an older API omits them, they are synthesised here
+  // from the same pricing rules, so either shape renders the full ladder.
+  var STEP_NAMES = { 1:"scope", 2:"findings", 3:"patch", 4:"verify" };
+  var BASE_PRICES = { 1:0.00, 2:0.50, 3:0.75, 4:0.25 };
+  function fourSteps(job){
+    var byNo = {};
+    (job && job.steps || []).forEach(function(s){ byNo[Number(s.step)] = s; });
+    return [1,2,3,4].map(function(n){
+      return byNo[n] || { step:n, name:STEP_NAMES[n], status:"not_started", price_usdc:BASE_PRICES[n],
+                          paid:false, cached:false, tokens_in:null, tokens_out:null, seconds:null,
+                          output_sha256:null, commit_tx:null, pay_tx:null, output:null };
+    });
+  }
   function stepState(step, job){
+    var inv = job && job.open_invoice;
+    if(step.status === "not_started"){
+      if(inv && inv.step === step.step && !inv.paid) return { label:"awaiting payment", cls:"gold" };
+      return { label:"not started", cls:"" };
+    }
     if(Number(step.price_usdc) === 0) return { label:"free", cls:"" };
     if(step.paid) return { label:"paid", cls:"violet" };
-    var inv = job && job.open_invoice;
     if(inv && inv.step === step.step && !inv.paid) return { label:"awaiting payment", cls:"gold" };
     if(step.output) return { label:"on credit", cls:"gold" };
     return { label:"not started", cls:"" };
@@ -521,7 +539,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
   function outputBlock(job){
     if(S.openStep == null) return "";
-    var step = (job.steps||[]).filter(function(s){ return s.step === S.openStep; })[0];
+    var step = fourSteps(job).filter(function(s){ return s.step === S.openStep; })[0];
     if(!step) return "";
     return '<div class="out">' +
       '<div class="oh"><span>step '+step.step+" · "+esc(step.name||"")+" output</span>" +
@@ -621,7 +639,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       "</div></div>";
 
     var steps = '<div class="card"><h3>metered steps</h3><div class="steps">' +
-      (job.steps||[]).map(function(s){ return stepCard(s, job); }).join("") +
+      fourSteps(job).map(function(s){ return stepCard(s, job); }).join("") +
       "</div>" + outputBlock(job) + "</div>";
 
     return head + steps + invoicePanel(job) + timeline() + buyerCard();

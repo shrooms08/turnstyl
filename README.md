@@ -4,8 +4,8 @@ turnstyl is a metered AI agent. It audits a Solidity contract in four steps, and
 it gets paid per step in USDC on Base: step 1 (scope) is free, steps 2
 (findings), 3 (patch) and 4 (verify) are sold individually. Job state, step
 outputs, step costs, and a per-buyer ledger live in Sibyl Memory, and every
-decision the agent makes — what to charge, whether to run, whether to extend
-credit, whether to refuse — is a function of what it reads there and is written
+decision the agent makes, what to charge, whether to run, whether to extend
+credit, whether to refuse, is a function of what it reads there and is written
 back as a journal entry naming the facts it used.
 
 ## The delete test
@@ -13,7 +13,7 @@ back as a journal entry naming the facts it used.
 Delete `data/turnstyl.db` and the agent forgets it was ever paid: it invoices the
 same buyer again for work already delivered and settled. In the live demo the
 buyer then pays that second invoice, and it lands on Base Sepolia right next to
-the first one — [`0x1f7656c5d27809d4…`](https://sepolia.basescan.org/tx/0x1f7656c5d27809d49477f27a6e6eb62362eec80738fdebc1c9d3797111626f0c). Both
+the first one: [`0x1f7656c5d27809d4…`](https://sepolia.basescan.org/tx/0x1f7656c5d27809d49477f27a6e6eb62362eec80738fdebc1c9d3797111626f0c). Both
 payments are on chain; only the agent's memory of the first is gone.
 
 ## What memory changes
@@ -49,11 +49,11 @@ Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
 
 - half price when this contract's output for that step is already in `findings/`
 - 1.5x when the recorded average token cost for that step exceeds 6000
-- **RUN_FREE** — step 1, never gated
-- **RUN_PAID** — the invoice for this step is settled
-- **RUN_ON_CREDIT** — unpaid, but the buyer is trusted
-- **WAIT_FOR_PAYMENT** — unpaid and credit not earned
-- **REFUSE** — the buyer left work unpaid when a previous job closed
+- **RUN_FREE**: step 1, never gated
+- **RUN_PAID**: the invoice for this step is settled
+- **RUN_ON_CREDIT**: unpaid, but the buyer is trusted
+- **WAIT_FOR_PAYMENT**: unpaid and credit not earned
+- **REFUSE**: the buyer left work unpaid when a previous job closed
 
 Trust tiers: **trusted** needs paid_steps >= 2, nothing outstanding, and either no
 default or an earned-back one. **blocked** at two defaults. Otherwise **new**.
@@ -75,7 +75,7 @@ default cannot be worked off.
   one call and emits `Paid`.
 - `commit(bytes32 memo, bytes32 outputHash)` publishes the sha256 of a delivered
   step and emits `Committed`. Agent only.
-- The contract holds no custody — it never takes a token balance — and it has no
+- The contract holds no custody, it never takes a token balance, and it has no
   owner, no pause and no upgrade path.
 
 The memo is `keccak256("<job_id>:<step>")`, a bare string anyone can recompute. A
@@ -95,7 +95,7 @@ buyer, and at least the invoiced amount. The agent trusts the log, not the buyer
 
 ## Run it
 
-Offline — no API key, no chain, no spend:
+Offline, no API key, no chain, no spend:
 
 ```bash
 .venv/bin/python scripts/demo_offline.py        # eight-beat acceptance test
@@ -129,11 +129,35 @@ unset MOCK_LLM
 Contracts: `cd contracts && forge test`. `forge init --no-git` vendored
 `forge-std` as plain files, so a fresh clone builds with no `forge install`.
 
+## Web UI
+
+One page, served from the same process that reads the agent's memory: a scroll
+story at the top and a live operator console at the bottom. It reads only from
+Sibyl Memory through the read-only API; nothing on the page can write.
+
+```bash
+.venv/bin/turnstyl serve --db ./data/turnstyl.db     # then open http://127.0.0.1:8787
+```
+
+Scrolling drives a 5,000-particle scene that morphs through a scatter between
+sections: brain (the hero), coin (every step is paid), bulb (restart it, it
+remembers), scatter (the delete test), then the turnstyl mark for the last story
+and the console. The console lists every job the store knows, and a job page
+shows all four metered steps as cards, the open invoice, the decision timeline
+and the buyer ledger. Delete the memory file while the page is open and it stays
+up: the scene locks to a red scatter, the counters read "memory deleted", and
+every panel says what was lost rather than showing a stale copy.
+
+![hero: the brain over the headline](docs/screenshots/hero.png)
+
+![bulb: the memory section](docs/screenshots/bulb.png)
+
+![console: a job with its four step cards and the ledger](docs/screenshots/console.png)
+
 ## Sample audit
 
-[docs/sample_audit.md](docs/sample_audit.md) — a real four-step run against
+[docs/sample_audit.md](docs/sample_audit.md): a real four-step run against
 `claude-haiku-4-5`, verbatim, with token counts, cost, and the mechanical
 verdicts. Memory implementation note: [docs/MEMORY.md](docs/MEMORY.md).
 
-Status: day 3, complete. Live payments and output commits on Base Sepolia,
-trust earn-back, mechanical gates on patch output.
+Status: day 4: web UI, particle scene, brand.

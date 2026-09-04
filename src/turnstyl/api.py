@@ -230,6 +230,7 @@ def step_view(step: int, record: S.StepRecord) -> dict[str, Any]:
     view = {
         "step": step,
         "name": S.STEP_NAMES.get(step, str(step)),
+        "status": "done",
         "price_usdc": record.price_usdc,
         "paid": record.paid,
         "cached": record.cached,
@@ -243,6 +244,29 @@ def step_view(step: int, record: S.StepRecord) -> dict[str, Any]:
     }
     if step == S.STEP_PATCH:
         view["compiles"] = record.compiles
+    return view
+
+
+def not_started_view(step: int) -> dict[str, Any]:
+    """A step the job has not reached. Same keys as a recorded step, so a
+    consumer can render the four cards from one shape."""
+    view = {
+        "step": step,
+        "name": S.STEP_NAMES.get(step, str(step)),
+        "status": "not_started",
+        "price_usdc": S.BASE_PRICES.get(step, 0.0),
+        "paid": False,
+        "cached": False,
+        "tokens_in": None,
+        "tokens_out": None,
+        "seconds": None,
+        "output_sha256": None,
+        "commit_tx": None,
+        "pay_tx": None,
+        "output": None,
+    }
+    if step == S.STEP_PATCH:
+        view["compiles"] = None
     return view
 
 
@@ -274,12 +298,12 @@ def api_job(job_id: str) -> dict[str, Any]:
         else:
             entity_source = "none: the job entity is gone and not in the archive"
 
-    steps = []
+    # The shape is always complete: every step 1-4 is present, and one that has
+    # not run yet says so and carries its base price from the pricing rules.
+    recorded = {}
     if entity is not None:
-        steps = [
-            step_view(int(k), record)
-            for k, record in sorted(entity.steps.items(), key=lambda kv: int(kv[0]))
-        ]
+        recorded = {int(k): step_view(int(k), record) for k, record in entity.steps.items()}
+    steps = [recorded.get(n) or not_started_view(n) for n in S.ALL_STEPS]
 
     invoice = state.open_invoice
     return {

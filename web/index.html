@@ -810,12 +810,14 @@ import * as THREE from 'three';
   const FULL_TURN = 2 * Math.PI;       // one revolution while travelling through scatter
   const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s
   const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
-  const BRAIN_OPACITY = 0.7, OTHER_OPACITY = 0.85;
+  const BRAIN_OPACITY = 0.7, OTHER_OPACITY = 0.85, BULB_OPACITY = 0.8;
   const LOGO_DIAMETER = 2.6, LOGO_STROKE = 1.4, LOGO_DEPTH = 0.7;   // grid units except diameter
   const COIN_R = 1.35, COIN_STROKE = 0.16, COIN_DEPTH = 0.35;     // ring
   const COIN_GLYPH_H = 1.7, COIN_GLYPH_Z = 0.12, COIN_DISC_R = 1.2, COIN_DISC_Z = -0.2;
+  const BULB_HEIGHT = 3.1, BULB_TILT = 0.10, GLASS_Y = -0.60;   // glass above, base below
+  const COIL_TURNS = 6, COIL_R = 0.09, COIL_JITTER = 0.05;
   const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890, LOGO_WHITE = 0xF2F0EA,
-        DIM_WHITE = 0x6f6e68, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
+        DIM_WHITE = 0x6f6e68, GLASS_DIM = 0xb8b6ae, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
 
   /* ── inline value noise (no library) ────────────────────────────── */
   function hash3(i, j, k){
@@ -876,17 +878,17 @@ import * as THREE from 'three';
 
   /* ── flat per-instance stores, allocated once ───────────────────── */
   const F = Float32Array;
-  const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posCoin = new F(COUNT*3), posScatter = new F(COUNT*3);
-  const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colCoin = new F(COUNT*3), colScatter = new F(COUNT*3);
+  const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posCoin = new F(COUNT*3), posBulb = new F(COUNT*3), posScatter = new F(COUNT*3);
+  const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colCoin = new F(COUNT*3), colBulb = new F(COUNT*3), colScatter = new F(COUNT*3);
   const cur = new F(COUNT*3), bulge = new F(COUNT*3), drift = new F(COUNT*3);
   const axis = new F(COUNT*3);
   const spinAng = new F(COUNT), spinVel = new F(COUNT);
-  const sBrain = new F(COUNT), sLogo = new F(COUNT), sCoin = new F(COUNT), sScatter = new F(COUNT);  // size per form
+  const sBrain = new F(COUNT), sLogo = new F(COUNT), sCoin = new F(COUNT), sBulb = new F(COUNT), sScatter = new F(COUNT);  // size per form
   const sBase = new F(COUNT), sBulge = new F(COUNT);
 
   const cGold = new THREE.Color(GOLD), cViolet = new THREE.Color(VIOLET),
         cWhite = new THREE.Color(WHITE), cLogoWhite = new THREE.Color(LOGO_WHITE),
-        cDim = new THREE.Color(DIM_WHITE), cPink = new THREE.Color(PINK),
+        cDim = new THREE.Color(DIM_WHITE), cGlassDim = new THREE.Color(GLASS_DIM), cPink = new THREE.Color(PINK),
         cTeal = new THREE.Color(TEAL), cRed = new THREE.Color(RED), cGrey = new THREE.Color(GREY);
 
   function put(arr, i, c){ arr[i*3] = c.r; arr[i*3+1] = c.g; arr[i*3+2] = c.b; }
@@ -894,7 +896,7 @@ import * as THREE from 'three';
     arr[i*3] = (Math.random()-0.5)*12; arr[i*3+1] = (Math.random()-0.5)*7; arr[i*3+2] = (Math.random()-0.5)*6;
   }
 
-  /* sizes. Brain, logo and coin particles are the fine class only
+  /* sizes. Brain, logo, coin and bulb particles are the fine class only
      (0.014-0.024); scatter keeps the three classes; the 2% large shards belong
      to the ambient field and the scatter form only. */
   for (let i = 0; i < COUNT; i++) {
@@ -908,6 +910,7 @@ import * as THREE from 'three';
     sBrain[i] = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
     sLogo[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
     sCoin[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sBulb[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
     sBase[i] = sBrain[i];
     const ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
     const al = Math.hypot(ax, ay, az) || 1;
@@ -1389,6 +1392,147 @@ import * as THREE from 'three';
   }
   buildCoin();
 
+  /* ── form: bulb, a surface of revolution around Y ─────────────────── */
+  // Profile as (radius, y), top to bottom. Glass down to y = -0.60, then the
+  // base: five screw-thread ridges from -0.70 to -1.20 (radius 0.46 on a ridge,
+  // 0.40 in the valley between, alternating every 0.10 in y), then the tip.
+  const BULB_RIDGES = [-0.70, -0.80, -0.90, -1.00, -1.10];
+  const BULB_PROFILE = [
+    [0.00, 1.60], [0.45, 1.55], [0.80, 1.35], [1.00, 1.00], [1.05, 0.60], [0.95, 0.20],
+    [0.72, -0.15], [0.50, -0.45], [0.42, -0.60], [0.46, -0.70]
+  ];
+  for (let k = 0; k < BULB_RIDGES.length; k++) {               // ridge, then the valley below it
+    if (k > 0) BULB_PROFILE.push([0.46, BULB_RIDGES[k]]);
+    BULB_PROFILE.push([0.40, BULB_RIDGES[k] - 0.05]);
+  }
+  BULB_PROFILE.push([0.40, -1.20], [0.28, -1.35], [0.18, -1.45], [0.00, -1.50]);
+
+  function catmullRomOpen(points, perSeg){                     // open spline, ends clamped
+    const n = points.length, out = [];
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = points[Math.max(0, i - 1)], p1 = points[i], p2 = points[i + 1], p3 = points[Math.min(n - 1, i + 2)];
+      for (let k = 0; k < perSeg; k++) {
+        const t = k / perSeg, t2 = t*t, t3 = t2*t;
+        out.push([
+          Math.max(0, 0.5*((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)),
+          0.5*((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+        ]);
+      }
+    }
+    out.push([points[n - 1][0], points[n - 1][1]]);
+    return out;
+  }
+  const bulbStats = { profilePoints:0, glass:0, silhouette:0, base:0, baseOnRidges:0, filament:0, coil:0, tip:0, parked:0, height:0 };
+  function revolveProfile(prof, filter, weightByArea){
+    // Cumulative weights along the profile: arc length, or arc length times the
+    // ring circumference for an even distribution over the revolved surface.
+    const segs = [];
+    let total = 0;
+    for (let i = 0; i < prof.length - 1; i++) {
+      const a = prof[i], b = prof[i + 1];
+      const ym = (a[1] + b[1]) / 2, rm = (a[0] + b[0]) / 2;
+      if (!filter(ym)) continue;
+      const ds = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const w = ds * (weightByArea ? Math.max(0.02, rm) : 1);
+      total += w;
+      segs.push({ i, w: total });
+    }
+    return {
+      total,
+      pick: function(out){                                     // random point on the surface -> [r, y]
+        const s = Math.random() * total;
+        let lo = 0, hi = segs.length - 1;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (segs[mid].w < s) lo = mid + 1; else hi = mid; }
+        const a = prof[segs[lo].i], b = prof[segs[lo].i + 1], t = Math.random();
+        out[0] = a[0] + (b[0] - a[0]) * t; out[1] = a[1] + (b[1] - a[1]) * t;
+        return out;
+      }
+    };
+  }
+  function buildBulb(){
+    const prof = catmullRomOpen(BULB_PROFILE, 7);              // ~170 points
+    bulbStats.profilePoints = prof.length;
+    let yMin = Infinity, yMax = -Infinity;
+    for (const q of prof) { if (q[1] < yMin) yMin = q[1]; if (q[1] > yMax) yMax = q[1]; }
+    const S = BULB_HEIGHT / Math.max(0.001, yMax - yMin), yC = (yMin + yMax) / 2;
+    bulbStats.height = (yMax - yMin) * S;
+    const nGlass = Math.round(FORM_N * 0.42), nSil = Math.round(FORM_N * 0.16), nBase = Math.round(FORM_N * 0.16);
+    const nFil = Math.round(FORM_N * 0.18), nTip = Math.round(FORM_N * 0.02);
+    const nPark = FORM_N - nGlass - nSil - nBase - nFil - nTip; // 6%, absorbs rounding
+    let i = 0;
+    function place(x, y, z, c){                                // profile units -> world, centred
+      posBulb[i*3] = x * S; posBulb[i*3+1] = (y - yC) * S; posBulb[i*3+2] = z * S;
+      put(colBulb, i, c);
+      i++;
+    }
+    // azimuth is measured from +z toward +x, so 90° and 270° are the edges the
+    // camera sees when the bulb faces it
+    function onSurface(r, y, azDeg, c){
+      const a = azDeg * Math.PI / 180;
+      place(r * Math.sin(a), y, r * Math.cos(a), c);
+    }
+    const q = [0, 0];
+    // glass, 42%: even over the revolved surface, no interior fill
+    const glass = revolveProfile(prof, function(y){ return y > GLASS_Y; }, true);
+    for (let k = 0; k < nGlass; k++) {
+      glass.pick(q);
+      const r = Math.random();
+      const c = r < 0.35 ? cViolet : (r < 0.675 ? cLogoWhite : cGlassDim);   // 35% violet, 65% white (half dim)
+      onSurface(q[0], q[1], Math.random() * 360, c);
+    }
+    bulbStats.glass = nGlass;
+    // silhouette band, 16%: the glass profile at the two edges, gold
+    const rim = revolveProfile(prof, function(y){ return y > GLASS_Y; }, false);
+    for (let k = 0; k < nSil; k++) {
+      rim.pick(q);
+      onSurface(q[0], q[1], (Math.random() < 0.5 ? 90 : 270) + (Math.random() - 0.5) * 12, cGold);
+    }
+    bulbStats.silhouette = nSil;
+    // base, 16%: 60% on the five thread ridges, the rest over the base surface
+    const base = revolveProfile(prof, function(y){ return y <= GLASS_Y; }, true);
+    const nRidge = Math.round(nBase * 0.6);
+    for (let k = 0; k < nBase; k++) {
+      const c = Math.random() < 0.10 ? cTeal : cWhite;
+      if (k < nRidge) {
+        const y = BULB_RIDGES[k % BULB_RIDGES.length] + (Math.random() - 0.5) * 0.02;
+        onSurface(0.46, y, Math.random() * 360, c);
+      } else {
+        base.pick(q);
+        onSurface(q[0], q[1], Math.random() * 360, c);
+      }
+    }
+    bulbStats.base = nBase; bulbStats.baseOnRidges = nRidge;
+    // filament, 18%: two support wires, then the coil between them
+    const nWire = Math.round(nFil * 0.25), nCoil = nFil - nWire;
+    for (let k = 0; k < nWire; k++) {
+      const side = k % 2 === 0 ? -1 : 1, t = Math.random();
+      const x = side * (0.22 + (0.30 - 0.22) * t), y = -0.55 + (0.25 + 0.55) * t;
+      place(x + (Math.random() - 0.5) * 0.02, y, (Math.random() - 0.5) * 0.02, cLogoWhite);
+    }
+    for (let k = 0; k < nCoil; k++) {                          // x = -0.30 + 0.60u, y = 0.25 + 0.09 sin, z = 0.09 cos
+      const u = Math.random(), ph = u * Math.PI * 2 * COIL_TURNS;
+      place(-0.30 + 0.60 * u + (Math.random() - 0.5) * COIL_JITTER,
+            0.25 + COIL_R * Math.sin(ph) + (Math.random() - 0.5) * COIL_JITTER,
+            COIL_R * Math.cos(ph) + (Math.random() - 0.5) * COIL_JITTER, cGold);
+    }
+    bulbStats.filament = nFil; bulbStats.coil = nCoil;
+    // contact tip, 2%: a small cluster at the foot
+    for (let k = 0; k < nTip; k++) {
+      const r = 0.12 * Math.cbrt(Math.random()), th = Math.random() * Math.PI * 2, ph = Math.acos(Math.random() * 2 - 1);
+      place(r * Math.sin(ph) * Math.cos(th), -1.48 + r * Math.cos(ph), r * Math.sin(ph) * Math.sin(th), cLogoWhite);
+    }
+    bulbStats.tip = nTip;
+    // remaining 6%: parked, as the brain form does
+    for (let k = 0; k < nPark; k++) {
+      ambientXYZ(posBulb, i); put(colBulb, i, cDim);
+      sBulb[i] = PARKED_SCALE;
+      i++;
+    }
+    bulbStats.parked = nPark;
+    return i;
+  }
+  buildBulb();
+
   /* ── form: scatter ──────────────────────────────────────────────── */
   for (let i = 0; i < FORM_N; i++) {
     posScatter[i*3]   = (Math.random()-0.5)*9;
@@ -1400,31 +1544,31 @@ import * as THREE from 'three';
   /* ── ambient field: same place in every form ────────────────────── */
   for (let i = FORM_N; i < COUNT; i++) {
     ambientXYZ(posBrain, i);
-    posLogo[i*3] = posCoin[i*3] = posScatter[i*3] = posBrain[i*3];
-    posLogo[i*3+1] = posCoin[i*3+1] = posScatter[i*3+1] = posBrain[i*3+1];
-    posLogo[i*3+2] = posCoin[i*3+2] = posScatter[i*3+2] = posBrain[i*3+2];
+    posLogo[i*3] = posCoin[i*3] = posBulb[i*3] = posScatter[i*3] = posBrain[i*3];
+    posLogo[i*3+1] = posCoin[i*3+1] = posBulb[i*3+1] = posScatter[i*3+1] = posBrain[i*3+1];
+    posLogo[i*3+2] = posCoin[i*3+2] = posBulb[i*3+2] = posScatter[i*3+2] = posBrain[i*3+2];
     const c = isTeal[i] ? cTeal : cWhite;
-    put(colBrain, i, c); put(colLogo, i, c); put(colCoin, i, c); put(colScatter, i, c);
+    put(colBrain, i, c); put(colLogo, i, c); put(colCoin, i, c); put(colBulb, i, c); put(colScatter, i, c);
   }
 
-  const FORMS = { brain: posBrain, logo: posLogo, coin: posCoin, scatter: posScatter };
-  const FORM_COLS = { brain: colBrain, logo: colLogo, coin: colCoin, scatter: colScatter };
-  // base group rotation per form: the brain's pose; coin and logo face the camera
-  const BASE_ROT = { brain: [RX, RY], logo: [0, 0], coin: [0, 0], scatter: [0, 0] };
-  const SWAY_AMP = { brain: 0.30, logo: 0.25, coin: 0.20, scatter: 0.30 };
+  const FORMS = { brain: posBrain, logo: posLogo, coin: posCoin, bulb: posBulb, scatter: posScatter };
+  const FORM_COLS = { brain: colBrain, logo: colLogo, coin: colCoin, bulb: colBulb, scatter: colScatter };
+  // base group rotation per form: the brain's pose; coin, bulb and logo face the camera
+  const BASE_ROT = { brain: [RX, RY], logo: [0, 0], coin: [0, 0], bulb: [BULB_TILT, 0], scatter: [0, 0] };
+  const SWAY_AMP = { brain: 0.30, logo: 0.25, coin: 0.20, bulb: 0.20, scatter: 0.30 };
 
-  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats, coin: coinStats,
+  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats, coin: coinStats, bulb: bulbStats,
                        formA: 'brain', formB: 'brain', t: 0, form: 'brain', scattered: false };
   if (window.TURNSTYL) window.TURNSTYL.sceneStats = sceneStats;
 
-  const SIZES = { brain: sBrain, logo: sLogo, coin: sCoin, scatter: sScatter };
-  const OPACITY = { brain: BRAIN_OPACITY, logo: OTHER_OPACITY, coin: OTHER_OPACITY, scatter: OTHER_OPACITY };
+  const SIZES = { brain: sBrain, logo: sLogo, coin: sCoin, bulb: sBulb, scatter: sScatter };
+  const OPACITY = { brain: BRAIN_OPACITY, logo: OTHER_OPACITY, coin: OTHER_OPACITY, bulb: BULB_OPACITY, scatter: OTHER_OPACITY };
   cur.set(posBrain);
 
   /* ── keyframes: one per section, in document order ──────────────── */
-  // hero = brain, story 1 (pulse) = coin, story 2 (reform) = brain,
+  // hero = brain, story 1 (pulse) = coin, story 2 (reform) = bulb,
   // story 3 (scatter) = scatter, story 4 (reform) = logo, console = logo
-  const KEY_FORMS = ['brain', 'coin', 'brain', 'scatter', 'logo', 'logo'];
+  const KEY_FORMS = ['brain', 'coin', 'bulb', 'scatter', 'logo', 'logo'];
   const SECTIONS = Array.from(document.querySelectorAll('section[data-state]'));
   const keyY = new F(Math.max(1, SECTIONS.length));
   const keyForm = SECTIONS.map(function(_, i){ return KEY_FORMS[i] || 'logo'; });
@@ -1618,7 +1762,7 @@ import * as THREE from 'three';
     group.scale.setScalar(fitScale);
     group.updateMatrixWorld();
 
-    /* material opacity follows the shown form: 0.7 on the brain, 0.85 elsewhere */
+    /* material opacity follows the shown form: 0.7 brain, 0.8 bulb, 0.85 elsewhere */
     const wantOp = OPACITY[shownForm] || OTHER_OPACITY;
     mat.opacity += (wantOp - mat.opacity) * (reduced ? 1 : 1 - Math.exp(-3 * dt));
 

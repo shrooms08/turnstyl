@@ -404,6 +404,24 @@ def serve(
 
     from .api import db_path
 
+    # Bind-check first: uvicorn reports "address already in use" only after we
+    # would have printed a URL that serves someone else's process.
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError as e:
+        probe.close()
+        fail(
+            f"turnstyl: cannot serve on 127.0.0.1:{port}: {e}.\n"
+            f"  Something is already listening there. Find it with "
+            f"'lsof -nP -iTCP:{port} -sTCP:LISTEN', or pass a different --port."
+        )
+        raise
+    probe.close()
+
     target = db_path()
     console.print(
         Text(f"turnstyl serving http://127.0.0.1:{port}", style="bold")

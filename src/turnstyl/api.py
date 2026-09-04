@@ -95,6 +95,25 @@ def read_archived_job(path: Path, job_id: str) -> dict[str, Any] | None:
         return None
 
 
+def record_count(path: Path) -> int:
+    """State keys + entities + journal events held in the store.
+
+    Counted over a read-only connection rather than the SDK's list methods,
+    which clamp their limits and so cannot report a true total. Archived
+    entities are deliberately not included: this is a count of what the agent
+    is actively carrying.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        total = 0
+        for table in ("state_documents", "entities", "journal_events"):
+            total += conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        conn.close()
+    except sqlite3.Error:
+        return 0
+    return total
+
+
 def archived_job_ids(path: Path) -> list[str]:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -119,6 +138,7 @@ def api_status() -> dict[str, Any]:
         "db_path": str(path),
         "db_exists": exists,
         "db_size_bytes": path.stat().st_size if exists else 0,
+        "records": record_count(path) if exists else 0,
         "tenant": TENANT_ID,
         "agent_address": os.environ.get("AGENT_ADDRESS"),
         "receipts_address": os.environ.get("RECEIPTS_ADDRESS"),

@@ -1,88 +1,1023 @@
-<!doctype html>
+<!DOCTYPE html>
+<html lang="en"><head>
 <meta charset="utf-8">
-<title>turnstyl</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>turnstyl — an agent that never forgets who paid</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&family=Outfit:wght@200;300;400&family=Work+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style></style>
 <style>
-  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-         margin: 1.5rem; line-height: 1.4; }
-  pre  { white-space: pre-wrap; word-break: break-word; }
-  h2   { margin: 1.5rem 0 .4rem; font-size: 1rem; }
-  a    { color: inherit; }
+:root{
+  --bg:#000;
+  --ink:#EFECE6;
+  --dim:#9C968C;
+  --mute:#615C55;
+  --line:rgba(255,255,255,.09);
+  --line-2:rgba(255,255,255,.16);
+  --card:#070707;
+  --card-2:#0B0B0B;
+  --gold:#E2B04A;
+  --violet:#7F77DD;
+  --red:#E5484D;
+  --sans:"Work Sans",system-ui,sans-serif;
+  --disp:"Outfit",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--sans);font-weight:300;font-size:17px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+}
+a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line-2)}
+a:hover{color:var(--gold);border-bottom-color:var(--gold)}
+::selection{background:var(--gold);color:#000}
+
+/* ── fixed WebGL stage ─────────────────────────────────────────────
+   THREE.JS MOUNT POINT.
+   A later, separate script attaches to #scene and renders the particle
+   form. It should read the active story state from:
+     document.body.dataset.state        // "ring" | "pulse" | "reform" | "scatter"
+     window.TURNSTYL.state              // same value
+     window.addEventListener('scenestate', e => e.detail.state)
+   and must honour document.body.classList.contains('memory-missing'),
+   which locks the state to "scatter".
+   The scene now lives at the end of this file (import map + module
+   script); nothing above this line was changed to accommodate it.
+   ─────────────────────────────────────────────────────────────────── */
+#scene{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;display:block;background:transparent}
+
+/* ── loader ─────────────────────────────────────────────────────── */
+#loader{position:fixed;inset:0;z-index:100;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;transition:opacity .9s ease}
+#loader.gone{opacity:0;pointer-events:none}
+#loader.off{display:none}
+.load-label{font-size:11px;letter-spacing:.34em;text-transform:uppercase;color:var(--mute)}
+.load-count{font-family:var(--disp);font-weight:200;font-size:88px;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.load-unit{font-family:var(--mono);font-weight:300;font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--mute)}
+.load-rule{width:180px;height:1px;background:var(--line);position:relative;overflow:hidden}
+.load-rule i{position:absolute;inset:0;background:var(--gold);transform-origin:left;transform:scaleX(0);transition:transform .4s linear}
+
+/* ── shell ──────────────────────────────────────────────────────── */
+.shell{position:relative;z-index:2}
+.wrap{width:100%;max-width:1160px;margin:0 auto;padding:0 40px}
+.topbar{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:26px 40px;pointer-events:auto}
+.topbar.shifted{padding-top:54px}
+.mark{font-family:var(--disp);font-weight:300;font-size:15px;letter-spacing:.02em}
+.mark b{font-weight:400}
+.status{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim)}
+.status .row{display:flex;align-items:center;gap:8px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--mute);flex:none}
+.dot.on{background:#4FB56E;box-shadow:0 0 0 3px rgba(79,181,110,.14)}
+.dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(229,72,77,.14)}
+.chain{color:var(--mute)}
+.chain a{color:var(--dim);border-bottom-color:var(--line)}
+
+/* ── memory banner ──────────────────────────────────────────────── */
+#banner{position:fixed;top:0;left:0;right:0;z-index:60;display:none;background:var(--red);color:#0A0000;
+  font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;padding:10px 40px;text-align:center;font-weight:500}
+body.memory-missing #banner{display:block}
+
+/* ── hero ───────────────────────────────────────────────────────── */
+.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:150px 0 110px}
+h1{font-family:var(--disp);font-weight:200;font-size:clamp(42px,6.6vw,88px);line-height:1.02;letter-spacing:-.025em;margin:0;max-width:19ch;text-wrap:balance}
+.hero .sub{margin:34px 0 0;font-size:19px;line-height:1.55;color:var(--dim);max-width:44ch;text-wrap:pretty}
+.hero .live{margin-top:46px;display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+.hero .live b{color:var(--gold);font-weight:400;font-variant-numeric:tabular-nums}
+.scrollcue{margin-top:82px;font-family:var(--mono);font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:#3A3733}
+
+/* ── story ──────────────────────────────────────────────────────── */
+.story{min-height:86vh;display:flex;align-items:center;padding:80px 0}
+.story .inner{max-width:760px}
+.story h2{font-family:var(--disp);font-weight:200;font-size:clamp(32px,4.4vw,58px);line-height:1.08;letter-spacing:-.02em;margin:0 0 30px;max-width:22ch;text-wrap:balance}
+.story p{margin:0 0 20px;font-size:18px;line-height:1.65;color:var(--dim);max-width:60ch;text-wrap:pretty}
+.story .kicker{font-family:var(--mono);font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:var(--mute);margin:0 0 26px}
+.story.danger h2{color:var(--red)}
+.livelink{margin-top:34px;padding-top:22px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.8;color:var(--dim);display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}
+.livelink .d{color:var(--gold);letter-spacing:.08em}
+.livelink .e{color:var(--mute);word-break:break-word;max-width:64ch}
+.reveal{opacity:0;transform:translateY(26px);transition:opacity 1s cubic-bezier(.2,.7,.2,1),transform 1s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1;transform:none}
+
+/* ── console ────────────────────────────────────────────────────── */
+.console{padding:70px 0 40px}
+.chead{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:28px}
+.chead h2{font-family:var(--disp);font-weight:200;font-size:34px;letter-spacing:-.01em;margin:0}
+.chead .meta{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);text-align:right}
+.card{background:var(--card);border:1px solid var(--line);padding:22px 24px;margin-bottom:14px}
+.card.tight{padding:18px 20px}
+.card h3{font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0 0 18px}
+.mono{font-family:var(--mono);font-weight:300;letter-spacing:.01em}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px 22px}
+.kv .k{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:5px}
+.kv .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-word}
+.kv .v.big{font-size:16px}
+.pill{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:400;letter-spacing:.16em;text-transform:uppercase;padding:4px 9px;border:1px solid var(--line-2);color:var(--dim);white-space:nowrap}
+.pill.gold{color:var(--gold);border-color:rgba(226,176,74,.5)}
+.pill.violet{color:var(--violet);border-color:rgba(127,119,221,.5)}
+.pill.red{color:var(--red);border-color:rgba(229,72,77,.5)}
+.pill.solid{background:var(--gold);color:#000;border-color:var(--gold)}
+.muted{color:var(--mute)}
+.cp{cursor:copy;border-bottom:1px dotted rgba(255,255,255,.2)}
+.cp:hover{color:var(--gold);border-bottom-color:var(--gold)}
+.cp.copied{color:var(--gold);border-bottom-color:var(--gold)}
+
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.step{background:var(--card-2);border:1px solid var(--line);padding:16px 16px 18px;display:flex;flex-direction:column;gap:12px;cursor:pointer;text-align:left;color:inherit;font:inherit;transition:border-color .25s ease,background .25s ease}
+.step:hover{border-color:var(--line-2)}
+.step.current{border-color:rgba(226,176,74,.55);background:#0C0A05}
+.step.open{border-color:var(--line-2);background:#101010}
+.step .no{display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute)}
+.step .nm{font-family:var(--disp);font-weight:300;font-size:19px;letter-spacing:.01em}
+.step .price{font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
+.step .price small{color:var(--mute);font-size:10px;letter-spacing:.16em;margin-left:5px}
+.step .facts{display:flex;flex-direction:column;gap:5px;font-family:var(--mono);font-size:11px;color:var(--mute);line-height:1.5}
+.step .txs{display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:11px}
+.step .txs a,.step .txs span{color:var(--dim);border-bottom-color:var(--line)}
+.tag{display:inline-block;font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--violet);border:1px solid rgba(127,119,221,.4);padding:2px 6px;align-self:flex-start}
+.out{margin-top:12px;background:#050505;border:1px solid var(--line);padding:18px 20px}
+.out .oh{display:flex;justify-content:space-between;gap:16px;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:14px}
+.out pre{margin:0;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;color:#CFCAC2;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
+
+.invoice{border-color:rgba(226,176,74,.4);background:#0B0904}
+.invoice .cmd{margin-top:16px;display:flex;align-items:center;gap:12px;background:#050505;border:1px solid var(--line);padding:12px 14px;font-family:var(--mono);font-size:12.5px;color:var(--gold);overflow-x:auto}
+.invoice .cmd button{flex:none;background:none;border:1px solid rgba(226,176,74,.4);color:var(--gold);font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;padding:5px 9px;cursor:pointer}
+.invoice .cmd button:hover{background:var(--gold);color:#000}
+.wait{margin-top:12px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:9px}
+.blip{width:5px;height:5px;border-radius:50%;background:var(--gold);animation:blip 1.8s ease-in-out infinite}
+@keyframes blip{0%,100%{opacity:.25}50%{opacity:1}}
+
+.ev{border-top:1px solid var(--line);padding:20px 0}
+.ev:first-of-type{border-top:0;padding-top:0}
+.ev .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+.ev .ts{font-family:var(--mono);font-size:11px;color:var(--mute);letter-spacing:.06em}
+.ev .stp{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase}
+.ev ul.acted{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
+.ev ul.acted li{font-size:15px;color:var(--ink);padding-left:16px;position:relative;line-height:1.5}
+.ev ul.acted li:before{content:"";position:absolute;left:0;top:.62em;width:6px;height:1px;background:var(--gold)}
+.mem{margin-top:16px;border:1px solid var(--line);background:#040404}
+.mem summary{cursor:pointer;list-style:none;padding:11px 14px;font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--violet);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.mem summary::-webkit-details-marker{display:none}
+.mem summary .n{color:var(--mute)}
+.mem[open] summary{border-bottom:1px solid var(--line)}
+.mem .lines{padding:14px;display:flex;flex-direction:column;gap:8px}
+.mem .lines code{font-family:var(--mono);font-weight:300;font-size:12.5px;line-height:1.7;color:#C8C3BA;white-space:pre-wrap;word-break:break-word;display:block;padding-left:18px;position:relative}
+.mem .lines code:before{content:"›";position:absolute;left:0;color:var(--violet)}
+
+table.jobs{width:100%;border-collapse:collapse}
+table.jobs th{text-align:left;font-family:var(--mono);font-weight:400;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);padding:0 14px 12px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+table.jobs td{padding:15px 14px 15px 0;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13.5px;color:var(--dim);vertical-align:middle}
+table.jobs tr:last-child td{border-bottom:0}
+table.jobs td a{color:var(--ink)}
+.empty{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);padding:26px 0}
+.gone-note{color:var(--red)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+.expl{margin-top:18px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.8;color:#C8C3BA;word-break:break-word}
+.outs{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.outs .o{display:flex;gap:14px;font-family:var(--mono);font-size:12px;color:var(--dim)}
+.back{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);border-bottom:0}
+.back:hover{color:var(--gold)}
+
+footer{border-top:1px solid var(--line);margin-top:90px;padding:34px 0 54px;display:flex;flex-wrap:wrap;gap:18px 40px;align-items:baseline;justify-content:space-between}
+footer .fmark{font-family:var(--disp);font-weight:300;font-size:15px}
+footer .fl{font-family:var(--mono);font-size:11.5px;color:var(--mute);display:flex;flex-wrap:wrap;gap:8px 22px;align-items:baseline}
+footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
+
+@media (max-width:1080px){
+  .steps{grid-template-columns:repeat(2,1fr)}
+  .grid2{grid-template-columns:1fr}
+}
+@media (max-width:720px){
+  .wrap{padding:0 22px}
+  .topbar{padding:20px 22px;flex-direction:column;align-items:flex-start;gap:10px}
+  .status{align-items:flex-start}
+  .hero{padding:190px 0 90px}
+  .steps{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){
+  .reveal{transition:none;opacity:1;transform:none}
+  .blip{animation:none}
+}
 </style>
+</head>
+<body>
 
-<h1>turnstyl</h1>
-<p id="mode"></p>
-<p><a href="/">all jobs</a> &middot; <a href="/api/docs">api docs</a></p>
 
-<div id="panes"></div>
+
+<canvas id="scene" aria-hidden="true"></canvas>
+
+<div id="loader">
+  <div class="load-label">loading memory</div>
+  <div class="load-count" id="loadCount">0</div>
+  <div class="load-unit" id="loadUnit">records</div>
+  <div class="load-rule"><i id="loadRule"></i></div>
+</div>
+
+<div id="banner" role="status">memory deleted</div>
+
+<div class="topbar" id="topbar">
+  <a class="mark" href="#top" style="border:0"><b>turnstyl</b></a>
+  <div class="status" id="statusCluster">
+    <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
+    <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
+  </div>
+</div>
+
+<div class="shell" id="top">
+
+  <section class="hero wrap" data-state="ring">
+    <div class="reveal in">
+      <h1>An agent that never forgets who paid.</h1>
+      <p class="sub">Paid per step in USDC on Base. Everything it knows lives in one memory file.</p>
+      <div class="live"><span class="dot on" id="liveDot"></span><span><b id="recCount">—</b> <span id="recLabel">records in memory</span></span></div>
+      <div class="scrollcue">scroll</div>
+    </div>
+  </section>
+
+  <section class="story wrap" data-state="pulse">
+    <div class="inner reveal">
+      <p class="kicker">01 — metering</p>
+      <h2>Every step is paid.</h2>
+      <p>Scope is free. It reads the contract, states what it will look at, and stops. Findings, patch and verify are sold one at a time — each with its own price, its own invoice, its own receipt.</p>
+      <p>The buyer pays on Base, and the agent commits a hash of its answer next to the payment. Money and output are recorded in the same place, in the same order they happened.</p>
+    </div>
+  </section>
+
+  <section class="story wrap" data-state="reform">
+    <div class="inner reveal">
+      <p class="kicker">02 — memory</p>
+      <h2>Restart it. It remembers.</h2>
+      <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer who has paid before gets credit — the next step runs before the invoice clears.</p>
+      <div class="livelink" id="latestDecision">
+        <span class="d">—</span><span class="e">waiting for the journal…</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="story wrap danger" data-state="scatter">
+    <div class="inner reveal">
+      <p class="kicker">03 — failure</p>
+      <h2>Delete the memory.</h2>
+      <p>Nothing on chain tells the agent it has met this buyer. It invoices the same address again for work already paid, and the second payment lands next to the first — two receipts, one answer, no way to tell from the ledger which one was owed.</p>
+    </div>
+  </section>
+
+  <section class="story wrap" data-state="reform">
+    <div class="inner reveal">
+      <p class="kicker">04 — the split</p>
+      <h2>The chain remembers the money. Not the reason.</h2>
+      <p>Base holds payments and output hashes. It does not hold findings, prices, cost history, or trust. A memo is opaque without the memory that wrote it: the same bytes mean "paid step 3 for a trusted buyer" or nothing at all.</p>
+    </div>
+  </section>
+
+  <section class="console wrap" id="console" data-state="ring">
+    <div class="chead">
+      <h2 id="consoleTitle">Operator console</h2>
+      <div class="meta" id="consoleMeta">polling every 3s</div>
+    </div>
+    <div id="consoleBody">
+      <div class="card"><div class="empty">connecting to memory…</div></div>
+    </div>
+  </section>
+
+  <footer class="wrap">
+    <div class="fmark">turnstyl</div>
+    <div class="fl">
+      <a href="https://github.com/shrooms08/turnstyl" target="_blank" rel="noopener">github.com/shrooms08/turnstyl</a>
+      <span id="footReceipts" class="muted">receipts —</span>
+      <span>memory by Sibyl Memory, payments on Base</span>
+    </div>
+  </footer>
+
+</div>
 
 <script>
-const params = new URLSearchParams(location.search);
-const job = params.get("job");
+(function(){
+  "use strict";
 
-function pane(title, id) {
-  const h = document.createElement("h2");
-  h.textContent = title;
-  const pre = document.createElement("pre");
-  pre.id = id;
-  pre.textContent = "loading...";
-  document.getElementById("panes").append(h, pre);
-}
-
-async function load(url, id) {
-  const pre = document.getElementById(id);
-  if (!pre) return;
-  try {
-    const res = await fetch(url);
-    const body = await res.json();
-    pre.textContent = JSON.stringify(body, null, 2);
-    return body;
-  } catch (err) {
-    pre.textContent = "request failed: " + err;
-    return null;
+  /* ── scene state bus (read by the later three.js script) ───────── */
+  var TURNSTYL = window.TURNSTYL = { state:"ring", memoryMissing:false };
+  function setState(s){
+    if(TURNSTYL.memoryMissing) s = "scatter";
+    if(TURNSTYL.state === s) return;
+    TURNSTYL.state = s;
+    document.body.dataset.state = s;
+    window.dispatchEvent(new CustomEvent("scenestate",{detail:{state:s}}));
   }
-}
+  document.body.dataset.state = "ring";
 
-function jobLinks(jobs) {
-  const pre = document.getElementById("jobs");
-  if (!pre || !jobs || !jobs.length) return;
-  const nav = document.createElement("p");
-  nav.id = "joblinks";
-  for (const j of jobs) {
-    const a = document.createElement("a");
-    a.href = "/?job=" + encodeURIComponent(j.job_id);
-    a.textContent = j.job_id + " (" + j.status + ")";
-    nav.append(a, document.createTextNode(" · "));
+  /* ── helpers ───────────────────────────────────────────────────── */
+  var $ = function(s,r){ return (r||document).querySelector(s); };
+  function esc(v){
+    return String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
-  const existing = document.getElementById("joblinks");
-  if (existing) existing.replaceWith(nav); else pre.before(nav);
-}
+  function trunc(v){
+    var s = String(v==null?"":v);
+    if(s.length <= 13) return s;
+    var head = s.slice(0, s.slice(0,2)==="0x" ? 6 : 6);
+    return head + "…" + s.slice(-4);
+  }
+  function cp(v, cls){
+    if(v==null||v==="") return '<span class="mono muted">—</span>';
+    return '<span class="mono cp '+(cls||"")+'" data-copy="'+esc(v)+'" title="'+esc(v)+'">'+esc(trunc(v))+'</span>';
+  }
+  function isFake(h){ return String(h||"").toLowerCase().indexOf("0xfake") === 0; }
+  function txLink(hash){
+    if(!hash) return "";
+    if(isFake(hash)) return '<span class="mono cp" data-copy="'+esc(hash)+'" title="'+esc(hash)+'">'+esc(trunc(hash))+'</span>';
+    var ex = (S.status && S.status.explorer) || "https://sepolia.basescan.org";
+    return '<a class="mono" href="'+esc(ex)+'/tx/'+esc(hash)+'" target="_blank" rel="noopener" title="'+esc(hash)+'">'+esc(trunc(hash))+'</a>';
+  }
+  function usdc(n){
+    if(n==null) return "—";
+    return Number(n).toFixed(2);
+  }
+  function rel(ts){
+    if(!ts) return "—";
+    var t = Date.parse(ts); if(isNaN(t)) return String(ts);
+    var d = Math.max(0,(Date.now()-t)/1000);
+    if(d < 60) return Math.round(d)+"s ago";
+    if(d < 3600) return Math.round(d/60)+"m ago";
+    if(d < 86400) return Math.round(d/3600)+"h ago";
+    return Math.round(d/86400)+"d ago";
+  }
+  function clock(ts){
+    var t = Date.parse(ts); if(isNaN(t)) return String(ts||"—");
+    var d = new Date(t), p = function(n){ return (n<10?"0":"")+n; };
+    return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+  }
+  function statusPill(s){
+    var cls = "";
+    if(s === "complete") cls = "violet";
+    else if(s === "running") cls = "gold";
+    else if(s === "awaiting_payment") cls = "gold";
+    return '<span class="pill '+cls+'">'+esc(String(s||"unknown").replace(/_/g," "))+'</span>';
+  }
+  function decisionPill(d){
+    var cls = (d === "RUN_ON_CREDIT") ? "gold" : (d === "REFUSE" ? "red" : "");
+    return '<span class="pill '+cls+'">'+esc(d||"—")+'</span>';
+  }
+  function trustPill(t){
+    var cls = t === "trusted" ? "gold" : (t === "blocked" ? "red" : "");
+    return '<span class="pill '+cls+'">'+esc(t||"unknown")+'</span>';
+  }
 
-document.getElementById("mode").textContent =
-  job ? "job " + job : "polling /api/status and /api/jobs every 3s";
+  /* ── state ─────────────────────────────────────────────────────── */
+  var S = {
+    status:null, jobs:null, job:null, buyer:null, journal:null,
+    missing:false, connected:false, jobId:null,
+    openStep:null, openMem:{}, memTouched:{}
+  };
 
-pane("/api/status", "status");
-if (job) {
-  pane("/api/jobs/" + job, "job");
-  pane("/api/buyers/<buyer>", "buyer");
-  pane("/api/journal?job=" + job, "journal");
-} else {
-  pane("/api/jobs", "jobs");
-}
+  function jobParam(){
+    var m = /[?&]job=([^&#]+)/.exec(location.search);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
 
-async function tick() {
-  await load("/api/status", "status");
-  if (job) {
-    const detail = await load("/api/jobs/" + encodeURIComponent(job), "job");
-    if (detail && detail.buyer) {
-      await load("/api/buyers/" + encodeURIComponent(detail.buyer), "buyer");
+  /* ── fetch ─────────────────────────────────────────────────────── */
+  function api(path){
+    return fetch(path,{cache:"no-store",headers:{accept:"application/json"}})
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+      .catch(function(){ return null; });
+  }
+
+  function poll(){
+    var id = S.jobId;
+    var calls = [ api("/api/status"), api("/api/jobs"), api("/api/journal?limit=50") ];
+    calls.push(id ? api("/api/jobs/"+encodeURIComponent(id)) : Promise.resolve(null));
+    calls.push(id ? api("/api/journal?job="+encodeURIComponent(id)+"&limit=50") : Promise.resolve(null));
+    return Promise.all(calls).then(function(r){
+      var status = r[0], jobs = r[1], gjournal = r[2], job = r[3], jjournal = r[4];
+      S.connected = !!status;
+      if(status) S.status = status;
+      if(jobs) S.jobs = jobs;
+      if(job) S.job = job; else if(id && jobs) S.job = S.job;
+      S.journal = id ? (jjournal || null) : (gjournal || null);
+      S.globalJournal = gjournal || S.globalJournal || null;
+
+      var missing = false;
+      [status, jobs, job, gjournal, jjournal].forEach(function(x){
+        if(x && x.memory_missing === true) missing = true;
+      });
+      if(status && status.db_exists === false) missing = true;
+      S.missing = missing;
+
+      var buyerAddr = S.job && S.job.buyer;
+      if(!missing && id && buyerAddr){
+        return api("/api/buyers/"+encodeURIComponent(buyerAddr)).then(function(b){
+          if(b) S.buyer = b;
+          if(b && b.memory_missing === true) S.missing = true;
+          render();
+        });
+      }
+      if(!id || missing) S.buyer = null;
+      render();
+    });
+  }
+
+  /* ── record count ──────────────────────────────────────────────── */
+  function records(){
+    var st = S.status;
+    if(!st) return { n:null, label:"records in memory", unit:"records" };
+    if(typeof st.records === "number")
+      return { n:st.records, label:"records in memory", unit:"records" };
+    if(typeof st.db_size_bytes === "number")
+      return { n:Math.round(st.db_size_bytes/1024), label:"KB in memory", unit:"KB in memory" };
+    return { n:null, label:"records in memory", unit:"records" };
+  }
+
+  /* ── render: chrome ────────────────────────────────────────────── */
+  function renderChrome(){
+    var st = S.status || {};
+    document.body.classList.toggle("memory-missing", !!S.missing);
+    TURNSTYL.memoryMissing = !!S.missing;
+    $("#topbar").classList.toggle("shifted", !!S.missing);
+    if(S.missing){
+      $("#banner").textContent = "memory deleted: " + (st.db_path || "unknown path");
+      setState("scatter");
     }
-    await load("/api/journal?job=" + encodeURIComponent(job) + "&limit=50", "journal");
+
+    var dot = $("#dbDot");
+    dot.className = "dot " + (S.missing ? "off" : (st.db_exists ? "on" : (S.connected ? "off" : "")));
+    $("#dbPath").textContent = st.db_path || (S.connected ? "no path reported" : "api unreachable");
+
+    var ex = st.explorer || "https://sepolia.basescan.org";
+    var chain = '<span>Base Sepolia</span>';
+    if(st.receipts_address){
+      chain += '<a href="'+esc(ex)+'/address/'+esc(st.receipts_address)+'" target="_blank" rel="noopener" title="'+esc(st.receipts_address)+'">'+esc(trunc(st.receipts_address))+'</a>';
+    } else {
+      chain += '<span class="muted mono">receipts —</span>';
+    }
+    $("#chainRow").innerHTML = chain;
+
+    var rc = records();
+    $("#recCount").textContent = rc.n == null ? "—" : rc.n.toLocaleString();
+    $("#recLabel").textContent = S.missing ? "memory file deleted" : rc.label;
+    $("#liveDot").className = "dot " + (S.missing ? "off" : "on");
+
+    var f = $("#footReceipts");
+    if(st.receipts_address){
+      f.innerHTML = 'receipts <a class="mono" href="'+esc(ex)+'/address/'+esc(st.receipts_address)+'" target="_blank" rel="noopener" title="'+esc(st.receipts_address)+'">'+esc(trunc(st.receipts_address))+'</a>';
+      f.className = "";
+    }
+
+    // story 02 live line — newest event across all jobs
+    var g = S.globalJournal, box = $("#latestDecision");
+    if(S.missing){
+      box.innerHTML = '<span class="d gone-note">NO JOURNAL</span><span class="e">the memory file is gone; there is no record of any decision</span>';
+    } else if(g && g.events && g.events.length){
+      var e = g.events[0];
+      var line = (e.evaluated && e.evaluated[0]) || "no evaluated lines recorded";
+      box.innerHTML = '<span class="d">'+esc(e.decision||"—")+'</span><span class="e">'+esc(line)+'</span>';
+    } else {
+      box.innerHTML = '<span class="d muted">—</span><span class="e">no decisions in memory yet</span>';
+    }
+  }
+
+  /* ── render: console ───────────────────────────────────────────── */
+  function stepState(step, job){
+    if(Number(step.price_usdc) === 0) return { label:"free", cls:"" };
+    if(step.paid) return { label:"paid", cls:"violet" };
+    var inv = job && job.open_invoice;
+    if(inv && inv.step === step.step && !inv.paid) return { label:"awaiting payment", cls:"gold" };
+    if(step.output) return { label:"on credit", cls:"gold" };
+    return { label:"not started", cls:"" };
+  }
+
+  function stepCard(step, job){
+    var st = stepState(step, job);
+    var isCur = Number(job.current_step) === Number(step.step);
+    var open = S.openStep === step.step;
+    var facts = [];
+    if(step.tokens_in != null || step.tokens_out != null)
+      facts.push("tokens " + (step.tokens_in==null?"—":step.tokens_in) + " in / " + (step.tokens_out==null?"—":step.tokens_out) + " out");
+    if(step.seconds != null) facts.push(Number(step.seconds).toFixed(1) + "s");
+    if(step.step === 3 && step.compiles != null)
+      facts.push('<span style="color:'+(step.compiles?"#4FB56E":"#E5484D")+'">PATCH COMPILES ' + (step.compiles ? "yes" : "no") + "</span>");
+
+    var txs = "";
+    if(step.pay_tx) txs += '<div>pay ' + txLink(step.pay_tx) + "</div>";
+    if(step.commit_tx) txs += '<div>commit ' + txLink(step.commit_tx) + "</div>";
+
+    return '<button class="step'+(isCur?" current":"")+(open?" open":"")+'" data-step="'+step.step+'" type="button">' +
+      '<div class="no"><span>step '+step.step+'</span>'+(isCur?'<span class="pill solid">current</span>':"")+'</div>' +
+      '<div class="nm">'+esc(step.name||"—")+'</div>' +
+      '<div class="price">'+usdc(step.price_usdc)+'<small>USDC</small></div>' +
+      '<div><span class="pill '+st.cls+'">'+st.label+'</span></div>' +
+      (step.cached ? '<span class="tag">served from memory</span>' : "") +
+      (facts.length ? '<div class="facts">'+facts.map(function(f){ return "<div>"+f+"</div>"; }).join("")+"</div>" : "") +
+      (txs ? '<div class="txs">'+txs+"</div>" : "") +
+      "</button>";
+  }
+
+  function outputBlock(job){
+    if(S.openStep == null) return "";
+    var step = (job.steps||[]).filter(function(s){ return s.step === S.openStep; })[0];
+    if(!step) return "";
+    return '<div class="out">' +
+      '<div class="oh"><span>step '+step.step+" · "+esc(step.name||"")+" output</span>" +
+      '<span>sha256 '+(step.output_sha256 ? cp(step.output_sha256) : "—")+"</span></div>" +
+      "<pre>"+esc(step.output || "no output recorded for this step")+"</pre></div>";
+  }
+
+  function invoicePanel(job){
+    var inv = job.open_invoice;
+    if(!inv || inv.paid) return "";
+    var cmd = ".venv/bin/python scripts/buyer_pay.py " + job.job_id + " " + inv.step;
+    return '<div class="card invoice"><h3>open invoice — step '+esc(inv.step)+'</h3>' +
+      '<div class="kv">' +
+        '<div><div class="k">amount</div><div class="v big">'+usdc(inv.amount_usdc)+' USDC</div></div>' +
+        '<div><div class="k">memo</div><div class="v">'+cp(inv.memo)+'</div></div>' +
+        '<div><div class="k">invoice block</div><div class="v">'+esc(inv.invoice_block==null?"—":inv.invoice_block)+'</div></div>' +
+      '</div>' +
+      '<div class="cmd"><code>'+esc(cmd)+'</code><button type="button" data-copy="'+esc(cmd)+'">copy</button></div>' +
+      '<div class="wait"><span class="blip"></span>waiting for payment on Base</div></div>';
+  }
+
+  function timeline(){
+    var j = S.journal;
+    var events = (j && j.events) || [];
+    if(S.missing)
+      return '<div class="card"><h3>decision timeline</h3><div class="empty gone-note">journal gone — every decision this agent recorded lived in the deleted memory file</div></div>';
+    if(!events.length)
+      return '<div class="card"><h3>decision timeline</h3><div class="empty">no decisions recorded for this job</div></div>';
+
+    var rows = events.map(function(e, i){
+      var key = (e.ts||"") + ":" + (e.step||"") + ":" + (e.decision||"");
+      var isOpen = S.memTouched[key] != null ? S.memTouched[key] : (i === 0);
+      var acted = (e.acted||[]).map(function(a){ return "<li>"+esc(a)+"</li>"; }).join("");
+      var evaluated = (e.evaluated||[]);
+      return '<div class="ev">' +
+        '<div class="top">'+decisionPill(e.decision) +
+          '<span class="ts">'+esc(clock(e.ts))+'</span>' +
+          '<span class="stp">step '+esc(e.step==null?"—":e.step)+'</span>' +
+          (e.buyer ? '<span class="ts">'+esc(trunc(e.buyer))+'</span>' : "") +
+        '</div>' +
+        (acted ? '<ul class="acted">'+acted+"</ul>" : '<div class="empty" style="padding:0">no actions recorded</div>') +
+        '<details class="mem" data-mem="'+esc(key)+'"'+(isOpen?" open":"")+'>' +
+          '<summary>memory read<span class="n">'+evaluated.length+' lines</span></summary>' +
+          '<div class="lines">' +
+            (evaluated.length ? evaluated.map(function(l){ return "<code>"+esc(l)+"</code>"; }).join("")
+                              : '<code class="muted">nothing evaluated</code>') +
+          "</div>" +
+        "</details>" +
+        "</div>";
+    }).join("");
+    return '<div class="card"><h3>decision timeline — newest first</h3>'+rows+"</div>";
+  }
+
+  function buyerCard(){
+    if(S.missing)
+      return '<div class="card"><h3>buyer ledger</h3><div class="empty gone-note">no ledger — paid steps, trust tier and outstanding invoices were all in the deleted file</div></div>';
+    var b = S.buyer;
+    if(!b || !b.ledger)
+      return '<div class="card"><h3>buyer ledger</h3><div class="empty">buyer unknown to memory</div></div>';
+    var L = b.ledger, T = b.trust || {};
+    function cell(k,v){ return '<div><div class="k">'+esc(k)+'</div><div class="v">'+v+"</div></div>"; }
+    var outs = (L.outstanding||[]).map(function(o){
+      return '<div class="o"><span>'+esc(o.job_id)+'</span><span>step '+esc(o.step)+'</span><span>'+usdc(o.amount_usdc)+' USDC</span></div>';
+    }).join("");
+    return '<div class="card"><h3>buyer ledger</h3>' +
+      '<div class="kv">' +
+        cell("trust tier", trustPill(L.trust_tier || T.trust_tier)) +
+        cell("paid steps", esc(L.paid_steps==null?"—":L.paid_steps)) +
+        cell("usdc paid", usdc(L.paid_usdc)) +
+        cell("open invoices", esc(L.open_invoices==null?"—":L.open_invoices)) +
+        cell("unpaid, prior jobs", esc(L.unpaid_from_prior_jobs==null?"—":L.unpaid_from_prior_jobs)) +
+        cell("defaults", esc(L.defaults==null?"—":L.defaults)) +
+        cell("paid since default", esc(L.consecutive_paid_since_default==null?"—":L.consecutive_paid_since_default)) +
+        cell("steps until credit", esc(T.steps_until_credit==null?"—":T.steps_until_credit)) +
+        (T.would_decide ? cell("would decide", decisionPill(T.would_decide)) : "") +
+      "</div>" +
+      (T.explanation ? '<div class="expl">'+esc(T.explanation)+"</div>" : "") +
+      (outs ? '<div class="outs"><div class="k" style="font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)">outstanding</div>'+outs+"</div>" : "") +
+      "</div>";
+  }
+
+  function jobView(){
+    var job = S.job;
+    if(S.missing)
+      return '<div class="card"><h3>job '+esc(S.jobId)+'</h3><div class="empty gone-note">job gone — steps, prices, outputs and invoices were stored in the deleted memory file</div></div>' +
+        timeline() + buyerCard();
+    if(!job)
+      return '<div class="card"><h3>job '+esc(S.jobId)+'</h3><div class="empty">job not found in memory</div></div>';
+
+    var head = '<div class="card"><div class="kv">' +
+      '<div><div class="k">job id</div><div class="v big">'+cp(job.job_id)+'</div></div>' +
+      '<div><div class="k">buyer</div><div class="v">'+cp(job.buyer)+'</div></div>' +
+      '<div><div class="k">contract hash</div><div class="v">'+cp(job.contract_hash)+'</div></div>' +
+      '<div><div class="k">status</div><div class="v">'+statusPill(job.status)+'</div></div>' +
+      '<div><div class="k">current step</div><div class="v">'+esc(job.current_step==null?"—":job.current_step)+' of 4</div></div>' +
+      (job.archived ? '<div><div class="k">source</div><div class="v muted">archived, read-only</div></div>' : "") +
+      "</div></div>";
+
+    var steps = '<div class="card"><h3>metered steps</h3><div class="steps">' +
+      (job.steps||[]).map(function(s){ return stepCard(s, job); }).join("") +
+      "</div>" + outputBlock(job) + "</div>";
+
+    return head + steps + invoicePanel(job) + timeline() + buyerCard();
+  }
+
+  function listView(){
+    if(S.missing)
+      return '<div class="card"><h3>jobs</h3><div class="empty gone-note">no jobs — the index of every job the agent has run was in the deleted memory file</div></div>';
+    var d = S.jobs;
+    if(!d) return '<div class="card"><div class="empty">connecting to memory…</div></div>';
+    var jobs = d.jobs || [];
+    if(!jobs.length) return '<div class="card"><h3>jobs</h3><div class="empty">no jobs in memory</div></div>';
+    var rows = jobs.map(function(j){
+      return "<tr>" +
+        '<td><a href="?job='+encodeURIComponent(j.job_id)+'#console">'+esc(j.job_id)+"</a></td>" +
+        "<td>"+cp(j.buyer)+"</td>" +
+        "<td>"+statusPill(j.status)+"</td>" +
+        "<td>"+esc(j.current_step==null?"—":j.current_step)+"</td>" +
+        '<td class="muted">'+esc(rel(j.updated_at))+"</td>" +
+        '<td class="muted">'+(j.archived?"archived":"live")+"</td>" +
+        "</tr>";
+    }).join("");
+    return '<div class="card"><h3>jobs in memory</h3><table class="jobs">' +
+      "<thead><tr><th>job id</th><th>buyer</th><th>status</th><th>step</th><th>updated</th><th>source</th></tr></thead>" +
+      "<tbody>"+rows+"</tbody></table></div>";
+  }
+
+  function render(){
+    renderChrome();
+    var title = $("#consoleTitle"), meta = $("#consoleMeta"), body = $("#consoleBody");
+    if(S.jobId){
+      title.innerHTML = 'Job <span class="mono" style="font-size:26px">'+esc(S.jobId)+"</span>";
+      meta.innerHTML = '<a class="back" href="./#console">← all jobs</a>';
+      body.innerHTML = jobView();
+    } else {
+      title.textContent = "Operator console";
+      var n = (S.jobs && S.jobs.jobs) ? S.jobs.jobs.length : 0;
+      meta.textContent = S.missing ? "memory missing" : (S.connected ? n + " jobs · polling 3s" : "api unreachable · retrying");
+      body.innerHTML = listView();
+    }
+  }
+
+  /* ── interactions ──────────────────────────────────────────────── */
+  document.addEventListener("click", function(e){
+    var stepBtn = e.target.closest && e.target.closest(".step");
+    var copyEl = e.target.closest && e.target.closest("[data-copy]");
+    if(copyEl){
+      e.stopPropagation();
+      var val = copyEl.getAttribute("data-copy");
+      var done = function(){
+        var was = copyEl.textContent;
+        copyEl.classList.add("copied");
+        if(copyEl.tagName === "BUTTON"){ copyEl.textContent = "copied"; setTimeout(function(){ copyEl.textContent = was; copyEl.classList.remove("copied"); },1200); }
+        else setTimeout(function(){ copyEl.classList.remove("copied"); },1200);
+      };
+      if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(val).then(done, done);
+      else done();
+      return;
+    }
+    if(stepBtn){
+      var n = Number(stepBtn.getAttribute("data-step"));
+      S.openStep = (S.openStep === n) ? null : n;
+      render();
+    }
+  });
+
+  document.addEventListener("toggle", function(e){
+    var d = e.target;
+    if(d && d.classList && d.classList.contains("mem")){
+      S.memTouched[d.getAttribute("data-mem")] = d.open;
+    }
+  }, true);
+
+  window.addEventListener("popstate", function(){ S.jobId = jobParam(); S.job = null; S.buyer = null; S.openStep = null; render(); poll(); });
+
+  /* ── scroll: reveals + scene state ─────────────────────────────── */
+  var sections = Array.prototype.slice.call(document.querySelectorAll("[data-state]"));
+  if("IntersectionObserver" in window){
+    var revIO = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){ if(en.isIntersecting) en.target.classList.add("in"); });
+    },{ rootMargin:"0px 0px -18% 0px", threshold:.15 });
+    document.querySelectorAll(".reveal").forEach(function(el){ revIO.observe(el); });
   } else {
-    const body = await load("/api/jobs", "jobs");
-    if (body) jobLinks(body.jobs);
+    document.querySelectorAll(".reveal").forEach(function(el){ el.classList.add("in"); });
+  }
+  function pickState(){
+    var mid = window.innerHeight * 0.42, best = null, bestD = Infinity;
+    sections.forEach(function(s){
+      var r = s.getBoundingClientRect();
+      if(r.bottom < 0 || r.top > window.innerHeight) return;
+      var d = Math.abs(r.top - mid) < Math.abs(r.bottom - mid) ? Math.abs(r.top - mid) : Math.abs(r.bottom - mid);
+      if(r.top <= mid && r.bottom >= mid) d = 0;
+      if(d < bestD){ bestD = d; best = s; }
+    });
+    if(best) setState(best.getAttribute("data-state"));
+  }
+  var ticking = false;
+  window.addEventListener("scroll", function(){
+    if(ticking) return; ticking = true;
+    requestAnimationFrame(function(){ pickState(); ticking = false; });
+  }, {passive:true});
+  window.addEventListener("resize", pickState);
+
+  /* ── canvas sizing (the later script may take this over) ───────── */
+  var cv = $("#scene");
+  function sizeCanvas(){
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = Math.floor(window.innerWidth * dpr);
+    cv.height = Math.floor(window.innerHeight * dpr);
+  }
+  sizeCanvas();
+  window.addEventListener("resize", sizeCanvas);
+
+  /* ── loader ────────────────────────────────────────────────────── */
+  var loader = $("#loader"), lCount = $("#loadCount"), lUnit = $("#loadUnit"), lRule = $("#loadRule");
+  var t0 = Date.now(), firstDone = false, hidden = false;
+  requestAnimationFrame(function(){ lRule.style.transitionDuration = "2.5s"; lRule.style.transform = "scaleX(1)"; });
+
+  function countTo(target, unit){
+    lUnit.textContent = unit;
+    var from = Number(String(lCount.textContent).replace(/[^0-9]/g,"")) || 0;
+    var start = performance.now(), dur = 900;
+    (function tick(now){
+      var p = Math.min(1, (now - start)/dur), e = 1 - Math.pow(1-p, 3);
+      lCount.textContent = Math.round(from + (target-from)*e).toLocaleString();
+      if(p < 1) requestAnimationFrame(tick);
+    })(performance.now());
+  }
+  function hideLoader(){
+    if(hidden) return; hidden = true;
+    loader.classList.add("gone");
+    setTimeout(function(){ loader.classList.add("off"); pickState(); }, 950);
+  }
+  function maybeHide(){
+    var wait = Math.max(0, 2500 - (Date.now() - t0));
+    setTimeout(hideLoader, wait);
+  }
+
+  poll().then(function(){
+    firstDone = true;
+    var rc = records();
+    countTo(rc.n == null ? 0 : rc.n, S.missing ? "memory deleted" : rc.unit);
+    maybeHide();
+  });
+  setTimeout(function(){ if(!firstDone){ lUnit.textContent = "no memory reachable"; maybeHide(); } }, 2600);
+  setTimeout(hideLoader, 5200);
+
+  S.jobId = jobParam();
+  render();
+  setInterval(poll, 3000);
+  pickState();
+})();
+</script>
+
+
+
+<!-- ── three.js particle scene ───────────────────────────────────────
+     Attaches to #scene. Reads the story state the page publishes on
+     document.body.dataset.state / the 'scenestate' event, and locks to
+     scatter while body.memory-missing is set. No build step: three.js
+     arrives from the CDN through the import map below.
+     ─────────────────────────────────────────────────────────────────── -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
   }
 }
-
-tick();
-setInterval(tick, 3000);
 </script>
+<script type="module">
+import * as THREE from 'three';
+
+(async function scene(){
+  const canvas = document.getElementById('scene');
+  if (!canvas) return;
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const RING_R = 2.2, TUBE_R = 0.35, SPIN = 0.05;
+  const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, RED = 0xE24B4A, GREY = 0x6a6a6a;
+  const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600;
+
+  /* particle count follows how much the agent remembers */
+  let records = 0;
+  try {
+    const res = await fetch('/api/status', { cache:'no-store' });
+    if (res.ok) {
+      const s = await res.json();
+      if (typeof s.records === 'number') records = s.records;
+    }
+  } catch (e) { /* API down: fall through to the floor of 160 */ }
+  const COUNT = Math.min(600, Math.max(160, records));
+
+  /* renderer */
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, alpha:true, antialias:true });
+  } catch (e) { return; }            // no WebGL: leave the page unharmed
+  renderer.setClearColor(0x000000, 0);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
+  camera.position.set(0, 0.85, 6);   // slightly above, tilted down at the ring
+  camera.lookAt(0, 0, 0);
+
+  /* unlit tetrahedra, one draw call */
+  const geo = new THREE.TetrahedronGeometry(0.06);
+  const mat = new THREE.MeshBasicMaterial({ transparent:true, opacity:1 });
+  const mesh = new THREE.InstancedMesh(geo, mat, COUNT);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(mesh);
+
+  /* per-instance data */
+  const base = [], ang = [], tubeU = [], tubeV = [], scat = [], drift = [],
+        rot = [], spin = [], loosen = [], speed = [];
+  for (let i = 0; i < COUNT; i++) {
+    base.push(new THREE.Color((i % 10) < 7 ? GOLD : VIOLET));   // 70% gold
+    ang.push((i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.08);
+    const t = Math.random() * Math.PI * 2, rr = TUBE_R * Math.sqrt(Math.random());
+    tubeU.push(Math.cos(t) * rr);
+    tubeV.push(Math.sin(t) * rr);
+    scat.push(new THREE.Vector3((Math.random()-0.5)*7, (Math.random()-0.5)*4, (Math.random()-0.5)*4));
+    drift.push(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize());
+    rot.push(new THREE.Euler(Math.random()*Math.PI*2, Math.random()*Math.PI*2, Math.random()*Math.PI*2));
+    spin.push(new THREE.Vector3((Math.random()-0.5)*0.35, (Math.random()-0.5)*0.35, (Math.random()-0.5)*0.35));
+    loosen.push(new THREE.Vector3());
+    speed.push(3 + Math.random() * 2);                          // 3..5 units/s
+  }
+
+  const cur = [], tgt = [];
+  for (let i = 0; i < COUNT; i++) {
+    const a = ang[i], R = RING_R + tubeU[i];
+    const p = new THREE.Vector3(Math.cos(a)*R, tubeV[i], Math.sin(a)*R);
+    cur.push(p.clone());
+    tgt.push(p.clone());
+  }
+
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  const cGrey = new THREE.Color(GREY), cRed = new THREE.Color(RED);
+
+  /* state */
+  let state = document.body.dataset.state || 'ring';
+  let missing = document.body.classList.contains('memory-missing');
+  let ringSpin = 0, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
+  let greyMix = 0, redMix = 0, opacity = 1;
+  let lastColorKey = '';
+
+  function triggerReform(){
+    reformAt = performance.now();
+    for (let i = 0; i < COUNT; i++) {
+      drift[i].set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
+    }
+  }
+  function triggerPulse(){ pulseAt = performance.now(); }
+
+  function setState(next){
+    if (!next || next === state) return;
+    const prev = state;
+    state = next;
+    if (state === 'pulse' && prev !== 'pulse') triggerPulse();
+    if (state === 'reform' && prev !== 'reform') triggerReform();
+    if (reduced) draw(0);
+  }
+
+  window.addEventListener('scenestate', function(e){
+    if (e && e.detail && e.detail.state) setState(e.detail.state);
+  });
+
+  /* memory-missing locks the form apart and turns it red */
+  new MutationObserver(function(){
+    const now = document.body.classList.contains('memory-missing');
+    if (now === missing) return;
+    missing = now;
+    if (!missing) {                      // memory came back
+      setState(document.body.dataset.state || 'ring');
+      triggerReform();
+    }
+    if (reduced) draw(0);
+  }).observe(document.body, { attributes:true, attributeFilter:['class'] });
+
+  /* pulses from the journal: the page polls it but does not publish it */
+  let lastTs = null;
+  async function pollJournal(){
+    if (document.hidden) return;
+    try {
+      const res = await fetch('/api/journal?limit=1', { cache:'no-store' });
+      if (!res.ok) return;
+      const body = await res.json();
+      const ev = body && body.events && body.events[0];
+      if (!ev || !ev.ts) return;
+      if (lastTs !== null && ev.ts !== lastTs) {
+        triggerPulse();
+        if (ev.decision === 'REFUSE') flashAt = performance.now();
+      }
+      lastTs = ev.ts;
+    } catch (e) { /* API down: no pulse, no noise */ }
+  }
+  pollJournal();
+  setInterval(pollJournal, 3000);
+
+  /* targets */
+  function aim(now){
+    const active = missing ? 'scatter' : state;
+    const pulseP = (now - pulseAt) / PULSE_MS;
+    const reformP = (now - reformAt) / REFORM_MS;
+    const wave = (active === 'pulse' || (pulseP >= 0 && pulseP <= 1)) && !reduced;
+    const env = pulseP >= 0 && pulseP <= 1 ? (1 - pulseP) * (1 - pulseP) : 0;
+    const loose = reformP >= 0 && reformP <= 1 ? (1 - reformP) : 0;
+
+    for (let i = 0; i < COUNT; i++) {
+      if (active === 'scatter') { tgt[i].copy(scat[i]); continue; }
+      const a = ang[i] + ringSpin;
+      let R = RING_R + tubeU[i];
+      if (wave) R += 0.5 * env * Math.max(0, Math.sin(ang[i] * 2 - pulseP * Math.PI * 2));
+      tgt[i].set(Math.cos(a) * R, tubeV[i], Math.sin(a) * R);
+      if (loose > 0 && !reduced) {
+        loosen[i].copy(drift[i]).multiplyScalar(0.9 * loose);
+        tgt[i].add(loosen[i]);
+      }
+    }
+    return active;
+  }
+
+  function draw(dt){
+    const now = performance.now();
+    if (!reduced) ringSpin += SPIN * dt;
+    const active = aim(now);
+
+    /* colour + opacity targets */
+    const flashing = (now - flashAt) < FLASH_MS;
+    const wantGrey = active === 'scatter' && !missing ? 1 : 0;
+    const wantRed = missing ? 0.85 : (flashing ? 0.8 : 0);
+    const wantOpacity = active === 'scatter' ? 0.35 : 1;
+    const k = reduced ? 1 : 1 - Math.exp(-4 * dt);
+    greyMix += (wantGrey - greyMix) * k;
+    redMix += (wantRed - redMix) * k;
+    opacity += (wantOpacity - opacity) * k;
+    mat.opacity = opacity;
+
+    const key = greyMix.toFixed(2) + ':' + redMix.toFixed(2);
+    if (key !== lastColorKey) {
+      lastColorKey = key;
+      for (let i = 0; i < COUNT; i++) {
+        col.copy(base[i]).lerp(cGrey, greyMix).lerp(cRed, redMix);
+        mesh.setColorAt(i, col);
+      }
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+
+    for (let i = 0; i < COUNT; i++) {
+      if (reduced) {
+        cur[i].copy(tgt[i]);
+      } else {
+        cur[i].lerp(tgt[i], 1 - Math.exp(-speed[i] * dt));
+        rot[i].x += spin[i].x * dt * (active === 'scatter' ? 1.4 : 0.4);
+        rot[i].y += spin[i].y * dt * (active === 'scatter' ? 1.4 : 0.4);
+        rot[i].z += spin[i].z * dt * (active === 'scatter' ? 1.4 : 0.4);
+      }
+      dummy.position.copy(cur[i]);
+      dummy.rotation.copy(rot[i]);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    renderer.render(scene, camera);
+  }
+
+  /* resize */
+  function resize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setSize(w, h, false);
+    if (reduced) draw(0);
+  }
+  window.addEventListener('resize', resize);
+
+  /* loop, paused while the tab is hidden */
+  let raf = 0, last = performance.now();
+  function frame(){
+    const now = performance.now();
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    draw(dt);
+    raf = requestAnimationFrame(frame);
+  }
+  function start(){
+    if (reduced || raf) return;
+    last = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+  function stop(){ if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden) stop(); else start();
+  });
+
+  resize();
+  if (reduced) draw(0); else start();
+})();
+</script>
+
+</body></html>

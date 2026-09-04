@@ -12,8 +12,10 @@ These apply to every change in this repo. No exceptions without being asked.
    Never point the client at `~/.sibyl-memory/memory.db`.
 5. **Run scripts with `.venv/bin/python`**, e.g.
    `.venv/bin/python scripts/smoke_memory.py read`.
-6. **Every change must keep `scripts/smoke_memory.py` passing.** Run both modes
-   as separate processes (`write` then `read`) before calling any change done.
+6. **Every change must keep `scripts/smoke_memory.py` and
+   `scripts/demo_offline.py` passing.** Run the smoke test's two modes as
+   separate processes (`write` then `read`), then run the offline demo, before
+   calling any change done.
 7. **The product name is spelled `turnstyl`** — lowercase, no `e` — everywhere:
    code, docs, commits, UI, and the package name.
 8. Scripts must fail loudly with a message an operator can act on. No silent

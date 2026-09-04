@@ -16,6 +16,9 @@ dependencies = [
     "pydantic",
 ]
 
+[project.scripts]
+turnstyl = "turnstyl.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

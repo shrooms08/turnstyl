@@ -808,7 +808,7 @@ import * as THREE from 'three';
   const SCATTER_TRANSIT_MS = 700;      // every form change passes through scatter
   const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s
   const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
-  const BRAIN_OPACITY = 0.6, OTHER_OPACITY = 0.85;
+  const BRAIN_OPACITY = 0.7, OTHER_OPACITY = 0.85;
   const HERO_SCROLL_TRIGGER = 0.4;     // hero 40% out of view -> logo
   const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890, LOGO_WHITE = 0xF2F0EA,
         DIM_WHITE = 0x6f6e68, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
@@ -1027,7 +1027,7 @@ import * as THREE from 'three';
   const N_INTERIOR = Math.round(FORM_N * 0.10), N_STEM = 40;
   const N_CEREB = FORM_N - N_BAND - N_STREAM - N_INTERIOR;     // 6%, absorbs rounding
   const stats = { band:0, streamlineCurves:0, frontParticles:0, backCurves:0, streamlineParticles:0, mirroredCurves:0,
-                  interior:0, toInterior:0, cerebellumCurves:0, cerebellumParticles:0, brainstem:0 };
+                  interior:0, parked:0, cerebellumCurves:0, cerebellumParticles:0, brainstem:0 };
   let slot = 0;                                                // next free instance index
   function placeBrain(x, y, z, c){
     if (slot >= FORM_N) return false;
@@ -1065,8 +1065,8 @@ import * as THREE from 'three';
     return placed;
   }
 
-  // 62%: gyri streamlines along a rotated noise gradient, kept 0.075 apart.
-  const SPACING = 0.075;
+  // 62%: gyri streamlines along a rotated noise gradient, kept 0.055 apart.
+  const SPACING = 0.055;
   const gCols = Math.ceil((wMaxX - wMinX) / SPACING) + 2, gRows = Math.ceil((wMaxY - wMinY) / SPACING) + 2;
   // One occupancy grid per surface. Each cell remembers which curve owns it and
   // where that curve's point is, so spacing is a real distance test, not a
@@ -1196,6 +1196,19 @@ import * as THREE from 'three';
     return r < 0.5 ? cLogoWhite : r < 0.8 ? cViolet : r < 0.9 ? cPink : cTeal;
   }
 
+  // An instance the brain cannot place on the outline, a streamline, the
+  // cerebellum, the brainstem or the 10% interior is parked: ambient position,
+  // scale 0.004 (effectively invisible), dim white. It still morphs with every
+  // form change, so the logo and scatter keep their full count.
+  const PARKED_SCALE = 0.004;
+  function parkInstance(){
+    ambientXYZ(posBrain, slot);
+    put(colBrain, slot, cDim);
+    sBrain[slot] = PARKED_SCALE;
+    sBase[slot] = PARKED_SCALE;
+    slot++;
+    stats.parked++;
+  }
   function interiorPoint(c){
     for (let t = 0; t < 200; t++) {
       const x = wMinX + Math.random() * (wMaxX - wMinX), y = wMinY + Math.random() * (wMaxY - wMinY);
@@ -1216,7 +1229,7 @@ import * as THREE from 'three';
       if (!start) break;
       const mirror = Math.random() < 0.35;
       const before = slot;
-      walkStreamline(id, start[0], start[1], 38, 0.045, inCerebrum, SIL, gridFront, 1, mirror, curveColour(), 0.03);
+      walkStreamline(id, start[0], start[1], 38, 0.035, inCerebrum, SIL, gridFront, 1, mirror, curveColour(), 0.03);
       if (slot > before) { stats.streamlineCurves++; if (mirror) stats.mirroredCurves++; }
       id++;
     }
@@ -1228,12 +1241,12 @@ import * as THREE from 'three';
       const start = pickStart(inCerebrum, 0.08, gridBack);
       if (!start) break;
       const before = slot;
-      walkStreamline(id, start[0], start[1], 38, 0.045, inCerebrum, SIL, gridBack, -1, false, curveColour(), 0.03);
+      walkStreamline(id, start[0], start[1], 38, 0.035, inCerebrum, SIL, gridBack, -1, false, curveColour(), 0.03);
       if (slot > before) stats.backCurves++;
       id++;
     }
     stats.streamlineParticles = slot - streamStart;
-    while (slot < streamEnd) { interiorPoint(cDim); stats.toInterior++; }
+    while (slot < streamEnd) parkInstance();
 
     // 10%: interior at random depth
     for (let k = 0; k < N_INTERIOR; k++) { interiorPoint(cDim); stats.interior++; }
@@ -1245,20 +1258,20 @@ import * as THREE from 'three';
       const start = pickStart(inCereb, 0.02, gridFront);
       if (!start) break;
       const before = slot;
-      walkStreamline(cid, start[0], start[1], 16, 0.03, inCereb, CEREB, gridFront, 1, Math.random() < 0.35,
+      walkStreamline(cid, start[0], start[1], 16, 0.022, inCereb, CEREB, gridFront, 1, Math.random() < 0.35,
                      Math.random() < 0.3 ? cGold : cViolet, 0.02);
       if (slot > before) stats.cerebellumCurves++;
       cid++;
     }
     stats.cerebellumParticles = slot - cerebStart;
-    while (slot < cerebEnd) { interiorPoint(cDim); stats.toInterior++; }
+    while (slot < cerebEnd) parkInstance();
     for (let k = 0; k < N_STEM && slot < FORM_N; k++) {
       const t = (k + 0.5) / N_STEM;
       const x = STEM[0][0] + (STEM[1][0]-STEM[0][0])*t + (Math.random()-0.5)*0.03;
       const y = STEM[0][1] + (STEM[1][1]-STEM[0][1])*t + (Math.random()-0.5)*0.03;
       if (placeBrain(x, y, (Math.random()-0.5) * 0.1, cLogoWhite)) stats.brainstem++;
     }
-    while (slot < FORM_N) { interiorPoint(cDim); stats.toInterior++; }
+    while (slot < FORM_N) parkInstance();
   }
   buildBrain();
 

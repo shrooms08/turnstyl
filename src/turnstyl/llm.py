@@ -5,7 +5,9 @@ outputs with no API call — that is how the offline demo and CI run.
 """
 from __future__ import annotations
 
+import difflib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -44,17 +46,17 @@ SYSTEM_PROMPTS: dict[int, str] = {
     ),
     STEP_PATCH: (
         "You are a Solidity security auditor. You are given a contract and a findings report. "
-        "Produce a patch that closes every finding, highest severity first. A patch that "
-        "leaves any CRITICAL or HIGH finding untouched is incomplete and unacceptable. Output "
-        "format, exactly two sections and nothing else. Section 1: a unified diff against the "
-        "contract with --- and +++ headers and @@ hunks. Section 2: a heading line CLOSES, "
-        "then one line per finding in the form '<finding id> <severity>: <function changed>: "
-        "<one sentence on how the hunk closes it>' or '<finding id> <severity>: not changed: "
-        "<reason>'. Rules: for reentrancy, apply checks-effects-interactions by updating "
-        "state before any external call, and add a simple reentrancy guard if the contract "
-        "has none. Never use unchecked to address an overflow finding; on Solidity >=0.8 say "
-        "the finding is already mitigated by checked arithmetic and change nothing for it. Do "
-        "not explain your reasoning outside the CLOSES lines."
+        "Return the complete patched contract that closes every finding, highest severity "
+        "first. A patch that leaves any CRITICAL or HIGH finding untouched is incomplete and "
+        "unacceptable. Output exactly two sections and nothing else. Section 1: the full "
+        "patched contract source in a single ```solidity code block, same pragma and contract "
+        "name, no external imports of any kind (if you need a reentrancy guard, implement a "
+        "minimal one inline with a private bool and a modifier). Section 2: a heading line "
+        "CLOSES, then one line per finding in the form '<finding id> <severity>: <function "
+        "changed>: <one sentence on how the change closes it>' or '<finding id> <severity>: "
+        "not changed: <reason>'. Rules: for reentrancy, update state before any external "
+        "call. Never use unchecked to address an overflow finding; on Solidity >=0.8 say it "
+        "is already mitigated by checked arithmetic and change nothing for it."
     ),
     STEP_VERIFY: (
         "You are an independent verifier. You are given the original contract, the findings "
@@ -64,7 +66,9 @@ SYSTEM_PROMPTS: dict[int, str] = {
         "<severity>: CLOSED' or 'NOT CLOSED', followed by the specific patched lines that "
         "justify the verdict. Then a section REGRESSIONS listing any change in the patch that "
         "introduces new risk, such as removed overflow checks or new external calls, or "
-        "'none'. End with exactly one line 'VERDICT: closes X of N findings, regressions: Y'."
+        "'none'. End with exactly one line 'VERDICT: closes X of N findings, regressions: Y'. "
+        "If the mechanical checks say the patch does not compile, no finding may be marked "
+        "CLOSED and REGRESSIONS must state that the patch does not compile."
     ),
 }
 
@@ -95,19 +99,68 @@ def _mock_output(step: int, contract_text: str, prior_outputs: dict[int, str]) -
             f"cannot follow vault state."
         )
     if step == STEP_PATCH:
+        # A whole patched file, like the real step 3 returns, so the offline
+        # path runs the same difflib and compile gate.
         return (
-            f"PATCH (contract {short})\n"
-            f"--- a/Vault.sol\n"
-            f"+++ b/Vault.sol\n"
-            f"@@ function withdraw(uint256 amount) @@\n"
-            f"     require(balances[msg.sender] >= amount, \"insufficient\");\n"
-            f"-    (bool ok, ) = msg.sender.call{{value: amount}}(\"\");\n"
-            f"-    balances[msg.sender] -= amount;\n"
-            f"+    balances[msg.sender] -= amount;\n"
-            f"+    (bool ok, ) = msg.sender.call{{value: amount}}(\"\");\n"
-            f"+    require(ok, \"transfer failed\");\n"
-            f"+    emit Withdrawn(msg.sender, amount);\n"
-            f"Effects now precede the interaction, and the call result is checked."
+            f"Patched contract for {short}.\n\n"
+            "```solidity\n"
+            "// SPDX-License-Identifier: MIT\n"
+            "pragma solidity ^0.8.20;\n"
+            "\n"
+            "/// @title Vault\n"
+            "/// @notice A minimal ETH vault, patched by the turnstyl audit agent.\n"
+            "contract Vault {\n"
+            "    mapping(address => uint256) private balances;\n"
+            "\n"
+            "    uint256 public totalDeposits;\n"
+            "\n"
+            "    bool private locked;\n"
+            "\n"
+            "    event Deposited(address indexed account, uint256 amount);\n"
+            "    event Withdrawn(address indexed account, uint256 amount);\n"
+            "\n"
+            "    modifier nonReentrant() {\n"
+            '        require(!locked, "reentrant call");\n'
+            "        locked = true;\n"
+            "        _;\n"
+            "        locked = false;\n"
+            "    }\n"
+            "\n"
+            "    /// @notice Deposit ETH into the caller's vault balance.\n"
+            "    function deposit() external payable {\n"
+            '        require(msg.value > 0, "zero deposit");\n'
+            "        balances[msg.sender] += msg.value;\n"
+            "        totalDeposits += msg.value;\n"
+            "        emit Deposited(msg.sender, msg.value);\n"
+            "    }\n"
+            "\n"
+            "    /// @notice Withdraw ETH from the caller's vault balance.\n"
+            "    /// @dev Effects precede the interaction, and the call result is checked.\n"
+            "    function withdraw(uint256 amount) external nonReentrant {\n"
+            '        require(balances[msg.sender] >= amount, "insufficient balance");\n'
+            "\n"
+            "        balances[msg.sender] -= amount;\n"
+            "        totalDeposits -= amount;\n"
+            "\n"
+            '        (bool ok, ) = msg.sender.call{value: amount}("");\n'
+            '        require(ok, "transfer failed");\n'
+            "        emit Withdrawn(msg.sender, amount);\n"
+            "    }\n"
+            "\n"
+            "    /// @notice Read the vault balance of an account.\n"
+            "    function getBalance(address account) external view returns (uint256) {\n"
+            "        return balances[account];\n"
+            "    }\n"
+            "}\n"
+            "```\n"
+            "\n"
+            "CLOSES\n"
+            "1 HIGH: withdraw: balances and totalDeposits are decremented before the "
+            "external call, and a nonReentrant modifier blocks re-entry.\n"
+            "2 MEDIUM: withdraw: the low-level call result is checked with "
+            'require(ok, "transfer failed").\n'
+            "3 LOW: deposit/withdraw: Deposited and Withdrawn events are emitted so "
+            "off-chain accounting can follow vault state.\n"
         )
     if step == STEP_VERIFY:
         saw_findings = STEP_FINDINGS in prior_outputs
@@ -152,83 +205,130 @@ def _estimate_tokens(text: str) -> int:
 class StepResult:
     """One step's output plus what we know about it.
 
-    ``diff_applies`` is None when no mechanical check was run (any step but the
-    patch, or a mock fixture), True/False when `patch --dry-run` was actually
-    asked whether the produced diff lands on the contract.
+    For the patch step the diff is generated here from the model's whole-file
+    answer, so ``diff_applies`` is True by construction; ``compiles`` is the
+    verdict that has to be earned, from a real solc run. Both are None on any
+    other step.
     """
 
     output: str
     usage: Usage
     diff_applies: bool | None = None
+    patched_source: str | None = None
+    generated_diff: str | None = None
+    compiles: bool | None = None
+    compiler_output: str | None = None
 
 
-def extract_diff(output: str) -> str | None:
-    """Pull section 1 (the unified diff) out of a step 3 answer.
+SOLIDITY_BLOCK = re.compile(
+    r"```(?:solidity|sol)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE
+)
+PRAGMA = re.compile(r"pragma\s+solidity\s+([^;]+);")
+CONTRACT_NAME = re.compile(r"^\s*(?:abstract\s+)?contract\s+([A-Za-z_]\w*)", re.MULTILINE)
+COMPILER_OUTPUT_LINES = 20
 
-    Starts at the first `--- ` header and stops at the CLOSES heading, so the
-    prose section never reaches `patch`. Returns None if there is no diff at all.
+
+def extract_solidity(output: str) -> str | None:
+    """Section 1 of a step 3 answer: the full patched contract source.
+
+    Prefers the first fenced block that actually looks like Solidity, so a stray
+    fence around the CLOSES section cannot be mistaken for the contract.
     """
-    lines = output.splitlines()
-    start = next((i for i, l in enumerate(lines) if l.startswith("--- ")), None)
-    if start is None:
-        return None
-    end = len(lines)
-    for i in range(start, len(lines)):
-        if lines[i].strip().upper().startswith("CLOSES"):
-            end = i
-            break
-    body = lines[start:end]
-    while body and (not body[-1].strip() or body[-1].strip().startswith("```")):
-        body.pop()
-    if not body:
-        return None
-    return "\n".join(body) + "\n"
-
-
-def _diff_target(diff: str) -> str | None:
-    """The path the diff names in its `---` header, as written."""
-    for line in diff.splitlines():
-        if line.startswith("--- "):
-            return line[4:].split("\t")[0].strip()
+    for match in SOLIDITY_BLOCK.finditer(output):
+        body = match.group(1).strip()
+        if "contract " in body or "pragma solidity" in body:
+            return body + "\n"
     return None
 
 
-def check_patch_applies(diff: str, contract_text: str) -> tuple[bool, str]:
-    """Ask `patch --dry-run -p0` whether the diff lands on the contract.
+def extract_closes(output: str) -> str:
+    """Section 2: the CLOSES heading and the per-finding lines under it."""
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().upper().startswith("CLOSES"):
+            tail = [l for l in lines[i:] if not l.strip().startswith("```")]
+            return "\n".join(tail).strip()
+    return ""
 
-    The contract is materialised at exactly the path the diff's own `---` header
-    names, so -p0 is correct whether the model wrote `a/Vault.sol`, `Vault.sol`
-    or something else. Returns (applies, detail).
+
+def build_diff(original: str, patched: str, name: str = "Vault.sol") -> str:
+    """The unified diff turnstyl shows for step 3.
+
+    Generated here rather than asked for from the model: a diff is arithmetic
+    over two files, and a model that writes its own @@ headers gets the line
+    counts wrong. This one applies by construction.
     """
-    if not shutil.which("patch"):
-        return False, "the `patch` utility is not installed on this machine"
-    target = _diff_target(diff)
-    if not target:
-        return False, "the diff has no `--- <path>` header"
-    if target.startswith("/") or ".." in Path(target).parts:
-        return False, f"the diff targets an unusable path {target!r}"
+    diff = difflib.unified_diff(
+        original.splitlines(keepends=True),
+        patched.splitlines(keepends=True),
+        fromfile=f"a/{name}",
+        tofile=f"b/{name}",
+        n=3,
+    )
+    return "".join(diff)
 
-    with tempfile.TemporaryDirectory(prefix="turnstyl-patch-") as tmp:
+
+def _contract_name(source: str, default: str = "Patched") -> str:
+    match = CONTRACT_NAME.search(source)
+    return match.group(1) if match else default
+
+
+def compile_solidity(source: str) -> tuple[bool, str]:
+    """Compile one contract in a throwaway Foundry project.
+
+    A minimal foundry.toml with no libs and no remappings, so nothing but the
+    source under test is involved. solc is auto-detected from the file's own
+    pragma, which both matches the pragma and keeps this offline — pinning an
+    exact patch version would make the gate download a compiler.
+
+    Returns (compiles, first lines of compiler output).
+    """
+    if not shutil.which("forge"):
+        return False, "forge is not installed on this machine; cannot compile-check"
+    name = _contract_name(source)
+    with tempfile.TemporaryDirectory(prefix="turnstyl-solc-") as tmp:
         root = Path(tmp)
-        source = root / target
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(contract_text, encoding="utf-8")
-        proc = subprocess.run(
-            ["patch", "--dry-run", "-p0"],
-            input=diff,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=30,
+        (root / "src").mkdir()
+        (root / "src" / f"{name}.sol").write_text(source, encoding="utf-8")
+        (root / "foundry.toml").write_text(
+            '[profile.default]\nsrc = "src"\nout = "out"\nlibs = []\nremappings = []\n',
+            encoding="utf-8",
         )
+        try:
+            proc = subprocess.run(
+                ["forge", "build", "--root", str(root)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "forge build timed out after 300s"
+    output = (proc.stdout + proc.stderr).strip()
+    head = "\n".join(output.splitlines()[:COMPILER_OUTPUT_LINES])
     if proc.returncode == 0:
-        return True, "applies cleanly"
-    detail = (proc.stdout + proc.stderr).strip() or f"patch exited {proc.returncode}"
-    return False, detail
+        return True, head or "clean"
+    return False, head or f"forge build exited {proc.returncode}"
+
+
+def mechanical_block(compiles: bool | None, compiler_output: str | None) -> str:
+    """What the verifier is told about the checks turnstyl already ran."""
+    if compiles is None:
+        return ""
+    detail = (compiler_output or "").strip() or "clean"
+    if compiles:
+        detail = "clean"
+    return (
+        "MECHANICAL CHECKS: diff generated from full file: yes; "
+        f"compiles: {'yes' if compiles else 'no'}; "
+        f"compiler output: {detail}"
+    )
 
 
 def _build_user_message(
-    step: int, contract_text: str, prior_outputs: dict[int, str]
+    step: int,
+    contract_text: str,
+    prior_outputs: dict[int, str],
+    mechanical: str = "",
 ) -> str:
     """The contract, plus whatever earlier steps produced."""
     truncated = contract_text[:MAX_CONTRACT_CHARS]
@@ -246,6 +346,8 @@ def _build_user_message(
             f"{STEP_NAMES[prior_step].upper()} (from step {prior_step}):\n"
             f"{prior_outputs[prior_step]}"
         )
+    if mechanical:
+        parts.append(mechanical)
     parts.append(f"Now produce the {STEP_NAMES[step]} for step {step}.")
     return "\n\n".join(parts)
 
@@ -254,12 +356,16 @@ def run_step(
     step: int,
     contract_text: str,
     prior_outputs: dict[int, str] | None = None,
+    mechanical: str = "",
 ) -> StepResult:
     """Run one audit step.
 
-    For the patch step the produced diff is run through `patch --dry-run`; if it
-    does not apply, the model is given the error once and asked again. Whatever
-    comes back from that second attempt is accepted and reported as it is.
+    The patch step asks for the whole patched file, diffs it here, and compiles
+    it. If it does not compile, the compiler errors are handed back once and the
+    second answer is accepted as it is.
+
+    ``mechanical`` is appended verbatim to the user prompt; the engine uses it to
+    show the verifier what the patch step's checks found.
 
     MOCK_LLM=1 short-circuits to canned output with no network call.
     """
@@ -272,17 +378,18 @@ def run_step(
     if os.environ.get("MOCK_LLM") == "1":
         output = _mock_output(step, contract_text, prior_outputs)
         prompt = SYSTEM_PROMPTS[step] + _build_user_message(
-            step, contract_text, prior_outputs
+            step, contract_text, prior_outputs, mechanical
         )
-        # diff_applies stays None: the mock patch is a fixture, not a model
-        # artifact, and reporting a verdict on it would be misleading.
-        return StepResult(
-            output=output,
-            usage=Usage(
-                input_tokens=_estimate_tokens(prompt),
-                output_tokens=_estimate_tokens(output),
-            ),
+        usage = Usage(
+            input_tokens=_estimate_tokens(prompt),
+            output_tokens=_estimate_tokens(output),
         )
+        if step != STEP_PATCH:
+            return StepResult(output=output, usage=usage)
+        # The mock patch is a full file too, so the offline path exercises the
+        # same difflib and compile gate the real one does. No retry: a second
+        # call would return the identical fixture.
+        return _finish_patch_step(output, contract_text, usage)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -297,45 +404,74 @@ def run_step(
 
     model = os.environ.get("LLM_MODEL") or DEFAULT_MODEL
     client = anthropic.Anthropic(api_key=api_key)
-    user_message = _build_user_message(step, contract_text, prior_outputs)
+    user_message = _build_user_message(step, contract_text, prior_outputs, mechanical)
     output, usage = _call_model(client, anthropic, model, step, user_message)
 
     if step != STEP_PATCH:
         return StepResult(output=output, usage=usage)
 
-    # Mechanical check: does the diff this step just produced actually land on
-    # the contract? A patch that cannot be applied is not a fix, however
-    # convincing its prose. One retry, with the failure handed back verbatim.
-    applies, detail = _verify_output_diff(output, contract_text)
-    if not applies:
-        retry_message = (
-            f"{user_message}\n\n"
-            f"Your previous diff did not apply. `patch --dry-run -p0` reported:\n"
-            f"{detail}\n\n"
-            f"Produce the patch again so it applies cleanly to the contract above. "
-            f"Keep the same two-section output format. Count the context lines in "
-            f"each @@ hunk header correctly and quote the surrounding lines exactly "
-            f"as they appear in the contract."
-        )
-        retry_output, retry_usage = _call_model(
-            client, anthropic, model, step, retry_message
-        )
-        output = retry_output
-        # Both attempts were billed; the caller's cost accounting must see both.
-        usage = Usage(
-            input_tokens=usage.input_tokens + retry_usage.input_tokens,
-            output_tokens=usage.output_tokens + retry_usage.output_tokens,
-        )
-        applies, detail = _verify_output_diff(output, contract_text)
+    # A patch that does not compile is not a fix, however convincing its prose.
+    # One retry, with the compiler's own errors handed back.
+    result = _finish_patch_step(output, contract_text, usage)
+    if result.compiles:
+        return result
 
-    return StepResult(output=output, usage=usage, diff_applies=applies)
+    retry_message = (
+        f"{user_message}\n\n"
+        f"Your previous patched contract did not compile. `forge build` reported:\n"
+        f"{result.compiler_output}\n\n"
+        f"Return the complete patched contract again, fixing these compiler "
+        f"errors. Keep the same two-section output format, the same pragma and "
+        f"contract name, and no external imports."
+    )
+    retry_output, retry_usage = _call_model(
+        client, anthropic, model, step, retry_message
+    )
+    # Both attempts were billed; the caller's cost accounting must see both.
+    combined = Usage(
+        input_tokens=usage.input_tokens + retry_usage.input_tokens,
+        output_tokens=usage.output_tokens + retry_usage.output_tokens,
+    )
+    return _finish_patch_step(retry_output, contract_text, combined)
 
 
-def _verify_output_diff(output: str, contract_text: str) -> tuple[bool, str]:
-    diff = extract_diff(output)
-    if diff is None:
-        return False, "the answer contained no unified diff section"
-    return check_patch_applies(diff, contract_text)
+def _finish_patch_step(
+    output: str, contract_text: str, usage: Usage
+) -> StepResult:
+    """Turn a whole-file patch answer into a diff, and compile it.
+
+    The displayed output is the generated diff followed by the model's CLOSES
+    section — the reader sees exactly what changed, not a wall of re-pasted
+    contract. ``diff_applies`` is True by construction: difflib produced it from
+    the two files, so there is nothing to verify.
+    """
+    patched = extract_solidity(output)
+    if patched is None:
+        return StepResult(
+            output=output,
+            usage=usage,
+            diff_applies=False,
+            compiles=False,
+            compiler_output=(
+                "the answer contained no ```solidity block, so there was nothing "
+                "to diff or compile"
+            ),
+        )
+    diff = build_diff(contract_text, patched)
+    closes = extract_closes(output)
+    if not diff.strip():
+        diff = "(no change: the patched contract is identical to the original)\n"
+    compiles, compiler_output = compile_solidity(patched)
+    display = diff if not closes else f"{diff}\n{closes}"
+    return StepResult(
+        output=display.strip() + "\n",
+        usage=usage,
+        diff_applies=True,
+        patched_source=patched,
+        generated_diff=diff,
+        compiles=compiles,
+        compiler_output=compiler_output,
+    )
 
 
 def _call_model(client, anthropic, model: str, step: int, user_message: str):

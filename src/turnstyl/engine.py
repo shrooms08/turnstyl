@@ -15,6 +15,7 @@ from pathlib import Path
 from . import policy
 from . import schema as S
 from .llm import Usage as LLMUsage
+from .llm import mechanical_block as llm_mechanical_block
 from .llm import run_step as llm_run_step
 from .memory import TurnstylMemory, TurnstylStore
 from .payments import PaymentBackend, get_backend
@@ -50,6 +51,7 @@ class Outcome:
     invoice: S.OpenInvoice | None = None
     price_reason: str = ""
     diff_applies: bool | None = None
+    compiles: bool | None = None
     commit_tx: str | None = None
     commit_hash: str | None = None
     commit_error: str | None = None
@@ -519,11 +521,14 @@ class Engine:
         started = time.monotonic()
         if cached_output is not None:
             output, usage, cached = cached_output, LLMUsage(), True
+            result = None
             diff_applies = None
         else:
             text = contract_text or self._require_contract_text(state)
             prior = {int(k): v.output for k, v in entity.steps.items()}
-            result = llm_run_step(step, text, prior)
+            result = llm_run_step(
+                step, text, prior, mechanical=self._mechanical_for(step, entity)
+            )
             output, usage, diff_applies = (
                 result.output,
                 result.usage,
@@ -552,6 +557,10 @@ class Engine:
             seconds=seconds,
             cached=cached,
             diff_applies=diff_applies,
+            patched_source=result.patched_source if result else None,
+            generated_diff=result.generated_diff if result else None,
+            compiles=result.compiles if result else None,
+            compiler_output=result.compiler_output if result else None,
         )
         entity.steps[str(step)] = record
         self.store.put_job_entity(job_id, entity)
@@ -581,10 +590,10 @@ class Engine:
             f"seconds={seconds}"
         ]
 
-        if diff_applies is not None:
+        if record.compiles is not None:
             acted.append(
-                f"mechanical check: `patch --dry-run` "
-                f"{'accepted' if diff_applies else 'REJECTED'} the produced diff"
+                f"mechanical check: the patched contract "
+                f"{'compiles' if record.compiles else 'DOES NOT COMPILE'}"
             )
         if commit_tx:
             acted.append(
@@ -693,6 +702,7 @@ class Engine:
             tokens=tokens,
             seconds=seconds,
             diff_applies=diff_applies,
+            compiles=record.compiles,
             invoice=next_invoice,
             price_reason=price_reason,
             commit_tx=commit_tx,
@@ -706,6 +716,19 @@ class Engine:
                 else ""
             ),
         )
+
+    def _mechanical_for(self, step: int, entity: S.JobEntity) -> str:
+        """What the verifier is told about the checks already run.
+
+        Only step 4 gets one, and only from the patch step's recorded results —
+        the verifier judges a patch turnstyl has already diffed and compiled.
+        """
+        if step != S.STEP_VERIFY:
+            return ""
+        patch_record = entity.steps.get(str(S.STEP_PATCH))
+        if patch_record is None:
+            return ""
+        return llm_mechanical_block(patch_record.compiles, patch_record.compiler_output)
 
     def _require_contract_text(self, state: S.JobState) -> str:
         raise RuntimeError(

@@ -203,9 +203,15 @@ class StepRecord(_Model):
     seconds: float = 0.0
     cached: bool = False
     commit_tx: str | None = None
-    # Patch step only: did `patch --dry-run` accept the produced diff?
-    # None means no mechanical check was run for this step.
+    # Patch step only; None on every other step.
+    # diff_applies is True by construction: the diff is generated here with
+    # difflib from the model's whole-file answer, so there is nothing to verify.
+    # compiles is the verdict that has to be earned, from a real solc run.
     diff_applies: bool | None = None
+    patched_source: str | None = None
+    generated_diff: str | None = None
+    compiles: bool | None = None
+    compiler_output: str | None = None
 
 
 class JobEntity(_Model):

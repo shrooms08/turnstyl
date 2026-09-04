@@ -806,11 +806,12 @@ import * as THREE from 'three';
   const FORM_N = COUNT - AMBIENT;
   const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600, MORPH_MS = 1200;
   const SCATTER_TRANSIT_MS = 700;      // every form change passes through scatter
-  const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s at ±0.35
+  const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s
   const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
-  const RIM_DOT = 0.38;                // |n·view| below this glows gold
+  const BRAIN_OPACITY = 0.6, OTHER_OPACITY = 0.85;
+  const HERO_SCROLL_TRIGGER = 0.4;     // hero 40% out of view -> logo
   const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890, LOGO_WHITE = 0xF2F0EA,
-        TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
+        DIM_WHITE = 0x6f6e68, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
 
   /* ── inline value noise (no library) ────────────────────────────── */
   function hash3(i, j, k){
@@ -832,6 +833,7 @@ import * as THREE from 'three';
     const x01 = lerp1(c001, c101, u), x11 = lerp1(c011, c111, u);
     return lerp1(lerp1(x00, x10, v), lerp1(x01, x11, v), w) * 2 - 1;
   }
+  function noise2(x, y){ return noise3(x, y, 0.37); }         // a fixed slice of the 3D field
   function ridged(n){ return 1 - Math.abs(n); }
   function smoothstep(e0, e1, x){
     const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -857,7 +859,7 @@ import * as THREE from 'three';
 
   const geo = new THREE.TetrahedronGeometry(1, 0);
   const mat = new THREE.MeshBasicMaterial({
-    wireframe: true, transparent: true, opacity: 0.85,
+    wireframe: true, transparent: true, opacity: BRAIN_OPACITY,
     blending: THREE.AdditiveBlending, depthWrite: false
   });
   const mesh = new THREE.InstancedMesh(geo, mat, COUNT);
@@ -866,21 +868,21 @@ import * as THREE from 'three';
   mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
   mesh.frustumCulled = false;
   group.add(mesh);
-  const colOut = mesh.instanceColor.array;   // written directly each frame
+  const colOut = mesh.instanceColor.array;   // written directly on recolour
 
   /* ── flat per-instance stores, allocated once ───────────────────── */
   const F = Float32Array;
   const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posScatter = new F(COUNT*3);
   const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colScatter = new F(COUNT*3);
-  const nrm = new F(COUNT*3);                 // brain surface normals, form space
   const cur = new F(COUNT*3), bulge = new F(COUNT*3), drift = new F(COUNT*3);
   const axis = new F(COUNT*3), colFrom = new F(COUNT*3), colCur = new F(COUNT*3);
   const spinAng = new F(COUNT), spinVel = new F(COUNT);
+  const sBrain = new F(COUNT), sOther = new F(COUNT);   // size per form: brain vs the rest
   const sBase = new F(COUNT), sBulge = new F(COUNT), moveRate = new F(COUNT);
-  const inBrain = new Uint8Array(COUNT);      // 1 = survived the groove drop
 
   const cGold = new THREE.Color(GOLD), cViolet = new THREE.Color(VIOLET),
         cWhite = new THREE.Color(WHITE), cLogoWhite = new THREE.Color(LOGO_WHITE),
+        cDim = new THREE.Color(DIM_WHITE), cPink = new THREE.Color(PINK),
         cTeal = new THREE.Color(TEAL), cRed = new THREE.Color(RED), cGrey = new THREE.Color(GREY);
 
   function put(arr, i, c){ arr[i*3] = c.r; arr[i*3+1] = c.g; arr[i*3+2] = c.b; }
@@ -888,15 +890,18 @@ import * as THREE from 'three';
     arr[i*3] = (Math.random()-0.5)*12; arr[i*3+1] = (Math.random()-0.5)*7; arr[i*3+2] = (Math.random()-0.5)*6;
   }
 
-  /* size classes: 92% fine, 6% mid, 2% large */
+  /* sizes. Brain particles are fine only (0.014-0.024); the logo and scatter
+     keep the three classes; the 2% large shards live in the ambient field. */
   for (let i = 0; i < COUNT; i++) {
     const r = Math.random();
     let s;
-    if (i >= FORM_N) s = 0.012 + Math.random()*0.018;          // ambient: tiny class
+    if (i >= FORM_N) s = r < 0.02 ? 0.18 + Math.random()*0.17 : 0.012 + Math.random()*0.018;
     else if (r < 0.92) s = 0.012 + Math.random()*0.018;
     else if (r < 0.98) s = 0.04  + Math.random()*0.04;
     else               s = 0.18  + Math.random()*0.17;
-    sBase[i] = s;
+    sOther[i] = s;
+    sBrain[i] = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sBase[i] = sBrain[i];
     const ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
     const al = Math.hypot(ax, ay, az) || 1;
     axis[i*3] = ax/al; axis[i*3+1] = ay/al; axis[i*3+2] = az/al;
@@ -921,6 +926,10 @@ import * as THREE from 'three';
     [0.55,0.22],[0.52,0.12],[0.46,0.10],[0.44,0.20],[0.46,0.30],
     [0.42,0.30],[0.34,0.28],[0.24,0.31],[0.16,0.37],[0.10,0.42]
   ];
+  // sub-polygons, in outline coordinates
+  const CEREBELLUM = [[0.78,0.36],[0.80,0.30],[0.74,0.22],[0.64,0.20],[0.58,0.24],[0.56,0.30]];
+  const BRAINSTEM_AXIS = [[0.51,0.30],[0.49,0.11]];            // centreline, top to bottom
+
   function catmullRom(points, perSeg){                        // closed spline
     const n = points.length, out = [];
     for (let i = 0; i < n; i++) {
@@ -935,7 +944,6 @@ import * as THREE from 'three';
     }
     return out;
   }
-  const SIL = catmullRom(OUTLINE, 7);                          // 196 points
   function insidePolygon(x, y, poly){
     let inside = false;
     for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -953,111 +961,306 @@ import * as THREE from 'three';
     a *= 0.5;
     return [cx / (6*a), cy / (6*a)];
   }
-  const [XC, YC] = polygonCentroid(SIL);
-  let oMinX = Infinity, oMaxX = -Infinity, oMinY = Infinity, oMaxY = -Infinity;
-  for (const p of SIL) {
-    if (p[0] < oMinX) oMinX = p[0]; if (p[0] > oMaxX) oMaxX = p[0];
-    if (p[1] < oMinY) oMinY = p[1]; if (p[1] > oMaxY) oMaxY = p[1];
-  }
-  const BRAIN_SCALE = 3.2 / (oMaxX - oMinX);                   // width -> 3.2 units
-  const HALF_H = Math.max(oMaxY - YC, YC - oMinY) * BRAIN_SCALE;
-
-  // Half-thickness at a point already centred and scaled. The x taper is as
-  // specified; the y profile is normalised by the measured half-height so the
-  // slab closes exactly at the top and bottom of the silhouette.
-  function halfThick(x, y){
-    const ty = 1 - (y / HALF_H) * (y / HALF_H);
-    const tx = 1 - (x / 1.75) * (x / 1.75);
-    return 0.62 * Math.sqrt(Math.max(0, ty)) * Math.sqrt(Math.max(0.15, tx));
-  }
-
-  // grooves in outline coordinates: the Sylvian fissure (a bowed curve) and the
-  // cerebellum boundary (a segment). Density near them drops to 25%.
-  const SYLVIAN = [];
-  for (let k = 0; k <= 24; k++) {
-    const t = k / 24, mt = 1 - t;                              // quadratic Bézier
-    SYLVIAN.push([
-      mt*mt*0.20 + 2*mt*t*0.36 + t*t*0.55,
-      mt*mt*0.42 + 2*mt*t*0.40 + t*t*0.50
-    ]);
-  }
-  const CEREB_LINE = [[0.78,0.36],[0.56,0.30]];
   function segDist(px, py, ax, ay, bx, by){
     const vx = bx - ax, vy = by - ay, wx = px - ax, wy = py - ay;
     const L = vx*vx + vy*vy || 1e-9;
     const t = Math.min(1, Math.max(0, (wx*vx + wy*vy) / L));
     return Math.hypot(px - (ax + vx*t), py - (ay + vy*t));
   }
-  function grooveDist(u, v){
-    let d = segDist(u, v, CEREB_LINE[0][0], CEREB_LINE[0][1], CEREB_LINE[1][0], CEREB_LINE[1][1]);
-    for (let k = 0; k < SYLVIAN.length - 1; k++) {
-      const s = segDist(u, v, SYLVIAN[k][0], SYLVIAN[k][1], SYLVIAN[k+1][0], SYLVIAN[k+1][1]);
+  function polylineDist(x, y, poly, closed){
+    let d = Infinity;
+    for (let i = 0, n = poly.length; i < (closed ? n : n - 1); i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const s = segDist(x, y, a[0], a[1], b[0], b[1]);
       if (s < d) d = s;
     }
     return d;
   }
 
-  const RX = 0.18, RY = -0.28;                                 // lateral pose
+  // The smoothed silhouette, centred on its centroid and scaled anisotropically:
+  // width 3.2, height 3.2 / 1.35. Everything below works in these world units.
+  const SIL_U = catmullRom(OUTLINE, 7);                        // 196 points, unit square
+  const [XC, YC] = polygonCentroid(SIL_U);
+  let oMinX = Infinity, oMaxX = -Infinity, oMinY = Infinity, oMaxY = -Infinity;
+  for (const p of SIL_U) {
+    if (p[0] < oMinX) oMinX = p[0]; if (p[0] > oMaxX) oMaxX = p[0];
+    if (p[1] < oMinY) oMinY = p[1]; if (p[1] > oMaxY) oMaxY = p[1];
+  }
+  const SX = 3.2 / (oMaxX - oMinX), SY = (3.2 / 1.35) / (oMaxY - oMinY);
+  function toWorld(p){ return [(p[0] - XC) * SX, (p[1] - YC) * SY]; }
+  const SIL = SIL_U.map(toWorld);
+  const CEREB = CEREBELLUM.map(toWorld);
+  const STEM = BRAINSTEM_AXIS.map(toWorld);
+  const wMinX = (oMinX - XC) * SX, wMaxX = (oMaxX - XC) * SX;
+  const wMinY = (oMinY - YC) * SY, wMaxY = (oMaxY - YC) * SY;
+  const HALF_H = Math.max(wMaxY, -wMinY);
+
+  // Half-thickness: the y profile closes at the silhouette, the x taper is 1.75.
+  function halfThick(x, y){
+    const ty = 1 - (y / HALF_H) * (y / HALF_H);
+    const tx = 1 - (x / 1.75) * (x / 1.75);
+    return 0.62 * Math.sqrt(Math.max(0, ty)) * Math.sqrt(Math.max(0.15, tx));
+  }
+
+  // grooves: the Sylvian fissure (a bowed curve) and the cerebellum boundary
+  const SYLVIAN = [];
+  for (let k = 0; k <= 24; k++) {
+    const t = k / 24, mt = 1 - t;                              // quadratic Bézier
+    SYLVIAN.push(toWorld([mt*mt*0.20 + 2*mt*t*0.36 + t*t*0.55, mt*mt*0.42 + 2*mt*t*0.40 + t*t*0.50]));
+  }
+  const CEREB_LINE = [toWorld([0.78,0.36]), toWorld([0.56,0.30])];
+  function grooveDist(x, y){
+    return Math.min(polylineDist(x, y, SYLVIAN, false), polylineDist(x, y, CEREB_LINE, false));
+  }
+
+  const RX = 0.12, RY = 0.35;                                  // front-left three-quarter, from above
   const cosX = Math.cos(RX), sinX = Math.sin(RX), cosY = Math.cos(RY), sinY = Math.sin(RY);
+  let brainMinY = Infinity, brainMaxY = -Infinity;
   function rotateInto(x, y, z, arr, i){
     const y1 = y*cosX - z*sinX, z1 = y*sinX + z*cosX;          // X
     arr[i*3] = x*cosY + z1*sinY; arr[i*3+1] = y1; arr[i*3+2] = -x*sinY + z1*cosY;  // Y
+    if (y1 < brainMinY) brainMinY = y1; if (y1 > brainMaxY) brainMaxY = y1;
   }
 
-  let brainMinY = Infinity, brainMaxY = -Infinity;
-  let nearGroove = 0, dropped = 0;
-  const H = 0.01;
-  for (let i = 0; i < FORM_N; i++) {
-    // draw a candidate inside the silhouette
-    let u, v;
-    do {
-      u = oMinX + Math.random() * (oMaxX - oMinX);
-      v = oMinY + Math.random() * (oMaxY - oMinY);
-    } while (!insidePolygon(u, v, SIL));
-
-    // groove drop, decided in outline space
-    if (grooveDist(u, v) < 0.02) {
-      nearGroove++;
-      if (Math.random() < 0.75) {
-        dropped++;
-        inBrain[i] = 0;
-        ambientXYZ(posBrain, i);                                // dropped: joins the field
-        nrm[i*3] = 0; nrm[i*3+1] = 0; nrm[i*3+2] = 1;
-        put(colBrain, i, cWhite);
-        continue;
-      }
-    }
-    inBrain[i] = 1;
-
-    const x = (u - XC) * BRAIN_SCALE, y = (v - YC) * BRAIN_SCALE;
-    const w = halfThick(x, y);
-    const surface = Math.random() < 0.85;
-    const side = Math.random() < 0.5 ? 1 : -1;
-    let z, nx, ny, nz;
-    if (surface) {
-      z = side * Math.max(0, w - Math.random() * 0.06);        // small inward jitter
-      const wx = (halfThick(x + H, y) - halfThick(x - H, y)) / (2*H);
-      const wy = (halfThick(x, y + H) - halfThick(x, y - H)) / (2*H);
-      nx = -wx; ny = -wy; nz = side;
-    } else {
-      z = (Math.random()*2 - 1) * w;
-      nx = 0; ny = 0; nz = z >= 0 ? 1 : -1;
-    }
-    const nl = Math.hypot(nx, ny, nz) || 1;
-    nx /= nl; ny /= nl; nz /= nl;
-
-    let px = x, py = y, pz = z;
-    if (surface) {                                             // elongated gyri
-      const d = 0.07 * ridged(noise3(px*4.2, py*0.45*4.2, pz*4.2)) + 0.03 * noise3(px*9.0, py*0.45*9.0, pz*9.0);
-      px += nx*d; py += ny*d; pz += nz*d;
-    }
-    rotateInto(px, py, pz, posBrain, i);
-    rotateInto(nx, ny, nz, nrm, i);
-    if (posBrain[i*3+1] < brainMinY) brainMinY = posBrain[i*3+1];
-    if (posBrain[i*3+1] > brainMaxY) brainMaxY = posBrain[i*3+1];
-    put(colBrain, i, Math.random() < 0.55 ? cWhite : cViolet); // base; rim gold is per-frame
+  /* particle budget over the 4700 form instances */
+  const N_BAND = Math.round(FORM_N * 0.22), N_STREAM = Math.round(FORM_N * 0.62);
+  const N_INTERIOR = Math.round(FORM_N * 0.10), N_STEM = 40;
+  const N_CEREB = FORM_N - N_BAND - N_STREAM - N_INTERIOR;     // 6%, absorbs rounding
+  const stats = { band:0, streamlineCurves:0, frontParticles:0, backCurves:0, streamlineParticles:0, mirroredCurves:0,
+                  interior:0, toInterior:0, cerebellumCurves:0, cerebellumParticles:0, brainstem:0 };
+  let slot = 0;                                                // next free instance index
+  function placeBrain(x, y, z, c){
+    if (slot >= FORM_N) return false;
+    rotateInto(x, y, z, posBrain, slot);
+    put(colBrain, slot, c);
+    slot++;
+    return true;
   }
-  const brainSurvivors = FORM_N - dropped;
+
+  // 22%: the outline band. Points within 0.06 of the silhouette, on both skins.
+  function outlineBand(n){
+    const cum = [0];
+    for (let i = 0; i < SIL.length; i++) {
+      const a = SIL[i], b = SIL[(i + 1) % SIL.length];
+      cum.push(cum[i] + Math.hypot(b[0]-a[0], b[1]-a[1]));
+    }
+    const total = cum[cum.length - 1];
+    let placed = 0, tries = 0;
+    while (placed < n && tries < n * 20) {
+      tries++;
+      const s = Math.random() * total;
+      let i = 0; while (i < SIL.length - 1 && cum[i+1] < s) i++;
+      const a = SIL[i], b = SIL[(i + 1) % SIL.length];
+      const t = (s - cum[i]) / ((cum[i+1] - cum[i]) || 1e-9);
+      const qx = a[0] + (b[0]-a[0])*t, qy = a[1] + (b[1]-a[1])*t;
+      const ex = b[0]-a[0], ey = b[1]-a[1], el = Math.hypot(ex, ey) || 1e-9;
+      let nx = ey/el, ny = -ex/el;                             // one of the two normals
+      if (!insidePolygon(qx + nx*0.02, qy + ny*0.02, SIL)) { nx = -nx; ny = -ny; }
+      const d = Math.random() * 0.06, jt = (Math.random()-0.5) * 0.02;
+      const x = qx + nx*d - ny*jt, y = qy + ny*d + nx*jt;
+      if (!insidePolygon(x, y, SIL)) continue;
+      const z = (Math.random() < 0.5 ? 1 : -1) * halfThick(x, y) * 0.9;
+      if (placeBrain(x, y, z, cGold)) placed++;
+    }
+    return placed;
+  }
+
+  // 62%: gyri streamlines along a rotated noise gradient, kept 0.075 apart.
+  const SPACING = 0.075;
+  const gCols = Math.ceil((wMaxX - wMinX) / SPACING) + 2, gRows = Math.ceil((wMaxY - wMinY) / SPACING) + 2;
+  // One occupancy grid per surface. Each cell remembers which curve owns it and
+  // where that curve's point is, so spacing is a real distance test, not a
+  // cell-adjacency test that would over-exclude to ~2 cells.
+  function makeGrid(){
+    return { id: new Int16Array(gCols * gRows).fill(-1), px: new F(gCols * gRows), py: new F(gCols * gRows) };
+  }
+  const gridFront = makeGrid(), gridBack = makeGrid();
+  function cellOf(x, y){
+    const cx = Math.floor((x - wMinX) / SPACING) + 1, cy = Math.floor((y - wMinY) / SPACING) + 1;
+    if (cx < 0 || cy < 0 || cx >= gCols || cy >= gRows) return -1;
+    return cy * gCols + cx;
+  }
+  function occupiedByOther(g, x, y, self){
+    const c = cellOf(x, y);
+    if (c < 0) return true;
+    const cx = c % gCols, cy = (c - cx) / gCols;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= gCols || ny >= gRows) continue;
+      const k = ny * gCols + nx, id = g.id[k];
+      if (id === -1 || id === self) continue;
+      if (Math.hypot(g.px[k] - x, g.py[k] - y) < SPACING) return true;
+    }
+    return false;
+  }
+  function claim(g, x, y, id){
+    const c = cellOf(x, y);
+    if (c >= 0) { g.id[c] = id; g.px[c] = x; g.py[c] = y; }
+  }
+  // regions: cerebrum curves stay out of the cerebellum and the brainstem
+  const STEM_POLY = [[0.56,0.30],[0.55,0.22],[0.52,0.12],[0.46,0.10],[0.44,0.20],[0.46,0.30]].map(toWorld);
+  function inCerebrum(x, y){
+    return insidePolygon(x, y, SIL) && !insidePolygon(x, y, CEREB) && !insidePolygon(x, y, STEM_POLY);
+  }
+  const _d = [0, 0], _in = [0, 0];
+  const STEER_R = 0.18;
+  function inwardDir(x, y, poly, out){                         // gradient of distance-to-edge
+    const h = 0.01;
+    out[0] = (polylineDist(x + h, y, poly, true) - polylineDist(x - h, y, poly, true)) / (2*h);
+    out[1] = (polylineDist(x, y + h, poly, true) - polylineDist(x, y - h, poly, true)) / (2*h);
+    const l = Math.hypot(out[0], out[1]) || 1e-9;
+    out[0] /= l; out[1] /= l;
+  }
+  function steer(x, y, poly, d){
+    const e = polylineDist(x, y, poly, true);
+    if (e >= STEER_R) return;
+    inwardDir(x, y, poly, _in);
+    if (d[0]*_in[0] + d[1]*_in[1] >= 0) return;                // already heading in
+    const k = (STEER_R - e) / STEER_R * 1.4;
+    d[0] += _in[0] * k; d[1] += _in[1] * k;
+    const l = Math.hypot(d[0], d[1]) || 1e-9;
+    d[0] /= l; d[1] /= l;
+  }
+  function fieldDir(x, y, out){                                // rotate90(∇noise2(p·2.6))
+    const h = 0.01, k = 2.6;
+    const gx = (noise2((x+h)*k, y*k) - noise2((x-h)*k, y*k)) / (2*h);
+    const gy = (noise2(x*k, (y+h)*k) - noise2(x*k, (y-h)*k)) / (2*h);
+    const l = Math.hypot(gx, gy) || 1e-9;
+    out[0] = -gy / l; out[1] = gx / l;
+  }
+  function walkStreamline(id, sx, sy, steps, stepLen, region, poly, g, side, mirror, colour, jitterZ){
+    let x = sx, y = sy, pdx = 0, pdy = 0, ang = 0, placed = 0;
+    const driftRate = (Math.random() - 0.5) * 0.16;            // slow per-curve meander
+    for (let s = 0; s < steps; s++) {
+      if (!region(x, y)) break;
+      if (grooveDist(x, y) < 0.03) break;
+      if (occupiedByOther(g, x, y, id)) break;
+      claim(g, x, y, id);
+      if (mirror) claim(gridBack, x, y, id);
+      const w = halfThick(x, y);
+      if (!placeBrain(x, y, side * (w - Math.random() * jitterZ), colour)) return placed;
+      placed++;
+      if (mirror) { if (!placeBrain(x, y, -side * (w - Math.random() * jitterZ), colour)) return placed; placed++; }
+      fieldDir(x, y, _d);
+      ang += driftRate + (Math.random() - 0.5) * 0.06;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      let dx = _d[0]*ca - _d[1]*sa, dy = _d[0]*sa + _d[1]*ca;
+      if (pdx*dx + pdy*dy < 0) { dx = -dx; dy = -dy; }         // never reverse
+      _d[0] = dx; _d[1] = dy;
+      steer(x, y, poly, _d);                                   // curl along the rim
+      dx = _d[0]; dy = _d[1];
+      pdx = dx; pdy = dy;
+      x += dx * stepLen; y += dy * stepLen;
+    }
+    return placed;
+  }
+  // Clearance to the nearest point of any other curve, looked up over a 5x5
+  // neighbourhood. Used to pick starts with room to run.
+  function clearance(g, x, y){
+    const c = cellOf(x, y);
+    if (c < 0) return 0;
+    const cx = c % gCols, cy = (c - cx) / gCols;
+    let best = 9;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= gCols || ny >= gRows) continue;
+      const k = ny * gCols + nx;
+      if (g.id[k] === -1) continue;
+      const d = Math.hypot(g.px[k] - x, g.py[k] - y);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  const _start = [0, 0];
+  function pickStart(region, edgeClear, g){
+    // best of 40 valid candidates by clearance: a curve that starts with room
+    // runs long before it meets another trail, which is what fills the budget
+    let bestD = -1, found = false, cands = 0;
+    for (let t = 0; t < 400 && cands < 40; t++) {
+      const x = wMinX + Math.random() * (wMaxX - wMinX), y = wMinY + Math.random() * (wMaxY - wMinY);
+      if (!region(x, y)) continue;
+      const e = polylineDist(x, y, SIL, true);
+      if (e < edgeClear) continue;
+      const gdist = grooveDist(x, y);
+      if (gdist < 0.03) continue;
+      const d = Math.min(clearance(g, x, y), e, gdist);
+      if (d < SPACING) continue;
+      cands++;
+      if (d > bestD) { bestD = d; _start[0] = x; _start[1] = y; found = true; }
+    }
+    return found ? _start : null;
+  }
+  const inCereb = (x, y) => insidePolygon(x, y, CEREB);
+  function curveColour(){
+    const r = Math.random();
+    return r < 0.5 ? cLogoWhite : r < 0.8 ? cViolet : r < 0.9 ? cPink : cTeal;
+  }
+
+  function interiorPoint(c){
+    for (let t = 0; t < 200; t++) {
+      const x = wMinX + Math.random() * (wMaxX - wMinX), y = wMinY + Math.random() * (wMaxY - wMinY);
+      if (!insidePolygon(x, y, SIL)) continue;
+      return placeBrain(x, y, (Math.random()*2 - 1) * halfThick(x, y) * 0.9, c);
+    }
+    ambientXYZ(posBrain, slot); put(colBrain, slot, c); slot++;   // unreachable in practice
+    return true;
+  }
+  function buildBrain(){
+    stats.band = outlineBand(N_BAND);
+
+    // 62%: 90 front-surface curves, 35% of them mirrored, as specified
+    const streamStart = slot, streamEnd = slot + N_STREAM;
+    let id = 0;
+    while (slot < streamEnd && id < 90) {
+      const start = pickStart(inCerebrum, 0.08, gridFront);
+      if (!start) break;
+      const mirror = Math.random() < 0.35;
+      const before = slot;
+      walkStreamline(id, start[0], start[1], 38, 0.045, inCerebrum, SIL, gridFront, 1, mirror, curveColour(), 0.03);
+      if (slot > before) { stats.streamlineCurves++; if (mirror) stats.mirroredCurves++; }
+      id++;
+    }
+    stats.frontParticles = slot - streamStart;
+    // the front is now as sparse as the spacing rule allows; the rest of the
+    // streamline budget goes on the back surface, on its own spacing grid
+    id = 500;
+    while (slot < streamEnd && id < 700) {
+      const start = pickStart(inCerebrum, 0.08, gridBack);
+      if (!start) break;
+      const before = slot;
+      walkStreamline(id, start[0], start[1], 38, 0.045, inCerebrum, SIL, gridBack, -1, false, curveColour(), 0.03);
+      if (slot > before) stats.backCurves++;
+      id++;
+    }
+    stats.streamlineParticles = slot - streamStart;
+    while (slot < streamEnd) { interiorPoint(cDim); stats.toInterior++; }
+
+    // 10%: interior at random depth
+    for (let k = 0; k < N_INTERIOR; k++) { interiorPoint(cDim); stats.interior++; }
+
+    // 6%: cerebellum streamlines in their own sub-polygon, then the brainstem
+    const cerebStart = slot, cerebEnd = slot + N_CEREB - N_STEM;
+    let cid = 1000;
+    while (slot < cerebEnd && cid < 1040) {
+      const start = pickStart(inCereb, 0.02, gridFront);
+      if (!start) break;
+      const before = slot;
+      walkStreamline(cid, start[0], start[1], 16, 0.03, inCereb, CEREB, gridFront, 1, Math.random() < 0.35,
+                     Math.random() < 0.3 ? cGold : cViolet, 0.02);
+      if (slot > before) stats.cerebellumCurves++;
+      cid++;
+    }
+    stats.cerebellumParticles = slot - cerebStart;
+    while (slot < cerebEnd) { interiorPoint(cDim); stats.toInterior++; }
+    for (let k = 0; k < N_STEM && slot < FORM_N; k++) {
+      const t = (k + 0.5) / N_STEM;
+      const x = STEM[0][0] + (STEM[1][0]-STEM[0][0])*t + (Math.random()-0.5)*0.03;
+      const y = STEM[0][1] + (STEM[1][1]-STEM[0][1])*t + (Math.random()-0.5)*0.03;
+      if (placeBrain(x, y, (Math.random()-0.5) * 0.1, cLogoWhite)) stats.brainstem++;
+    }
+    while (slot < FORM_N) { interiorPoint(cDim); stats.toInterior++; }
+  }
+  buildBrain();
 
   /* ── form: logo, from the mark geometry (24x24 grid, stroke 2) ─── */
   function buildLogo(){
@@ -1105,51 +1308,61 @@ import * as THREE from 'three';
     posLogo[i*3+2] = posScatter[i*3+2] = posBrain[i*3+2];
     const c = isTeal[i] ? cTeal : cWhite;
     put(colBrain, i, c); put(colLogo, i, c); put(colScatter, i, c);
-    inBrain[i] = 0;
   }
 
   const FORMS = { brain: posBrain, logo: posLogo, scatter: posScatter };
   const FORM_COLS = { brain: colBrain, logo: colLogo, scatter: colScatter };
 
-  if (window.TURNSTYL) {
-    window.TURNSTYL.sceneStats = { count: COUNT, formInstances: FORM_N, brainNearGroove: nearGroove,
-                                   brainDropped: dropped, brainSurvivors };
-  }
+  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats, form: 'brain', target: 'brain' };
+  if (window.TURNSTYL) window.TURNSTYL.sceneStats = sceneStats;
 
   cur.set(posBrain); colCur.set(colBrain); colFrom.set(colBrain);
 
   /* ── state ──────────────────────────────────────────────────────── */
   const consoleEl = document.getElementById('console');
+  const hero = document.querySelector('.hero');
   function consoleActive(){
     if (!consoleEl) return false;
     return consoleEl.getBoundingClientRect().top <= window.innerHeight * 0.42;
+  }
+  function heroScrolled(){                                     // fraction of the hero above the top edge
+    if (!hero) return 0;
+    const r = hero.getBoundingClientRect();
+    return r.height > 0 ? Math.min(1, Math.max(0, -r.top / r.height)) : 0;
   }
   function formFor(s){
     if (s === 'pulse') return 'logo';
     if (s === 'reform') return 'brain';
     if (s === 'scatter') return 'scatter';
-    return consoleActive() ? 'logo' : 'brain';                 // 'ring': hero vs console
+    if (consoleActive()) return 'logo';                        // 'ring' in the console
+    return heroScrolled() >= HERO_SCROLL_TRIGGER ? 'logo' : 'brain';  // 'ring' in the hero
   }
 
   let state = document.body.dataset.state || 'ring';
   let missing = document.body.classList.contains('memory-missing');
   let form = missing ? 'scatter' : formFor(state);
-  let transitUntil = 0, colT = 1;
-  let swayT = 0, swayAmp = 0.35, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
-  let greyMix = 0, redMix = 0, rimW = 0, lastTint = '';
+  let transitUntil = 0, wasTransit = false, colT = 1;
+  let swayT = 0, swayAmp = 0.30, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
+  let greyMix = 0, redMix = 0, lastTint = '';
   let offX = 0, offXFrac = 0.76, groupY = 0;
   let rotX = 0, rotY = 0;
   let mouseX = 0, mouseY = 0, hasPointer = false;
   let fitScale = 1;
+  sceneStats.form = form; sceneStats.target = form;
 
   function setForm(next){
     if (next === form) return;
+    const prev = form;
     colFrom.set(colCur);
     colT = 0;
-    const fromScatter = (form === 'scatter');
     form = next;
     // pass through a scatter unless we are already in one
-    transitUntil = (next === 'scatter' || fromScatter || reduced) ? 0 : performance.now() + SCATTER_TRANSIT_MS;
+    const via = !(next === 'scatter' || prev === 'scatter' || reduced);
+    transitUntil = via ? performance.now() + SCATTER_TRANSIT_MS : 0;
+    sceneStats.target = next;
+    sceneStats.form = via ? 'scatter' : next;
+    console.info(via ? 'turnstyl scene: ' + prev + ' -> scatter -> ' + next
+                     : 'turnstyl scene: ' + prev + ' -> ' + next);
   }
   function triggerPulse(){ pulseAt = performance.now(); }
   function triggerReform(){
@@ -1221,17 +1434,17 @@ import * as THREE from 'three';
     mouseY = -((e.clientY / window.innerHeight) * 2 - 1);
     hasPointer = true;
   }, { passive:true });
-  const hero = document.querySelector('.hero');
   if (hero) hero.addEventListener('click', function(){ triggerPulse(); });
   window.addEventListener('scroll', function(){
     groupY = Math.max(-0.6, Math.min(0.6, -0.0005 * window.scrollY));
-    if (state === 'ring' && !missing) applyState();            // hero brain vs console logo
+    // the hero->logo morph is decided here from geometry, not by the section observer
+    if (state === 'ring' && !missing) applyState();
   }, { passive:true });
 
   /* ── scratch objects: nothing is allocated per frame ────────────── */
   const dummy = new THREE.Object3D();
-  const _q = new THREE.Quaternion(), _qInv = new THREE.Quaternion(), _v = new THREE.Vector3();
-  const _axis = new THREE.Vector3(), _view = new THREE.Vector3();
+  const _q = new THREE.Quaternion(), _v = new THREE.Vector3();
+  const _axis = new THREE.Vector3();
   const _hit = new THREE.Vector3(), _dir = new THREE.Vector3();
   let bulgeX = 0, bulgeY = 0, bulgeZ = 0, bulgeOn = false;
 
@@ -1257,12 +1470,15 @@ import * as THREE from 'three';
     const env = waving ? (1 - pulseP) * (1 - pulseP) : 0;
     const loose = (reformP >= 0 && reformP <= 1 && !reduced) ? (1 - reformP) : 0;
     const inTransit = now < transitUntil;
+    if (wasTransit && !inTransit) sceneStats.form = form;      // the scatter leg is over
+    wasTransit = inTransit;
     const target = inTransit ? posScatter : FORMS[form];
+    const brainNow = form === 'brain' && !inTransit;
 
     /* group: sway (bounded, never edge-on), parallax, offset, scroll drift */
     if (!reduced) swayT += dt;
     const gk = reduced ? 1 : 1 - Math.exp(-2 * dt);            // eased at 2/s
-    swayAmp += ((form === 'logo' ? 0.25 : 0.35) - swayAmp) * gk;
+    swayAmp += ((form === 'logo' ? 0.25 : 0.30) - swayAmp) * gk;
     rotX += (mouseY * 0.18 - rotX) * gk;
     rotY += (mouseX * 0.28 - rotY) * gk;
     const offXT = (offXFrac - 0.5) * visW;                     // form centre at 76% / 78%
@@ -1272,8 +1488,11 @@ import * as THREE from 'three';
     group.scale.setScalar(fitScale);
     group.updateMatrixWorld();
 
-    /* colours: per-form crossfade over the whole transition, then the
-       view-dependent gold rim on the brain, then grey / red tints */
+    /* material opacity follows the form: 0.6 on the brain, 0.85 elsewhere */
+    const wantOp = brainNow ? BRAIN_OPACITY : OTHER_OPACITY;
+    mat.opacity += (wantOp - mat.opacity) * (reduced ? 1 : 1 - Math.exp(-3 * dt));
+
+    /* colours: per-form crossfade over the whole transition, then tints */
     if (colT < 1) colT = Math.min(1, colT + dt * (1000 / MORPH_MS));
     const flashing = (now - flashAt) < FLASH_MS;
     const wantGrey = (form === 'scatter' && !missing) ? 1 : 0;
@@ -1281,18 +1500,9 @@ import * as THREE from 'three';
     const tk = reduced ? 1 : 1 - Math.exp(-4 * dt);
     greyMix += (wantGrey - greyMix) * tk;
     redMix += (wantRed - redMix) * tk;
-    const wantRim = (form === 'brain' && !inTransit && !missing) ? 1 : 0;
-    rimW += (wantRim - rimW) * (reduced ? 1 : 1 - Math.exp(-3 * dt));
-    if (rimW < 0.002) rimW = 0;
     const tint = greyMix.toFixed(2) + ':' + redMix.toFixed(2);
-    const recolour = colT < 1 || tint !== lastTint || rimW > 0;
-    if (recolour) {
+    if (colT < 1 || tint !== lastTint) {
       lastTint = tint;
-      // view direction in the group's local space, for the rim test
-      _view.copy(group.position).sub(camera.position).normalize();
-      _qInv.copy(group.quaternion).invert();
-      _view.applyQuaternion(_qInv);
-      const vx = _view.x, vy = _view.y, vz = _view.z;
       const cols = FORM_COLS[form];
       const e = colT * colT * (3 - 2 * colT);
       for (let i = 0; i < COUNT; i++) {
@@ -1301,10 +1511,6 @@ import * as THREE from 'three';
         let g = colFrom[j+1] + (cols[j+1] - colFrom[j+1]) * e;
         let b = colFrom[j+2] + (cols[j+2] - colFrom[j+2]) * e;
         colCur[j] = r; colCur[j+1] = g; colCur[j+2] = b;
-        if (rimW > 0 && inBrain[i]) {
-          const d = Math.abs(nrm[j]*vx + nrm[j+1]*vy + nrm[j+2]*vz);
-          if (d < RIM_DOT) { r += (cGold.r - r)*rimW; g += (cGold.g - g)*rimW; b += (cGold.b - b)*rimW; }
-        }
         r += (cGrey.r - r)*greyMix; g += (cGrey.g - g)*greyMix; b += (cGrey.b - b)*greyMix;
         colOut[j]   = r + (cRed.r - r)*redMix;
         colOut[j+1] = g + (cRed.g - g)*redMix;
@@ -1315,6 +1521,7 @@ import * as THREE from 'three';
 
     pointerIntoScene();
 
+    const sk = reduced ? 1 : 1 - Math.exp(-3 * dt);            // size class follows the form
     for (let i = 0; i < COUNT; i++) {
       const j = i*3;
       let tx = target[j], ty = target[j+1], tz = target[j+2];
@@ -1365,6 +1572,7 @@ import * as THREE from 'three';
         sBulge[i]  += (wantS  - sBulge[i])  * bk;
         spinAng[i] += spinVel[i] * dt;
       }
+      sBase[i] += ((brainNow ? sBrain[i] : sOther[i]) - sBase[i]) * sk;
 
       dummy.position.set(cur[j] + bulge[j], cur[j+1] + bulge[j+1], cur[j+2] + bulge[j+2]);
       _axis.set(axis[j], axis[j+1], axis[j+2]);

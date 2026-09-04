@@ -5,11 +5,13 @@
     turnstyl pay <job_id> <step> [--tx <hash>]
     turnstyl ledger <buyer>
     turnstyl status
+    turnstyl reset --db <path>
 """
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -20,12 +22,43 @@ from rich.text import Text
 
 from . import schema as S
 from .engine import Engine, Outcome
+from .memory import PROJECT_ROOT
 from .payments import explorer_address, explorer_tx
 
 load_dotenv()
 
-console = Console()
+# Camera-friendly width. Rich otherwise fills the terminal, which makes panels
+# too wide to read on a recording. TURNSTYL_WIDTH (or --narrow) caps it.
+CAMERA_WIDTH = 100
+WIDTH_ENV_VAR = "TURNSTYL_WIDTH"
+
+
+def _configured_width() -> int | None:
+    raw = os.environ.get(WIDTH_ENV_VAR)
+    if not raw or not raw.strip():
+        return None
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise RuntimeError(
+            f"turnstyl: {WIDTH_ENV_VAR} must be a whole number of columns, got "
+            f"{raw!r}. Unset it or set something like {WIDTH_ENV_VAR}={CAMERA_WIDTH}."
+        ) from None
+    if value < 40:
+        raise RuntimeError(
+            f"turnstyl: {WIDTH_ENV_VAR}={value} is too narrow to render a panel; "
+            f"use 40 or more."
+        )
+    return value
+
+
+console = Console(width=_configured_width())
 err_console = Console(stderr=True)
+
+
+def panel_width() -> int:
+    """Never wider than a recording can show, whatever the terminal is."""
+    return min(console.width, CAMERA_WIDTH)
 
 app = typer.Typer(
     add_completion=False,
@@ -34,6 +67,19 @@ app = typer.Typer(
 )
 job_app = typer.Typer(add_completion=False, no_args_is_help=True, help="Job commands.")
 app.add_typer(job_app, name="job")
+
+
+@app.callback()
+def main_options(
+    narrow: bool = typer.Option(
+        False,
+        "--narrow",
+        help=f"Cap output at {CAMERA_WIDTH} columns for recording.",
+    ),
+) -> None:
+    """turnstyl - a metered audit agent that gets paid per step."""
+    if narrow:
+        console.width = CAMERA_WIDTH
 
 DECISION_STYLE = {
     S.RUN_FREE: "cyan",
@@ -52,7 +98,15 @@ def agent_address() -> str:
     return os.environ.get("AGENT_ADDRESS") or "(AGENT_ADDRESS not set in .env)"
 
 
+def render_memory_read(outcome: Outcome) -> None:
+    if outcome.memory_read:
+        console.print(
+            Text(f"memory read: {', '.join(outcome.memory_read)}", style="dim")
+        )
+
+
 def render_decision(outcome: Outcome) -> None:
+    """The verdict, printed last so it is what stays on screen."""
     if not outcome.decision:
         return
     style = DECISION_STYLE.get(outcome.decision, "white")
@@ -61,10 +115,6 @@ def render_decision(outcome: Outcome) -> None:
     line.append(", because ")
     line.append(outcome.reason)
     console.print(line)
-    if outcome.memory_read:
-        console.print(
-            Text(f"memory read: {', '.join(outcome.memory_read)}", style="dim")
-        )
 
 
 def render_step(outcome: Outcome) -> None:
@@ -89,6 +139,7 @@ def render_step(outcome: Outcome) -> None:
             subtitle=subtitle,
             border_style="cyan",
             padding=(1, 2),
+            width=panel_width(),
         )
     )
 
@@ -117,7 +168,13 @@ def render_invoice(
     if backend is not None and job_id:
         body.add_row("buyer runs", backend.buyer_command(job_id, invoice.step))
     console.print(
-        Panel(body, title="INVOICE", border_style="yellow", padding=(1, 2))
+        Panel(
+            body,
+            title="INVOICE",
+            border_style="yellow",
+            padding=(1, 2),
+            width=panel_width(),
+        )
     )
 
 
@@ -169,7 +226,6 @@ def render_outcome(outcome: Outcome, engine: Engine | None = None) -> None:
         console.print(Text(f"memory hint: {hint}", style="dim"))
     render_step(outcome)
     render_commit(outcome)
-    render_decision(outcome)
     render_invoice(outcome.invoice, outcome.price_reason, engine, outcome.job_id)
     if outcome.complete:
         console.print(
@@ -184,6 +240,9 @@ def render_outcome(outcome: Outcome, engine: Engine | None = None) -> None:
         )
     elif outcome.note:
         console.print(Text(outcome.note, style="dim"))
+    # Last two lines on screen: what memory said, then the verdict it produced.
+    render_memory_read(outcome)
+    render_decision(outcome)
 
 
 def fail(message: str) -> None:
@@ -322,6 +381,90 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
             )
         console.print(table)
     console.print(Text(f"memory read: {', '.join(data['memory_read'])}", style="dim"))
+
+
+@app.command("reset")
+def reset(
+    db: str = typer.Option(..., "--db", help="Path to the turnstyl database to delete."),
+) -> None:
+    """Delete a turnstyl memory store. This is the delete test.
+
+    Reports what the store held before removing it, so what is being destroyed
+    is on the record. Refuses any path outside ./data/.
+    """
+    import sqlite3
+
+    target = Path(db).expanduser()
+    data_dir = (PROJECT_ROOT / "data").resolve()
+    try:
+        resolved = target.resolve()
+    except OSError as e:
+        fail(f"turnstyl: cannot resolve {target}: {e}")
+        raise
+    if resolved.parent != data_dir:
+        fail(
+            f"turnstyl: refusing to delete {resolved}.\n"
+            f"  reset only removes databases directly inside {data_dir}."
+        )
+    if not resolved.is_file():
+        fail(
+            f"turnstyl: no database at {resolved}. Nothing to delete.\n"
+            f"  Run '.venv/bin/turnstyl status' to see which store is in use."
+        )
+
+    size = resolved.stat().st_size
+    # Counted with sqlite3 rather than the SDK: there is no public API that
+    # lists state keys, and this has to read all three tables before the file
+    # stops existing.
+    try:
+        conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+        count = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+        states = count("SELECT count(*) FROM state_documents")
+        entities = count("SELECT count(*) FROM entities")
+        archived = count("SELECT count(*) FROM archived_entities")
+        events = count("SELECT count(*) FROM journal_events")
+        conn.close()
+    except sqlite3.Error as e:
+        fail(
+            f"turnstyl: {resolved} is not a readable turnstyl database ({e}).\n"
+            f"  Refusing to delete a file this command cannot account for."
+        )
+        raise
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", justify="right")
+    grid.add_column()
+    grid.add_row("database", str(resolved))
+    grid.add_row("size", f"{size:,} bytes")
+    grid.add_row("state keys", str(states))
+    grid.add_row("entities", f"{entities} live, {archived} archived")
+    grid.add_row("journal events", str(events))
+    console.print(
+        Panel(
+            grid,
+            title="ABOUT TO DELETE",
+            border_style="red",
+            padding=(1, 2),
+            width=panel_width(),
+        )
+    )
+
+    removed = []
+    for suffix in ("", "-wal", "-shm"):
+        sidecar = Path(str(resolved) + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+            removed.append(sidecar.name)
+    if resolved.exists():
+        fail(f"turnstyl: failed to delete {resolved}; it is still on disk.")
+
+    console.print(
+        Text(
+            f"memory deleted: {resolved} ({entities} entities, {events} "
+            f"journal events gone)",
+            style="bold red",
+        )
+    )
 
 
 @app.command("status")

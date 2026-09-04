@@ -70,16 +70,25 @@ has "depthWrite disabled"             "depthWrite: false"
 has "TetrahedronGeometry(1, 0)"       "TetrahedronGeometry(1, 0)"
 has "inline noise function"           "function noise3("
 has "inline smoothstep"               "function smoothstep("
-has "brain form generator"            "function brainSurface("
+has "ridged noise"                    "function ridged("
+has "lateral outline point array"     "OUTLINE = ["
+has "Catmull-Rom smoothing"           "function catmullRom("
+has "point-in-polygon test"           "function insidePolygon("
+has "groove drop (Sylvian + cerebellum)" "function grooveDist("
+has "logo form generator"             "function buildLogo("
+has "per-frame rim colour"            "RIM_DOT = 0.38"
+has "per-instance normals stored"     "const nrm = new F("
+has "transition through scatter"      "SCATTER_TRANSIT_MS = 700"
+has "console section chooses the logo" "consoleActive()"
 has "ambient field excluded from forms" "AMBIENT = 300"
-for f in brain ring scatter; do
+for f in brain logo scatter; do
   if grep -qE "[\"']${f}[\"']|\b${f}:" "$PAGE"; then
     ok "form present: $f"
   else
     bad "form present: $f" "no form named '${f}'"
   fi
 done
-has "state to form mapping"           "STATE_FORM"
+has "state to form mapping"           "function formFor("
 has "teal accent"                     "0x5DCAA5"
 
 echo
@@ -97,6 +106,16 @@ has "pauses when the tab is hidden"     "document.hidden"
 has "respects prefers-reduced-motion"   "prefers-reduced-motion"
 has "caps pixel ratio"                  "setPixelRatio"
 has "resizes with the window"           "resize"
+
+# ---------------------------------------------------------------- brand
+echo
+echo "brand"
+has "favicon links the mark"          'rel="icon" type="image/svg+xml" href="/static/brand/mark-light.svg"'
+has "lockup image in the top bar"     'src="/static/brand/lockup-a.svg" alt="turnstyl"'
+has "hero headline bounded"           ".hero h1{max-width:56vw}"
+BCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/static/brand/lockup-a.svg" 2>/dev/null)
+[ "$BCODE" = "200" ] && ok "GET /static/brand/lockup-a.svg returns 200" \
+  || bad "GET /static/brand/lockup-a.svg returns 200" "HTTP ${BCODE:-no response}"
 
 # ---------------------------------------------------------------- api
 echo

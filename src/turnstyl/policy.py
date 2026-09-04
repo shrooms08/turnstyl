@@ -78,8 +78,13 @@ def price(
 
 
 def recompute_trust_tier(buyer_entity: BuyerLedger) -> TrustTier:
-    """trusted: paid_steps >= 2 and nothing outstanding, here or from before.
+    """trusted: paid_steps >= 2, nothing outstanding, and no default on record.
     blocked: two or more unpaid steps carried over from completed jobs.
+
+    A buyer who let a job close with work unpaid carries ``defaults`` forever.
+    Paying the debt clears ``unpaid_from_prior_jobs`` and lifts the refusal, so
+    they can buy again — but they buy per step, up front. Credit is extended on
+    a record of paying, and theirs now contains a job that had to be chased.
     """
     if buyer_entity.unpaid_from_prior_jobs >= BLOCKED_MIN_UNPAID_PRIOR_JOBS:
         return TRUST_BLOCKED
@@ -87,6 +92,7 @@ def recompute_trust_tier(buyer_entity: BuyerLedger) -> TrustTier:
         buyer_entity.paid_steps >= TRUSTED_MIN_PAID_STEPS
         and buyer_entity.open_invoices == 0
         and buyer_entity.unpaid_from_prior_jobs == 0
+        and buyer_entity.defaults == 0
     ):
         return TRUST_TRUSTED
     return TRUST_NEW
@@ -99,6 +105,7 @@ def is_trusted(buyer_entity: BuyerLedger) -> bool:
         and buyer_entity.paid_steps >= TRUSTED_MIN_PAID_STEPS
         and buyer_entity.open_invoices == 0
         and buyer_entity.unpaid_from_prior_jobs == 0
+        and buyer_entity.defaults == 0
     )
 
 
@@ -124,6 +131,7 @@ def decide(
         f"paid_usdc={buyer_entity.paid_usdc:.2f}, "
         f"open_invoices={buyer_entity.open_invoices}, "
         f"unpaid_from_prior_jobs={buyer_entity.unpaid_from_prior_jobs}, "
+        f"defaults={buyer_entity.defaults}, "
         f"trust_tier={buyer_entity.trust_tier}"
     )
 
@@ -160,6 +168,12 @@ def decide(
         )
 
     amount = invoice.amount_usdc if invoice is not None else BASE_PRICES.get(step, 0.0)
+    if buyer_entity.defaults > 0:
+        return WAIT_FOR_PAYMENT, (
+            f"step {step} is unpaid at {amount:.2f} USDC and this buyer has "
+            f"{buyer_entity.defaults} default(s) on record, so work is sold up "
+            f"front even though the old debt is settled ({facts})"
+        )
     return WAIT_FOR_PAYMENT, (
         f"step {step} is unpaid at {amount:.2f} USDC and the buyer has not earned "
         f"credit ({facts}); trusted needs paid_steps >= {TRUSTED_MIN_PAID_STEPS} "

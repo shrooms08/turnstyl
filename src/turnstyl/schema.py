@@ -54,6 +54,15 @@ BASE_PRICES: dict[int, float] = {
     STEP_PATCH: 0.75,
     STEP_VERIFY: 0.25,
 }
+USDC_DECIMALS = 6
+USDC_UNITS = 10**USDC_DECIMALS
+
+
+def usdc_base_units(amount_usdc: float) -> int:
+    """USDC has 6 decimals; 0.50 USDC is 500000 base units."""
+    return round(amount_usdc * USDC_UNITS)
+
+
 CACHED_MULTIPLIER = 0.5
 EXPENSIVE_MULTIPLIER = 1.5
 EXPENSIVE_TOKEN_THRESHOLD = 6000
@@ -111,8 +120,17 @@ def job_state_key(job_id: str) -> str:
 
 
 def invoice_memo(job_id: str, step: int) -> str:
-    """The on-chain memo a buyer references when paying for one step."""
+    """The human-readable memo the fake backend shows on an invoice."""
     return f"turnstyl:{job_id}:step{step}"
+
+
+def invoice_memo_raw(job_id: str, step: int) -> str:
+    """The exact string hashed to bytes32 for the on-chain memo.
+
+    Deliberately bare — "<job_id>:<step>" — so a buyer, an explorer, or an
+    auditor can recompute keccak256 of it without knowing turnstyl's conventions.
+    """
+    return f"{job_id}:{step}"
 
 
 def sha256_text(text: str) -> str:
@@ -151,6 +169,11 @@ class OpenInvoice(_Model):
     memo: str
     paid: bool = False
     tx_hash: str | None = None
+    # Day 3. The block the invoice was issued at bounds the Paid-log scan, so a
+    # settlement search never walks the whole chain; the reason travels with the
+    # invoice so any later display can say why the step costs what it costs.
+    invoice_block: int | None = None
+    price_reason: str = ""
 
 
 class JobState(_Model):
@@ -177,6 +200,7 @@ class StepRecord(_Model):
     tokens: int = 0
     seconds: float = 0.0
     cached: bool = False
+    commit_tx: str | None = None
 
 
 class JobEntity(_Model):
@@ -188,11 +212,17 @@ class JobEntity(_Model):
 
 
 class OutstandingItem(_Model):
-    """A delivered-but-unpaid step. ADDITION to the day-2 spec — see BuyerLedger."""
+    """A delivered-but-unpaid step. ADDITION to the day-2 spec — see BuyerLedger.
+
+    Carries its own memo and issue block so ``BasePayments.reconcile`` can settle
+    it long after the job closed and its state document dropped the invoice.
+    """
 
     job_id: str
     step: int
     amount_usdc: float
+    memo: str = ""
+    invoice_block: int | None = None
 
 
 class BuyerLedger(_Model):
@@ -213,6 +243,11 @@ class BuyerLedger(_Model):
     paid_usdc: float = 0.0
     open_invoices: int = 0
     unpaid_from_prior_jobs: int = 0
+    # Day 3. Lifetime count of steps delivered on credit and left unpaid when a
+    # job closed. `unpaid_from_prior_jobs` falls back to 0 the moment the debt is
+    # settled; this does not. Settling a debt buys back the right to be served,
+    # not the right to be served on credit again.
+    defaults: int = 0
     trust_tier: TrustTier = TRUST_NEW
     jobs: list[str] = Field(default_factory=list)
     outstanding: list[OutstandingItem] = Field(default_factory=list)

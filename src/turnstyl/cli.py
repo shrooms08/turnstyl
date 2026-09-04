@@ -20,6 +20,7 @@ from rich.text import Text
 
 from . import schema as S
 from .engine import Engine, Outcome
+from .payments import explorer_address, explorer_tx
 
 load_dotenv()
 
@@ -87,28 +88,82 @@ def render_step(outcome: Outcome) -> None:
     )
 
 
-def render_invoice(invoice: S.OpenInvoice | None, price_reason: str = "") -> None:
+def render_invoice(
+    invoice: S.OpenInvoice | None,
+    price_reason: str = "",
+    engine: Engine | None = None,
+    job_id: str | None = None,
+) -> None:
     if invoice is None:
         return
+    backend = engine.payments if engine is not None else None
+    payee = backend.payee_address() if backend else agent_address()
+    reason = price_reason or invoice.price_reason
     body = Table.grid(padding=(0, 2))
     body.add_column(style="dim", justify="right")
     body.add_column()
     body.add_row("step", f"{invoice.step} ({S.STEP_NAMES[invoice.step]})")
     body.add_row("amount", f"{invoice.amount_usdc:.2f} USDC")
-    body.add_row("pay to", agent_address())
+    body.add_row("pay to", payee)
     body.add_row("memo", invoice.memo)
     body.add_row("status", "settled" if invoice.paid else "unpaid")
-    if price_reason:
-        body.add_row("priced", Text(price_reason))
+    if reason:
+        body.add_row("priced", Text(reason))
+    if backend is not None and job_id:
+        body.add_row("buyer runs", backend.buyer_command(job_id, invoice.step))
     console.print(
         Panel(body, title="INVOICE", border_style="yellow", padding=(1, 2))
     )
 
 
-def render_outcome(outcome: Outcome) -> None:
+def render_commit(outcome: Outcome) -> None:
+    """The receipt for what was just delivered."""
+    if outcome.commit_tx and outcome.commit_hash:
+        line = Text("COMMITTED ", style="bold green")
+        line.append(outcome.commit_hash[:10])
+        line.append(" tx ")
+        line.append(outcome.commit_tx)
+        console.print(line)
+        console.print(Text(explorer_tx(outcome.commit_tx), style="dim"))
+    elif outcome.commit_error:
+        console.print(
+            Text(
+                f"WARNING: on-chain commit failed and was skipped: "
+                f"{outcome.commit_error}",
+                style="bold yellow",
+            )
+        )
+        console.print(
+            Text(
+                "The step output is recorded in memory; only its on-chain receipt "
+                "is missing.",
+                style="dim",
+            )
+        )
+
+
+def render_reconciled(outcome_or_list) -> None:
+    items = (
+        outcome_or_list
+        if isinstance(outcome_or_list, list)
+        else outcome_or_list.reconciled
+    )
+    for item in items:
+        line = Text("RECONCILED ", style="bold green")
+        line.append(
+            f"step {item['step']} of job {item['job_id']} "
+            f"({item['amount_usdc']:.2f} USDC) settled on chain"
+        )
+        console.print(line)
+        console.print(Text(explorer_tx(item["tx_hash"]), style="dim"))
+
+
+def render_outcome(outcome: Outcome, engine: Engine | None = None) -> None:
+    render_reconciled(outcome)
     render_step(outcome)
+    render_commit(outcome)
     render_decision(outcome)
-    render_invoice(outcome.invoice, outcome.price_reason)
+    render_invoice(outcome.invoice, outcome.price_reason, engine, outcome.job_id)
     if outcome.complete:
         console.print(
             Panel(
@@ -152,7 +207,7 @@ def job_new(
     console.print(
         Text(f"job {outcome.job_id}  buyer {engine.store.buyer_key(buyer)}", style="dim")
     )
-    render_outcome(outcome)
+    render_outcome(outcome, engine)
 
 
 @job_app.command("run")
@@ -165,7 +220,7 @@ def job_run(job_id: str = typer.Argument(..., help="Job id from 'job new'.")) ->
         fail(f"turnstyl: {e}")
         raise
     console.print(Text(f"job {outcome.job_id}  status {outcome.status}", style="dim"))
-    render_outcome(outcome)
+    render_outcome(outcome, engine)
 
 
 @app.command("pay")
@@ -199,6 +254,7 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
     """Print what memory knows about one buyer."""
     engine = build_engine()
     data = engine.ledger(buyer)
+    render_reconciled(data.get("reconciled", []))
     book = data["ledger"]
     if not data["known"]:
         console.print(
@@ -218,6 +274,7 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
     grid.add_row("paid", f"{book.paid_usdc:.2f} USDC")
     grid.add_row("open invoices", str(book.open_invoices))
     grid.add_row("unpaid from prior jobs", str(book.unpaid_from_prior_jobs))
+    grid.add_row("defaults on record", str(book.defaults))
     grid.add_row("trust tier", book.trust_tier)
     grid.add_row("jobs", str(len(book.jobs)))
     console.print(Panel(grid, title="LEDGER", border_style="cyan", padding=(1, 2)))

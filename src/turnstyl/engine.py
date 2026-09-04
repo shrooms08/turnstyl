@@ -48,6 +48,10 @@ class Outcome:
     seconds: float = 0.0
     invoice: S.OpenInvoice | None = None
     price_reason: str = ""
+    commit_tx: str | None = None
+    commit_hash: str | None = None
+    commit_error: str | None = None
+    reconciled: list[dict] = field(default_factory=list)
     complete: bool = False
     resumed: bool = False
     note: str = ""
@@ -84,6 +88,7 @@ class Engine:
         contract_hash = S.sha256_text(contract_text)
         buyer_key = self.store.buyer_key(buyer)
 
+        reconciled = self._reconcile(buyer_key)
         read: list[str] = [S.STATE_ACTIVE_JOBS]
         existing = self._find_open_job(buyer_key, contract_hash, read)
         if existing is not None:
@@ -123,6 +128,7 @@ class Engine:
                 memory_read=_dedupe(read),
                 invoice=existing.open_invoice,
                 resumed=True,
+                reconciled=reconciled,
                 note=f"Resumed job {existing.job_id}.",
             )
 
@@ -149,7 +155,9 @@ class Engine:
         self.store.put_buyer(buyer_key, ledger)
         read.append(f"entity buyer/{buyer_key}")
 
-        return self._advance(state, contract_text, extra_reads=read)
+        outcome = self._advance(state, contract_text, extra_reads=read)
+        outcome.reconciled = reconciled
+        return outcome
 
     def run(self, job_id: str) -> Outcome:
         """Execute the current step of a job, or say why it cannot."""
@@ -193,8 +201,11 @@ class Engine:
                 note="Job is already complete. Nothing to run.",
             )
 
+        reconciled = self._reconcile(state.buyer)
         contract_text = self._contract_text_for(state)
-        return self._advance(state, contract_text, extra_reads=read)
+        outcome = self._advance(state, contract_text, extra_reads=read)
+        outcome.reconciled = reconciled
+        return outcome
 
     def pay(self, job_id: str, step: int, tx_hash: str | None = None) -> str:
         """Settle one invoice out of band. Test backends only."""
@@ -219,6 +230,7 @@ class Engine:
     def ledger(self, buyer: str) -> dict:
         """Everything memory knows about one buyer."""
         buyer_key = self.store.buyer_key(buyer)
+        reconciled = self._reconcile(buyer_key)
         ledger = self.store.get_buyer(buyer_key)
         known = self.store.buyer_exists(buyer_key)
         jobs = []
@@ -243,6 +255,7 @@ class Engine:
             "known": known,
             "ledger": ledger,
             "jobs": jobs,
+            "reconciled": reconciled,
             "memory_read": [
                 f"entity buyer/{buyer_key}",
                 *[S.job_state_key(j["job_id"]) for j in jobs],
@@ -268,6 +281,32 @@ class Engine:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    def _reconcile(self, buyer: str) -> list[dict]:
+        """Ask the payment backend to settle anything the buyer has since paid.
+
+        A no-op on the fake backend. On Base it walks the buyer's outstanding
+        invoices against Paid logs, so a debt cleared on chain is cleared here
+        before any decision is made about new work.
+        """
+        try:
+            return self.payments.reconcile(buyer)
+        except Exception as e:  # noqa: BLE001 - reconciliation must never block work
+            self.store.journal(
+                S.JournalEntry(
+                    evaluated=[f"entity buyer/{buyer} -> reconciliation attempted"],
+                    acted=[f"reconciliation failed: {type(e).__name__}: {e}"],
+                    forward=["decisions below use the ledger as last written"],
+                    extra={
+                        "job_id": None,
+                        "buyer": buyer,
+                        "step": None,
+                        "decision": "RECONCILE_FAILED",
+                        "price": None,
+                    },
+                )
+            )
+            return []
+
     def _find_open_job(
         self, buyer_key: str, contract_hash: str, read: list[str]
     ) -> S.JobState | None:
@@ -505,12 +544,38 @@ class Engine:
         entity.steps[str(step)] = record
         self.store.put_job_entity(job_id, entity)
 
+        # Commit the hash of what was delivered, for anything the buyer is billed
+        # for. Free work is not committed: nothing was sold, so there is nothing
+        # to prove. A failed commit is a warning, never a lost step — the work is
+        # already recorded in memory by the time we get here.
+        commit_tx: str | None = None
+        commit_error: str | None = None
+        if decision in (S.RUN_PAID, S.RUN_ON_CREDIT):
+            try:
+                commit_tx = self.payments.commit_output(
+                    job_id, step, record.output_sha256
+                )
+            except Exception as e:  # noqa: BLE001 - reported, never fatal
+                commit_error = f"{type(e).__name__}: {e}"
+            if commit_tx:
+                record.commit_tx = commit_tx
+                entity.steps[str(step)] = record
+                self.store.put_job_entity(job_id, entity)
+
         acted = [
             f"{decision} step {step} ({S.STEP_NAMES[step]}) "
             f"{'from memory (cached, no model call)' if cached else 'via the model'}; "
             f"output_sha256={record.output_sha256[:12]}..., tokens={tokens}, "
             f"seconds={seconds}"
         ]
+
+        if commit_tx:
+            acted.append(
+                f"committed output_sha256={record.output_sha256[:12]}... on chain "
+                f"in tx {commit_tx}"
+            )
+        elif commit_error:
+            acted.append(f"on-chain commit failed and was skipped: {commit_error}")
 
         # Rolling cost averages only reflect real executions; a cached serve
         # costs no tokens and must not drag the average that sets the price.
@@ -533,7 +598,17 @@ class Engine:
         elif decision == S.RUN_ON_CREDIT:
             ledger.open_invoices += 1
             ledger.outstanding.append(
-                S.OutstandingItem(job_id=job_id, step=step, amount_usdc=price_usdc)
+                S.OutstandingItem(
+                    job_id=job_id,
+                    step=step,
+                    amount_usdc=price_usdc,
+                    memo=invoice.memo if invoice and invoice.step == step else "",
+                    invoice_block=(
+                        invoice.invoice_block
+                        if invoice and invoice.step == step
+                        else None
+                    ),
+                )
             )
             acted.append(
                 f"entity buyer/{state.buyer} -> delivered step {step} on credit; "
@@ -602,6 +677,9 @@ class Engine:
             seconds=seconds,
             invoice=next_invoice,
             price_reason=price_reason,
+            commit_tx=commit_tx,
+            commit_hash=record.output_sha256 if commit_tx else None,
+            commit_error=commit_error,
             complete=complete,
             note=(
                 f"Job {job_id} complete. All {S.LAST_STEP} outputs cached under this "
@@ -639,7 +717,13 @@ class Engine:
             f"avg_tokens={step_cost.avg_tokens:.0f}; priced step {step}: {price_reason}"
         )
         memo = self.payments.issue_invoice(state.job_id, step, amount, state.buyer)
-        invoice = S.OpenInvoice(step=step, amount_usdc=amount, memo=memo)
+        invoice = S.OpenInvoice(
+            step=step,
+            amount_usdc=amount,
+            memo=memo,
+            invoice_block=self.payments.current_block(),
+            price_reason=price_reason,
+        )
         state.open_invoice = invoice
         return invoice, price_reason
 
@@ -666,6 +750,7 @@ class Engine:
         if carried:
             ledger.open_invoices = max(0, ledger.open_invoices - len(carried))
             ledger.unpaid_from_prior_jobs += len(carried)
+            ledger.defaults += len(carried)
             acted.append(
                 f"entity buyer/{state.buyer} -> {len(carried)} delivered step(s) "
                 f"unpaid at close; unpaid_from_prior_jobs="

@@ -165,6 +165,8 @@ def render_reconciled(outcome_or_list) -> None:
 
 def render_outcome(outcome: Outcome, engine: Engine | None = None) -> None:
     render_reconciled(outcome)
+    for hint in outcome.memory_hints:
+        console.print(Text(f"memory hint: {hint}", style="dim"))
     render_step(outcome)
     render_commit(outcome)
     render_decision(outcome)
@@ -280,6 +282,12 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
     grid.add_row("open invoices", str(book.open_invoices))
     grid.add_row("unpaid from prior jobs", str(book.unpaid_from_prior_jobs))
     grid.add_row("defaults on record", str(book.defaults))
+    if book.defaults:
+        grid.add_row(
+            "clean paid steps since",
+            f"{book.consecutive_paid_since_default} "
+            f"(credit returns at {S.EARN_BACK_PAID_STEPS})",
+        )
     grid.add_row("trust tier", book.trust_tier)
     grid.add_row("jobs", str(len(book.jobs)))
     console.print(Panel(grid, title="LEDGER", border_style="cyan", padding=(1, 2)))

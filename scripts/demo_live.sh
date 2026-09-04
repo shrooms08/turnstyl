@@ -27,7 +27,8 @@ for required in BASE_SEPOLIA_RPC RECEIPTS_ADDRESS USDC_ADDRESS AGENT_ADDRESS BUY
   fi
 done
 
-DB=./data/demo_live.db
+# Honour an externally chosen store; default to the demo one.
+DB="${TURNSTYL_DB:-./data/demo_live.db}"
 export TURNSTYL_DB="$DB"
 export PAYMENTS=base
 export MOCK_LLM=1
@@ -60,6 +61,17 @@ collect_tx() {
 run() {  # run <label> <command...> ; captures stdout+stderr to $OUT
   local label="$1"; shift
   echo "--- $label"
+  "$@" >"$OUT" 2>&1
+  local rc=$?
+  collect_tx "$OUT"
+  if [ $rc -ne 0 ]; then
+    echo "    command exited $rc:"
+    sed 's/^/      /' "$OUT" | tail -20
+  fi
+  return $rc
+}
+
+run_quiet() {  # run without printing a label; same capture and tx collection
   "$@" >"$OUT" 2>&1
   local rc=$?
   collect_tx "$OUT"
@@ -143,8 +155,9 @@ before=$FAILURES
 echo "BEAT 1: top the buyer up so it can pay its invoices"
 # topup_buyer sends a fixed 1 USDC per call when the buyer is under 2.50. A full
 # run costs the buyer 2.25 USDC, so call it until it reports nothing left to do.
+echo "--- topup_buyer"
 for _ in 1 2 3 4; do
-  run "topup_buyer" $PY scripts/topup_buyer.py
+  run_quiet $PY scripts/topup_buyer.py
   flatten "$OUT" | grep -qF "TOPUP SKIPPED" && break
 done
 if flatten "$OUT" | grep -qE "TOPUP SENT|TOPUP SKIPPED"; then

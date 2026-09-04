@@ -1,143 +1,139 @@
 # turnstyl
 
-turnstyl is a metered AI agent that does multi-step work, gets paid per step in USDC on Base, and keeps job state, findings, and a buyer ledger in Sibyl Memory so it can resume any job, price any step, and decide who gets credit.
+turnstyl is a metered AI agent. It audits a Solidity contract in four steps, and
+it gets paid per step in USDC on Base: step 1 (scope) is free, steps 2
+(findings), 3 (patch) and 4 (verify) are sold individually. Job state, step
+outputs, step costs, and a per-buyer ledger live in Sibyl Memory, and every
+decision the agent makes — what to charge, whether to run, whether to extend
+credit, whether to refuse — is a function of what it reads there and is written
+back as a journal entry naming the facts it used.
 
-Status: day 3: live payments and output commits on Base Sepolia
+## The delete test
 
-## What it does
+Delete `data/turnstyl.db` and the agent forgets it was ever paid: it invoices the
+same buyer again for work already delivered and settled. In the live demo the
+buyer then pays that second invoice, and it lands on Base Sepolia right next to
+the first one — [`0x1f7656c5d27809d4…`](https://sepolia.basescan.org/tx/0x1f7656c5d27809d49477f27a6e6eb62362eec80738fdebc1c9d3797111626f0c). Both
+payments are on chain; only the agent's memory of the first is gone.
 
-A buyer submits a Solidity contract for a four-step audit. Step 1 (scope) is
-free. Steps 2 (findings), 3 (patch) and 4 (verify) are sold per step in USDC.
-The agent decides what to charge and who to trust entirely from what it
-remembers, and every decision it makes is written back to memory as a journal
-event naming the facts it used.
+## What memory changes
 
-Delete the memory and the agent forgets it was ever paid. That failure is
-reproduced on purpose, on chain, as the last beat of the live demo — see
-**The delete test** below.
-
-## Architecture
-
-### Memory (Sibyl Memory, one SQLite store at `./data/turnstyl.db`)
-
-| Tier | Key | Holds |
+| Decision | Memory fact it reads | What changes |
 | --- | --- | --- |
-| HOT | `job:<job_id>` | job state: current step, status, open invoice, buyer, contract hash |
-| HOT | `active_jobs` | the job ids that are not complete, so a restart can find them |
-| HOT | `fake_payments` | settled invoices, offline backend only |
-| WARM | `buyer/<address>` | paid steps, USDC paid, outstanding invoices, defaults, trust tier |
-| WARM | `job/<job_id>` | per-step output, sha256, price, tokens, seconds, commit tx |
-| WARM | `step_cost/<n>` | rolling average tokens and seconds per step, which feeds pricing |
-| WARM | `findings/<contract_hash>` | the four outputs, so a repeat contract is served from memory |
+| resume | `job:<id>` state and `job/<id>` entity | picks up at the recorded step; a step with output is never re-run or re-charged |
+| price | `findings/<hash>` and `step_cost/<n>` | 0.50 becomes 0.25 when the output is already stored; 1.5x when recorded avg_tokens > 6000 |
+| credit | `buyer/<addr>` paid_steps, open_invoices, defaults | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT for a buyer who has paid before |
+| refuse | `buyer/<addr>` unpaid_from_prior_jobs | REFUSE paid work from a buyer who left a closed job unpaid |
+| cache | `findings/<hash>` | a repeat contract is served from the store with no model call at all |
+
+## Memory tiers used
+
+| Tier | Key or entity | Holds |
+| --- | --- | --- |
+| HOT state | `job:<job_id>` | current step, status, open invoice, buyer, contract hash |
+| HOT state | `active_jobs` | job ids not yet complete, so a fresh process can find them |
+| HOT state | `fake_payments` | settled invoices, offline backend only |
+| WARM entity | `buyer/<address>` | paid steps, USDC paid, outstanding invoices, defaults, earn-back counter, trust tier |
+| WARM entity | `job/<job_id>` | per step: output, sha256, price, tokens, seconds, commit tx, compile verdict |
+| WARM entity | `step_cost/<n>` | rolling average tokens and seconds per step, which feeds pricing |
+| WARM entity | `findings/<contract_hash>` | the four step outputs, keyed by contract hash |
+| COLD journal | one event per decision | what memory said, what the agent did, what it expects next |
 | REFERENCE | `pricing_rules` | base prices and multipliers, written once on first run |
 | REFERENCE | `contract:<hash>` | the contract source, so a resumed job needs no file path |
-| COLD | journal | one event per decision: what memory said, what the agent did, what it expects next |
+| ARCHIVE | `job/<job_id>` on completion | closed jobs move out of the active set, outputs copied to `findings/` first |
+| FTS5 | `search_entities` over `findings/*` | on `job new`, queried with the contract's function names for a "memory hint" |
 
-A completed job's entity is archived and its outputs are copied into the
-findings entity, which is what makes the second audit of the same contract cheap.
+## Policy rules
 
-### Policy (`src/turnstyl/policy.py`, pure functions, no I/O)
+Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
 
-Prices in USDC: step 1 free, step 2 0.50, step 3 0.75, step 4 0.25.
-
-- **half price** when this contract's output for that step is already in memory
-- **1.5x** when the recorded average token cost for that step exceeds 6000
+- half price when this contract's output for that step is already in `findings/`
+- 1.5x when the recorded average token cost for that step exceeds 6000
 - **RUN_FREE** — step 1, never gated
-- **RUN_PAID** — the invoice for this step is settled on chain
-- **RUN_ON_CREDIT** — unpaid, but the buyer has 2+ paid steps, nothing
-  outstanding, and no default on record
+- **RUN_PAID** — the invoice for this step is settled
+- **RUN_ON_CREDIT** — unpaid, but the buyer is trusted
 - **WAIT_FOR_PAYMENT** — unpaid and credit not earned
 - **REFUSE** — the buyer left work unpaid when a previous job closed
 
-A buyer who lets a job close with work unpaid carries a permanent `defaults`
-count. Paying the debt lifts the refusal, but not the credit: they buy per step,
-up front, from then on.
+Trust tiers: **trusted** needs paid_steps >= 2, nothing outstanding, and either no
+default or an earned-back one. **blocked** at two defaults. Otherwise **new**.
 
-### Receipts contract
+A default is one delivered-but-unpaid step at the moment a job closes. It stays
+on the record permanently. Paying the debt clears `unpaid_from_prior_jobs` and
+lifts the refusal, but not the credit: the buyer pays up front until four
+consecutive settled steps have gone by, at which point credit returns. A second
+default cannot be worked off.
 
-`contracts/src/TurnstylReceipts.sol` on Base Sepolia (chain 84532):
+## On chain
+
+`contracts/src/TurnstylReceipts.sol`, Base Sepolia (chain 84532):
 
 **`0xD2Bb3c9741D7c26A8B161895bb91471706B17477`**
 <https://sepolia.basescan.org/address/0xD2Bb3c9741D7c26A8B161895bb91471706B17477>
 
-- `pay(bytes32 memo, uint256 amount)` moves USDC straight from the buyer to the
-  agent and emits `Paid`. The contract never takes custody.
-- `commit(bytes32 memo, bytes32 outputHash)` lets the agent publish the sha256 of
-  what it delivered, and emits `Committed`. Agent only.
-- No owner, no pause, no upgrade path.
+- `pay(bytes32 memo, uint256 amount)` moves USDC from the buyer to the agent in
+  one call and emits `Paid`.
+- `commit(bytes32 memo, bytes32 outputHash)` publishes the sha256 of a delivered
+  step and emits `Committed`. Agent only.
+- The contract holds no custody — it never takes a token balance — and it has no
+  owner, no pause and no upgrade path.
 
-The memo is `keccak256("<job_id>:<step>")` — a bare string anyone can recompute
-without knowing turnstyl's conventions. A payment counts when a `Paid` log
-carries that memo, a payer matching the invoiced buyer, and at least the
-invoiced amount. The agent trusts the log, never the buyer's word.
+The memo is `keccak256("<job_id>:<step>")`, a bare string anyone can recompute. A
+payment counts when a `Paid` log carries that memo, a payer matching the invoiced
+buyer, and at least the invoiced amount. The agent trusts the log, not the buyer.
 
-## Running it
+## Mechanical gates on model output
 
-### Offline — no API key, no chain
+- The patch step returns a whole patched file. turnstyl produces the unified diff
+  itself with `difflib`, so the diff applies by construction and the model never
+  writes a hunk header.
+- That file is compiled in a throwaway Foundry project with `forge build`. If it
+  fails, the compiler errors go back to the model once. The verdict is recorded
+  and shown as `PATCH COMPILES: yes/no`.
+- The verifier step is handed those results as `MECHANICAL CHECKS` and is
+  instructed that nothing may be marked CLOSED if the patch does not compile.
+
+## Run it
+
+Offline — no API key, no chain, no spend:
 
 ```bash
-.venv/bin/python scripts/demo_offline.py          # seven-beat acceptance test
+.venv/bin/python scripts/demo_offline.py        # eight-beat acceptance test
 
 export MOCK_LLM=1 PAYMENTS=fake
 .venv/bin/turnstyl job new examples/Vault.sol --buyer 0xYourAddress
-.venv/bin/turnstyl status
 .venv/bin/turnstyl pay <job_id> 2
 .venv/bin/turnstyl job run <job_id>
 .venv/bin/turnstyl ledger 0xYourAddress
+.venv/bin/turnstyl status
 ```
 
-### Live — Base Sepolia
-
-`.env` must define `BASE_SEPOLIA_RPC`, `USDC_ADDRESS`, `RECEIPTS_ADDRESS`,
-`RECEIPTS_DEPLOY_BLOCK`, `AGENT_ADDRESS`, `AGENT_PRIVATE_KEY`, `BUYER_ADDRESS`
-and `BUYER_PRIVATE_KEY`. It is gitignored and must stay that way.
+Live on Base Sepolia. `.env` (gitignored, never printed) must define
+`BASE_SEPOLIA_RPC`, `USDC_ADDRESS`, `RECEIPTS_ADDRESS`, `RECEIPTS_DEPLOY_BLOCK`,
+`AGENT_ADDRESS`, `AGENT_PRIVATE_KEY`, `BUYER_ADDRESS`, `BUYER_PRIVATE_KEY`:
 
 ```bash
-scripts/demo_live.sh                              # nine-beat run on Base Sepolia
+scripts/demo_live.sh                            # nine beats, real USDC
+# honours TURNSTYL_DB; defaults to ./data/demo_live.db
 ```
 
-It runs against `./data/demo_live.db` with `PAYMENTS=base MOCK_LLM=1`, so it
-never touches the main store and costs no model spend. Every transaction hash it
-sees lands in `data/demo_live_txs.txt`.
-
-Driving it by hand:
+A real audit against the Anthropic API needs `ANTHROPIC_API_KEY` in `.env`:
 
 ```bash
-export PAYMENTS=base MOCK_LLM=1
-.venv/bin/python scripts/topup_buyer.py           # fund the buyer, idempotent
-.venv/bin/turnstyl job new examples/Vault.sol --buyer $BUYER_ADDRESS
-.venv/bin/python scripts/buyer_pay.py <job_id> 2  # buyer approves + pays on chain
-.venv/bin/turnstyl job run <job_id>               # agent verifies, works, commits
+export PAYMENTS=fake LLM_MODEL=claude-haiku-4-5 TURNSTYL_DB=./data/real_run.db
+unset MOCK_LLM
+.venv/bin/turnstyl job new examples/Vault.sol --buyer 0xYourAddress
+.venv/bin/turnstyl pay <job_id> 2 && .venv/bin/turnstyl job run <job_id>
 ```
 
-### The delete test
+Contracts: `cd contracts && forge test`. `forge init --no-git` vendored
+`forge-std` as plain files, so a fresh clone builds with no `forge install`.
 
-The last beat of the live demo deletes the database and starts over. The agent
-re-invoices 0.50 USDC for a step this buyer already paid for, the buyer pays it,
-and both payments sit on chain while the agent remembers only the second one.
+## Sample audit
 
-Nothing in turnstyl rebuilds memory from chain events, deliberately. The chain
-proves a payment happened; it does not tell an agent what it already knew.
+[docs/sample_audit.md](docs/sample_audit.md) — a real four-step run against
+`claude-haiku-4-5`, verbatim, with token counts, cost, and the mechanical
+verdicts. Memory implementation note: [docs/MEMORY.md](docs/MEMORY.md).
 
-## Contracts
-
-```bash
-cd contracts && forge test
-```
-
-`forge init --no-git` vendored `forge-std` as plain files, so `contracts/lib/` is
-tracked in this repo and **a fresh clone builds with no `forge install` step**.
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| `src/turnstyl/schema.py` | every stored shape, as pydantic models |
-| `src/turnstyl/policy.py` | pricing and credit decisions, pure |
-| `src/turnstyl/memory.py` | Sibyl Memory wrapper and the typed store |
-| `src/turnstyl/llm.py` | the only module that calls a model |
-| `src/turnstyl/payments.py` | `FakePayments` and `BasePayments` |
-| `src/turnstyl/engine.py` | the orchestrator |
-| `src/turnstyl/cli.py` | `turnstyl` command line |
-| `contracts/` | Foundry project for `TurnstylReceipts` |
-| `examples/Vault.sol` | the deliberately reentrant sample contract |
+Status: day 3, complete. Live payments and output commits on Base Sepolia,
+trust earn-back, mechanical gates on patch output.

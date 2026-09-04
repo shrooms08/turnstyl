@@ -87,6 +87,10 @@ TrustTier = Literal["new", "trusted", "blocked"]
 # Trust thresholds (policy.recompute_trust_tier is the only consumer).
 TRUSTED_MIN_PAID_STEPS = 2
 BLOCKED_MIN_UNPAID_PRIOR_JOBS = 2
+# Two defaults ends the relationship. One can be worked off: four consecutive
+# paid steps with nothing left outstanding earns credit back.
+BLOCKED_MIN_DEFAULTS = 2
+EARN_BACK_PAID_STEPS = 4
 
 # Job statuses
 STATUS_NEW = "new"
@@ -259,6 +263,9 @@ class BuyerLedger(_Model):
     # settled; this does not. Settling a debt buys back the right to be served,
     # not the right to be served on credit again.
     defaults: int = 0
+    # Paid steps settled since the last default, counted so a buyer who defaulted
+    # once can earn credit back. Any new default resets it to 0.
+    consecutive_paid_since_default: int = 0
     trust_tier: TrustTier = TRUST_NEW
     jobs: list[str] = Field(default_factory=list)
     outstanding: list[OutstandingItem] = Field(default_factory=list)

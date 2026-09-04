@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline acceptance test for the turnstyl engine.
 
-Runs the seven beats of the demo against a throwaway database, driving the real
+Runs the eight beats of the demo against a throwaway database, driving the real
 CLI as separate subprocesses so every beat crosses a process boundary — which is
 the only way to prove the agent's memory, and not its RAM, is carrying the job.
 
@@ -242,8 +242,66 @@ def beat_f(first_job: str) -> None:
     beat_result("f", "repeat contract served from memory at half price", r)
 
 
-def beat_g(prior_jobs: set[str]) -> str:
-    print("BEAT g: DELETE TEST. Wipe the database and watch the agent forget")
+def beat_g(first_job: str, second_job: str) -> str:
+    """A buyer with a default pays its way back to credit."""
+    print("BEAT g: EARN-BACK. One default, four clean paid steps, credit returns")
+    before = store().get_buyer(BUYER)
+    r = [
+        check("g", "buyer starts this beat with a default on record",
+              before.defaults == 1, f"defaults={before.defaults}"),
+        check("g", "the earn-back clock starts at 0",
+              before.consecutive_paid_since_default == 0,
+              f"consecutive={before.consecutive_paid_since_default}"),
+    ]
+
+    # 1 of 4: settle the debt from the closed job; reconcile picks it up.
+    cli("pay", first_job, "4")
+    _, flat = cli("job", "run", second_job)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("g", "settling the old debt clears unpaid_from_prior_jobs",
+                   ledger.unpaid_from_prior_jobs == 0,
+                   f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}"))
+    r.append(check("g", "the debt payment counts as clean paid step 1 of 4",
+                   ledger.consecutive_paid_since_default == 1,
+                   f"consecutive={ledger.consecutive_paid_since_default}"))
+    r.append(check("g", "credit has not returned yet",
+                   "DECISION: WAIT_FOR_PAYMENT" in flat, flat[:300]))
+    r.append(check("g", "the reason says how many clean steps are still needed",
+                   "credit returns after 4 consecutive paid steps, currently 1" in flat,
+                   flat[:700]))
+
+    # 2, 3 and 4 of 4: pay every remaining step of the second job.
+    for step in (2, 3, 4):
+        cli("pay", second_job, str(step))
+        _, flat = cli("job", "run", second_job)
+        r.append(check("g", f"step {step} of the second job ran as paid work",
+                       "DECISION: RUN_PAID" in flat, flat[:300]))
+    ledger = store().get_buyer(BUYER)
+    r.append(check("g", "four consecutive paid steps are on record",
+                   ledger.consecutive_paid_since_default == 4,
+                   f"consecutive={ledger.consecutive_paid_since_default}"))
+    r.append(check("g", "the buyer is trusted again despite the default",
+                   ledger.trust_tier == S.TRUST_TRUSTED,
+                   f"trust_tier={ledger.trust_tier}, defaults={ledger.defaults}"))
+    r.append(check("g", "the default itself is still on the record",
+                   ledger.defaults == 1, f"defaults={ledger.defaults}"))
+
+    # The next unpaid step should now run on credit.
+    cli("job", "new", str(CONTRACT), "--buyer", BUYER)
+    third_job = only_job_id()
+    raw, flat = cli("job", "run", third_job)
+    line = decision_line(raw)
+    r.append(check("g", "the next unpaid step runs on credit",
+                   "DECISION: RUN_ON_CREDIT" in flat, flat[:400]))
+    r.append(check("g", "the reason names consecutive_paid_since_default=4",
+                   "consecutive_paid_since_default=4" in line, line))
+    beat_result("g", "one default worked off, credit restored", r)
+    notes.append(f"beat g DECISION line:\n    {line}")
+    return third_job
+
+
+def beat_h(prior_jobs: set[str]) -> str:
+    print("BEAT h: DELETE TEST. Wipe the database and watch the agent forget")
     for suffix in ("", "-wal", "-shm"):
         target = Path(str(DB_PATH) + suffix)
         if target.exists():
@@ -256,20 +314,20 @@ def beat_g(prior_jobs: set[str]) -> str:
     new_job = only_job_id()
     ledger = store().get_buyer(BUYER)
     r = [
-        check("g", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
-        check("g", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
-        check("g", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
-        check("g", "step 2 is invoiced at 0.50 USDC again",
+        check("h", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
+        check("h", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
+        check("h", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
+        check("h", "step 2 is invoiced at 0.50 USDC again",
               "step 2 (findings)" in flat and "amount 0.50 USDC" in flat, flat[:500]),
-        check("g", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
+        check("h", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
               f"trust_tier={ledger.trust_tier}"),
-        check("g", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.paid_usdc == 0.0,
+        check("h", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.paid_usdc == 0.0,
               f"paid_steps={ledger.paid_steps}, paid_usdc={ledger.paid_usdc}"),
     ]
-    beat_result("g", "memory deleted, buyer treated as a stranger", r)
+    beat_result("h", "memory deleted, buyer treated as a stranger", r)
     if all(r):
         print("DOUBLE CHARGE REPRODUCED: memory deleted, buyer re-invoiced 0.50 for paid work\n")
-    notes.append(f"beat g DECISION line:\n    {line}")
+    notes.append(f"beat h DECISION line:\n    {line}")
     return line
 
 
@@ -286,8 +344,11 @@ def main() -> int:
     beat_e(job_a)
     seen = {job_a}
     beat_f(job_a)
+    second_job = only_job_id()
+    seen.add(second_job)
+    seen.add(beat_g(job_a, second_job))
     seen.update(store().get_active_jobs())
-    beat_g(seen)
+    beat_h(seen)
 
     print("-" * 72)
     for note in notes:
@@ -298,7 +359,7 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: PASS — all 7 beats passed")
+    print("RESULT: PASS — all 8 beats passed")
     return 0
 
 

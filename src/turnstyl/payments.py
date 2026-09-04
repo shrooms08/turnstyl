@@ -77,8 +77,81 @@ class PaymentBackend(ABC):
         return None
 
     def reconcile(self, buyer: str) -> list[dict]:
-        """Settle any outstanding invoice that has since been paid on chain."""
-        return []
+        """Settle any outstanding invoice this buyer has since paid.
+
+        Shared by both backends: the only thing that differs is what counts as
+        evidence of payment, and that is ``check_paid``. A buyer who clears a
+        debt gets their standing back without anyone editing the database.
+        """
+        store = getattr(self, "store", None)
+        if store is None:
+            return []
+        buyer_key = store.buyer_key(buyer)
+        ledger = store.get_buyer(buyer_key)
+        if not ledger.outstanding:
+            return []
+
+        cleared: list[dict] = []
+        remaining: list[S.OutstandingItem] = []
+        for item in ledger.outstanding:
+            tx_hash = self.check_paid(item.job_id, item.step)
+            if not tx_hash:
+                remaining.append(item)
+                continue
+            cleared.append(
+                {
+                    "job_id": item.job_id,
+                    "step": item.step,
+                    "amount_usdc": item.amount_usdc,
+                    "tx_hash": tx_hash,
+                }
+            )
+            ledger.paid_steps += 1
+            ledger.consecutive_paid_since_default += 1
+            ledger.paid_usdc = round(ledger.paid_usdc + item.amount_usdc, 2)
+            ledger.unpaid_from_prior_jobs = max(
+                0, ledger.unpaid_from_prior_jobs - 1
+            )
+
+        if not cleared:
+            return []
+
+        ledger.outstanding = remaining
+        before = ledger.trust_tier
+        ledger.trust_tier = policy.recompute_trust_tier(ledger)
+        store.put_buyer(buyer_key, ledger)
+
+        for item in cleared:
+            store.journal(
+                S.JournalEntry(
+                    evaluated=[
+                        f"entity buyer/{buyer_key} -> outstanding step "
+                        f"{item['step']} of job {item['job_id']} at "
+                        f"{item['amount_usdc']:.2f} USDC",
+                        f"payments {self.name} -> settled in {item['tx_hash']}",
+                    ],
+                    acted=[
+                        f"reconciled step {item['step']} of job "
+                        f"{item['job_id']}; paid_steps={ledger.paid_steps}, "
+                        f"paid_usdc={ledger.paid_usdc:.2f}, "
+                        f"unpaid_from_prior_jobs="
+                        f"{ledger.unpaid_from_prior_jobs}, "
+                        f"consecutive_paid_since_default="
+                        f"{ledger.consecutive_paid_since_default}, "
+                        f"trust_tier {before} -> {ledger.trust_tier}"
+                    ],
+                    forward=["buyer standing updated; paid work may resume"],
+                    extra={
+                        "job_id": item["job_id"],
+                        "buyer": buyer_key,
+                        "step": item["step"],
+                        "decision": "RECONCILED",
+                        "price": item["amount_usdc"],
+                        "tx_hash": item["tx_hash"],
+                    },
+                )
+            )
+        return cleared
 
     def commit_output(self, job_id: str, step: int, output_sha256: str) -> str | None:
         """Publish the hash of a delivered output. Returns a tx hash."""
@@ -105,6 +178,7 @@ class FakePayments(PaymentBackend):
 
     def __init__(self, memory: TurnstylMemory) -> None:
         self.memory = memory
+        self.store = TurnstylStore(memory)
 
     def _load(self) -> dict[str, str]:
         record = self.memory.get_state(S.STATE_FAKE_PAYMENTS)
@@ -385,74 +459,6 @@ class BasePayments(PaymentBackend):
             if amount >= expected_units and payer.lower() == buyer.lower():
                 return hex0x(log["transactionHash"])
         return None
-
-    def reconcile(self, buyer: str) -> list[dict]:
-        """Clear any outstanding invoice this buyer has since settled on chain.
-
-        A buyer who pays a debt from a closed job gets their standing back
-        without anyone touching the database by hand: the chain is the source of
-        truth and this walks the ledger against it.
-        """
-        buyer_key = self.store.buyer_key(buyer)
-        ledger = self.store.get_buyer(buyer_key)
-        if not ledger.outstanding:
-            return []
-
-        cleared: list[dict] = []
-        remaining: list[S.OutstandingItem] = []
-        for item in ledger.outstanding:
-            tx_hash = self.check_paid(item.job_id, item.step)
-            if not tx_hash:
-                remaining.append(item)
-                continue
-            cleared.append(
-                {
-                    "job_id": item.job_id,
-                    "step": item.step,
-                    "amount_usdc": item.amount_usdc,
-                    "tx_hash": tx_hash,
-                }
-            )
-            ledger.paid_steps += 1
-            ledger.paid_usdc = round(ledger.paid_usdc + item.amount_usdc, 2)
-            ledger.unpaid_from_prior_jobs = max(0, ledger.unpaid_from_prior_jobs - 1)
-
-        if not cleared:
-            return []
-
-        ledger.outstanding = remaining
-        before = ledger.trust_tier
-        ledger.trust_tier = policy.recompute_trust_tier(ledger)
-        self.store.put_buyer(buyer_key, ledger)
-
-        for item in cleared:
-            self.store.journal(
-                S.JournalEntry(
-                    evaluated=[
-                        f"entity buyer/{buyer_key} -> outstanding step {item['step']} "
-                        f"of job {item['job_id']} at {item['amount_usdc']:.2f} USDC",
-                        f"chain {self.receipts_address} -> Paid log found in tx "
-                        f"{item['tx_hash']}",
-                    ],
-                    acted=[
-                        f"reconciled step {item['step']} of job {item['job_id']}; "
-                        f"paid_steps={ledger.paid_steps}, "
-                        f"paid_usdc={ledger.paid_usdc:.2f}, "
-                        f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}, "
-                        f"trust_tier {before} -> {ledger.trust_tier}"
-                    ],
-                    forward=["buyer standing updated; paid work may resume"],
-                    extra={
-                        "job_id": item["job_id"],
-                        "buyer": buyer_key,
-                        "step": item["step"],
-                        "decision": "RECONCILED",
-                        "price": item["amount_usdc"],
-                        "tx_hash": item["tx_hash"],
-                    },
-                )
-            )
-        return cleared
 
     # ---------------- commitments ----------------
     def commit_output(self, job_id: str, step: int, output_sha256: str) -> str | None:

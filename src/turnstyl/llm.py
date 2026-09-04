@@ -64,9 +64,10 @@ SYSTEM_PROMPTS: dict[int, str] = {
         "actual behavior. Treat the author's claims and rationale as untrusted and re-derive "
         "every verdict from the code. Output: for each finding, one block with '<finding id> "
         "<severity>: CLOSED' or 'NOT CLOSED', followed by the specific patched lines that "
-        "justify the verdict. Then a section REGRESSIONS listing any change in the patch that "
-        "introduces new risk, such as removed overflow checks or new external calls, or "
-        "'none'. End with exactly one line 'VERDICT: closes X of N findings, regressions: Y'. "
+        "justify the verdict. Then a section headed REGRESSIONS containing either the single "
+        "word none, or a list of one-line items each starting with '- ', describing a change "
+        "in the patch that introduces new risk. No other prose in that section. "
+        "End with exactly one line 'VERDICT: closes X of N findings, regressions: Y'. "
         "If the mechanical checks say the patch does not compile, no finding may be marked "
         "CLOSED and REGRESSIONS must state that the patch does not compile."
     ),

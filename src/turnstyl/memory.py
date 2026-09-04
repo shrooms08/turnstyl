@@ -326,6 +326,18 @@ class TurnstylStore:
     def findings_exist(self, contract_hash: str) -> bool:
         return self.memory.get_entity(S.CAT_FINDINGS, contract_hash) is not None
 
+    def search_findings(self, query: str, *, limit: int = 3) -> list[dict[str, Any]]:
+        """FTS5 over stored findings. Used for the "seen this before" hint.
+
+        Returns the raw entity rows so the caller can name which contract hash
+        matched and which step slots that entity already holds.
+        """
+        if not query.strip():
+            return []
+        return list(
+            self.memory.search_entities(query, limit=limit, category=S.CAT_FINDINGS)
+        )
+
     def put_findings(
         self, contract_hash: str, findings: S.FindingsEntity
     ) -> S.FindingsEntity:

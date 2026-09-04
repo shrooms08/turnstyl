@@ -7,6 +7,7 @@ is making.
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ class Outcome:
     price_reason: str = ""
     diff_applies: bool | None = None
     compiles: bool | None = None
+    memory_hints: list[str] = field(default_factory=list)
     commit_tx: str | None = None
     commit_hash: str | None = None
     commit_error: str | None = None
@@ -93,7 +95,10 @@ class Engine:
         buyer_key = self.store.buyer_key(buyer)
 
         reconciled = self._reconcile(buyer_key)
+        hints = self._memory_hints(contract_text, contract_hash)
         read: list[str] = [S.STATE_ACTIVE_JOBS]
+        if hints:
+            read.append(f"fts5 findings/* for {Path(path).name} function names")
         existing = self._find_open_job(buyer_key, contract_hash, read)
         if existing is not None:
             self.store.journal(
@@ -133,6 +138,7 @@ class Engine:
                 invoice=existing.open_invoice,
                 resumed=True,
                 reconciled=reconciled,
+                memory_hints=hints,
                 note=f"Resumed job {existing.job_id}.",
             )
 
@@ -161,6 +167,7 @@ class Engine:
 
         outcome = self._advance(state, contract_text, extra_reads=read)
         outcome.reconciled = reconciled
+        outcome.memory_hints = hints
         return outcome
 
     def run(self, job_id: str) -> Outcome:
@@ -285,6 +292,33 @@ class Engine:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    _FUNCTION_NAMES = re.compile(r"\bfunction\s+([A-Za-z_]\w*)")
+
+    def _memory_hints(self, contract_text: str, contract_hash: str) -> list[str]:
+        """Semantic search: has anything like this contract been audited before?
+
+        FTS5 over the findings entities, queried with the contract's own function
+        names. Cheap, and it is what lets the agent say "I have seen withdraw()
+        before" on a contract whose bytes it has never seen.
+        """
+        names = self._FUNCTION_NAMES.findall(contract_text)[:5]
+        if not names:
+            return []
+        try:
+            hits = self.store.search_findings(" ".join(dict.fromkeys(names)))
+        except Exception:
+            return []  # a hint is never worth failing a job over
+        hints = []
+        for row in hits:
+            body = row.get("body") or {}
+            slots = [k for k in S.STEP_SLOTS.values() if body.get(k)]
+            same = " (this contract)" if row.get("name") == contract_hash else ""
+            hints.append(
+                f"prior findings for contract {str(row.get('name'))[:12]}{same} "
+                f"hold {', '.join(slots) or 'nothing yet'}"
+            )
+        return hints
+
     def _reconcile(self, buyer: str) -> list[dict]:
         """Ask the payment backend to settle anything the buyer has since paid.
 
@@ -616,10 +650,13 @@ class Engine:
         # Money.
         if decision == S.RUN_PAID and invoice is not None and invoice.step == step:
             ledger.paid_steps += 1
+            ledger.consecutive_paid_since_default += 1
             ledger.paid_usdc = round(ledger.paid_usdc + invoice.amount_usdc, 2)
             acted.append(
                 f"entity buyer/{state.buyer} -> paid_steps={ledger.paid_steps}, "
-                f"paid_usdc={ledger.paid_usdc:.2f} (settled {invoice.memo})"
+                f"paid_usdc={ledger.paid_usdc:.2f}, "
+                f"consecutive_paid_since_default="
+                f"{ledger.consecutive_paid_since_default} (settled {invoice.memo})"
             )
         elif decision == S.RUN_ON_CREDIT:
             ledger.open_invoices += 1
@@ -792,10 +829,13 @@ class Engine:
             ledger.open_invoices = max(0, ledger.open_invoices - len(carried))
             ledger.unpaid_from_prior_jobs += len(carried)
             ledger.defaults += len(carried)
+            # A fresh default restarts the earn-back clock from zero.
+            ledger.consecutive_paid_since_default = 0
             acted.append(
                 f"entity buyer/{state.buyer} -> {len(carried)} delivered step(s) "
                 f"unpaid at close; unpaid_from_prior_jobs="
-                f"{ledger.unpaid_from_prior_jobs}"
+                f"{ledger.unpaid_from_prior_jobs}, defaults={ledger.defaults}, "
+                f"consecutive_paid_since_default reset to 0"
             )
 
         if self.store.archive_job_entity(

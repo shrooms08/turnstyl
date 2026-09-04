@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from .schema import (
     BASE_PRICES,
+    BLOCKED_MIN_DEFAULTS,
     BLOCKED_MIN_UNPAID_PRIOR_JOBS,
+    EARN_BACK_PAID_STEPS,
     CACHED_MULTIPLIER,
     EXPENSIVE_MULTIPLIER,
     EXPENSIVE_TOKEN_THRESHOLD,
@@ -77,22 +79,39 @@ def price(
     return amount, f"{'; '.join(parts)} = {amount:.2f} USDC"
 
 
-def recompute_trust_tier(buyer_entity: BuyerLedger) -> TrustTier:
-    """trusted: paid_steps >= 2, nothing outstanding, and no default on record.
-    blocked: two or more unpaid steps carried over from completed jobs.
+def earned_back(buyer_entity: BuyerLedger) -> bool:
+    """Has a buyer with one default paid its way back to credit?"""
+    return (
+        buyer_entity.defaults == 0
+        or buyer_entity.consecutive_paid_since_default >= EARN_BACK_PAID_STEPS
+    )
 
-    A buyer who let a job close with work unpaid carries ``defaults`` forever.
-    Paying the debt clears ``unpaid_from_prior_jobs`` and lifts the refusal, so
-    they can buy again — but they buy per step, up front. Credit is extended on
-    a record of paying, and theirs now contains a job that had to be chased.
+
+def steps_until_credit(buyer_entity: BuyerLedger) -> int:
+    """Clean paid steps still owed before credit returns. 0 once earned."""
+    return max(
+        0, EARN_BACK_PAID_STEPS - buyer_entity.consecutive_paid_since_default
+    )
+
+
+def recompute_trust_tier(buyer_entity: BuyerLedger) -> TrustTier:
+    """blocked at two defaults; trusted on a clean record, or on one worked off.
+
+    A buyer who lets a job close with work unpaid takes a default. Paying the
+    debt clears ``unpaid_from_prior_jobs`` and lifts the refusal, but not the
+    credit: they buy per step, up front, until they have settled
+    EARN_BACK_PAID_STEPS steps in a row without defaulting again. A second
+    default ends it — that history cannot be worked off.
     """
+    if buyer_entity.defaults >= BLOCKED_MIN_DEFAULTS:
+        return TRUST_BLOCKED
     if buyer_entity.unpaid_from_prior_jobs >= BLOCKED_MIN_UNPAID_PRIOR_JOBS:
         return TRUST_BLOCKED
     if (
         buyer_entity.paid_steps >= TRUSTED_MIN_PAID_STEPS
         and buyer_entity.open_invoices == 0
         and buyer_entity.unpaid_from_prior_jobs == 0
-        and buyer_entity.defaults == 0
+        and earned_back(buyer_entity)
     ):
         return TRUST_TRUSTED
     return TRUST_NEW
@@ -105,7 +124,7 @@ def is_trusted(buyer_entity: BuyerLedger) -> bool:
         and buyer_entity.paid_steps >= TRUSTED_MIN_PAID_STEPS
         and buyer_entity.open_invoices == 0
         and buyer_entity.unpaid_from_prior_jobs == 0
-        and buyer_entity.defaults == 0
+        and earned_back(buyer_entity)
     )
 
 
@@ -132,6 +151,8 @@ def decide(
         f"open_invoices={buyer_entity.open_invoices}, "
         f"unpaid_from_prior_jobs={buyer_entity.unpaid_from_prior_jobs}, "
         f"defaults={buyer_entity.defaults}, "
+        f"consecutive_paid_since_default="
+        f"{buyer_entity.consecutive_paid_since_default}, "
         f"trust_tier={buyer_entity.trust_tier}"
     )
 
@@ -160,11 +181,20 @@ def decide(
         )
 
     if is_trusted(buyer_entity):
+        earn_back = (
+            f", credit earned back after "
+            f"consecutive_paid_since_default="
+            f"{buyer_entity.consecutive_paid_since_default} "
+            f">= {EARN_BACK_PAID_STEPS} despite defaults={buyer_entity.defaults}"
+            if buyer_entity.defaults > 0
+            else ""
+        )
         return RUN_ON_CREDIT, (
             f"step {step} is unpaid but buyer is trusted: paid_steps="
             f"{buyer_entity.paid_steps} >= {TRUSTED_MIN_PAID_STEPS}, "
             f"open_invoices={buyer_entity.open_invoices}, "
             f"unpaid_from_prior_jobs={buyer_entity.unpaid_from_prior_jobs}"
+            f"{earn_back}"
         )
 
     amount = invoice.amount_usdc if invoice is not None else BASE_PRICES.get(step, 0.0)
@@ -172,7 +202,10 @@ def decide(
         return WAIT_FOR_PAYMENT, (
             f"step {step} is unpaid at {amount:.2f} USDC and this buyer has "
             f"{buyer_entity.defaults} default(s) on record, so work is sold up "
-            f"front even though the old debt is settled ({facts})"
+            f"front; credit returns after {EARN_BACK_PAID_STEPS} consecutive "
+            f"paid steps, currently "
+            f"{buyer_entity.consecutive_paid_since_default} "
+            f"({steps_until_credit(buyer_entity)} to go) ({facts})"
         )
     return WAIT_FOR_PAYMENT, (
         f"step {step} is unpaid at {amount:.2f} USDC and the buyer has not earned "

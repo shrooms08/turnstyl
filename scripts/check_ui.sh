@@ -88,13 +88,22 @@ has "shortfall parked, not interior"  "function parkInstance("
 has "parked scale 0.004"              "PARKED_SCALE = 0.004"
 has "parked count exposed"            "stats.parked++"
 has "brain pose 0.12 / +0.35"         "RX = 0.12, RY = 0.35"
-has "hero 40% scroll trigger"         "HERO_SCROLL_TRIGGER = 0.4"
 has "sceneStats.form exposed"         "sceneStats.form"
-has "sceneStats.target exposed"       "sceneStats.target"
-has "form change logged once"         "turnstyl scene: "
+has "keyframe form array"             "KEY_FORMS = ["
+has "keyframes measured per section"  "function measureKeys("
+has "scroll anchor located"           "function locate("
+has "three-point blend through scatter" "function blendTarget("
+has "smoothstep on t"                 "smoothstep(0, 1, kT"
+has "rate 9 ease"                     "EASE_RATE = 9"
+has "rotation bound to scroll"        "SCROLL_TURN = 0.0009"
+has "sceneStats.t exposed"            "sceneStats.t = kT"
+has "sceneStats.formA / formB"        "sceneStats.formA"
+has "sceneStats.scattered"            "sceneStats.scattered"
+has "interval crossing logged once"   "turnstyl scene: "
 has "logo form generator"             "function buildLogo("
-has "transition through scatter"      "SCATTER_TRANSIT_MS = 700"
-has "console section chooses the logo" "consoleActive()"
+has "logo diameter 2.6"               "LOGO_DIAMETER = 2.6"
+has "logo stroke 1.4 / depth 0.7"     "LOGO_STROKE = 1.4, LOGO_DEPTH = 0.7"
+has "logo fine size class only"       "sLogo[i]  = (i >= FORM_N) ? s : 0.014"
 has "ambient field excluded from forms" "AMBIENT = 300"
 for f in brain logo scatter; do
   if grep -qE "[\"']${f}[\"']|\b${f}:" "$PAGE"; then
@@ -103,9 +112,15 @@ for f in brain logo scatter; do
     bad "form present: $f" "no form named '${f}'"
   fi
 done
-has "state to form mapping"           "function formFor("
 has "teal accent"                     "0x5DCAA5"
 if grep -qF "RIM_DOT" "$PAGE"; then bad "per-frame rim recolour removed" "RIM_DOT still present"; else ok "per-frame rim recolour removed"; fi
+MODULE="$TMPDIR_RUN/module.js"
+sed -n '/<script type="module">/,/<\/script>/p' "$PAGE" > "$MODULE"
+if grep -qE "IntersectionObserver|SCATTER_TRANSIT_MS|HERO_SCROLL_TRIGGER|consoleActive" "$MODULE"; then
+  bad "no observer-driven form switch in the scene" "old form-switch machinery still in the module"
+else
+  ok "no observer-driven form switch in the scene"
+fi
 
 echo
 echo "interaction"

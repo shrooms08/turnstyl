@@ -779,9 +779,10 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
 
 <!-- ── three.js particle scene ───────────────────────────────────────
-     Attaches to #scene. Reads the story state the page publishes on
-     document.body.dataset.state / the 'scenestate' event, and locks to
-     scatter while body.memory-missing is set. No build step: three.js
+     Attaches to #scene. The form is driven by scroll position through
+     keyframes at each section's centre, morphing through a fixed scatter
+     between them. It locks to scatter while body.memory-missing is set and
+     reads 'scenestate' only for section flourishes. No build step: three.js
      arrives from the CDN through the import map below.
      ─────────────────────────────────────────────────────────────────── -->
 <script type="importmap">
@@ -804,12 +805,13 @@ import * as THREE from 'three';
   const COUNT = 5000;
   const AMBIENT = 300;                 // excluded from every form
   const FORM_N = COUNT - AMBIENT;
-  const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600, MORPH_MS = 1200;
-  const SCATTER_TRANSIT_MS = 700;      // every form change passes through scatter
+  const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600;
+  const EASE_RATE = 9;                 // positions follow the scroll target at 9/s
+  const SCROLL_TURN = 0.0009;          // rad of Y rotation per px scrolled
   const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s
   const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
   const BRAIN_OPACITY = 0.7, OTHER_OPACITY = 0.85;
-  const HERO_SCROLL_TRIGGER = 0.4;     // hero 40% out of view -> logo
+  const LOGO_DIAMETER = 2.6, LOGO_STROKE = 1.4, LOGO_DEPTH = 0.7;   // grid units except diameter
   const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890, LOGO_WHITE = 0xF2F0EA,
         DIM_WHITE = 0x6f6e68, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
 
@@ -875,10 +877,10 @@ import * as THREE from 'three';
   const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posScatter = new F(COUNT*3);
   const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colScatter = new F(COUNT*3);
   const cur = new F(COUNT*3), bulge = new F(COUNT*3), drift = new F(COUNT*3);
-  const axis = new F(COUNT*3), colFrom = new F(COUNT*3), colCur = new F(COUNT*3);
+  const axis = new F(COUNT*3);
   const spinAng = new F(COUNT), spinVel = new F(COUNT);
-  const sBrain = new F(COUNT), sOther = new F(COUNT);   // size per form: brain vs the rest
-  const sBase = new F(COUNT), sBulge = new F(COUNT), moveRate = new F(COUNT);
+  const sBrain = new F(COUNT), sLogo = new F(COUNT), sScatter = new F(COUNT);  // size per form
+  const sBase = new F(COUNT), sBulge = new F(COUNT);
 
   const cGold = new THREE.Color(GOLD), cViolet = new THREE.Color(VIOLET),
         cWhite = new THREE.Color(WHITE), cLogoWhite = new THREE.Color(LOGO_WHITE),
@@ -890,8 +892,9 @@ import * as THREE from 'three';
     arr[i*3] = (Math.random()-0.5)*12; arr[i*3+1] = (Math.random()-0.5)*7; arr[i*3+2] = (Math.random()-0.5)*6;
   }
 
-  /* sizes. Brain particles are fine only (0.014-0.024); the logo and scatter
-     keep the three classes; the 2% large shards live in the ambient field. */
+  /* sizes. Brain and logo particles are the fine class only (0.014-0.024);
+     scatter keeps the three classes; the 2% large shards belong to the
+     ambient field and the scatter form only. */
   for (let i = 0; i < COUNT; i++) {
     const r = Math.random();
     let s;
@@ -899,15 +902,15 @@ import * as THREE from 'three';
     else if (r < 0.92) s = 0.012 + Math.random()*0.018;
     else if (r < 0.98) s = 0.04  + Math.random()*0.04;
     else               s = 0.18  + Math.random()*0.17;
-    sOther[i] = s;
+    sScatter[i] = s;
     sBrain[i] = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sLogo[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
     sBase[i] = sBrain[i];
     const ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
     const al = Math.hypot(ax, ay, az) || 1;
     axis[i*3] = ax/al; axis[i*3+1] = ay/al; axis[i*3+2] = az/al;
     spinAng[i] = Math.random()*Math.PI*2;
     spinVel[i] = (Math.random()-0.5) * 0.5;                    // slow tumble
-    moveRate[i] = 3 + Math.random()*2;
     const dx = Math.random()*2-1, dy = Math.random()*2-1, dz = Math.random()*2-1;
     const dl = Math.hypot(dx, dy, dz) || 1;
     drift[i*3] = dx/dl; drift[i*3+1] = dy/dl; drift[i*3+2] = dz/dl;
@@ -1275,9 +1278,9 @@ import * as THREE from 'three';
   }
   buildBrain();
 
-  /* ── form: logo, from the mark geometry (24x24 grid, stroke 2) ─── */
+  /* ── form: logo, from the mark geometry (24x24 grid, stroke 1.4) ─ */
   function buildLogo(){
-    const R = 9, SW = 2, DEPTH = 1.2, S = 3.4 / (2 * R);        // ring diameter -> 3.4
+    const R = 9, SW = LOGO_STROKE, DEPTH = LOGO_DEPTH, S = LOGO_DIAMETER / (2 * R);
     const deg = Math.PI / 180;
     const nRing = Math.round(FORM_N * 0.62), nArm = Math.round(FORM_N * 0.12);
     const nGold = FORM_N - nRing - 2 * nArm;                   // 14%, absorbs rounding
@@ -1326,57 +1329,69 @@ import * as THREE from 'three';
   const FORMS = { brain: posBrain, logo: posLogo, scatter: posScatter };
   const FORM_COLS = { brain: colBrain, logo: colLogo, scatter: colScatter };
 
-  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats, form: 'brain', target: 'brain' };
+  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats,
+                       formA: 'brain', formB: 'brain', t: 0, form: 'brain', scattered: false };
   if (window.TURNSTYL) window.TURNSTYL.sceneStats = sceneStats;
 
-  cur.set(posBrain); colCur.set(colBrain); colFrom.set(colBrain);
+  const SIZES = { brain: sBrain, logo: sLogo, scatter: sScatter };
+  const OPACITY = { brain: BRAIN_OPACITY, logo: OTHER_OPACITY, scatter: OTHER_OPACITY };
+  cur.set(posBrain);
+
+  /* ── keyframes: one per section, in document order ──────────────── */
+  // hero = brain, story 1 (pulse) = logo, story 2 (reform) = brain,
+  // story 3 (scatter) = scatter, story 4 (reform) = logo, console = logo
+  const KEY_FORMS = ['brain', 'logo', 'brain', 'scatter', 'logo', 'logo'];
+  const SECTIONS = Array.from(document.querySelectorAll('section[data-state]'));
+  const keyY = new F(Math.max(1, SECTIONS.length));
+  const keyForm = SECTIONS.map(function(_, i){ return KEY_FORMS[i] || 'logo'; });
+  let docHeight = 0;
+  function measureKeys(){
+    const sy = window.scrollY;
+    for (let i = 0; i < SECTIONS.length; i++) {
+      const r = SECTIONS[i].getBoundingClientRect();
+      keyY[i] = r.top + sy + r.height / 2;                    // section centre, document coords
+    }
+    docHeight = document.documentElement.scrollHeight;
+  }
+  measureKeys();
+
+  // Where the scroll anchor sits between keyframes. Before the first: t = 0 on
+  // the hero. After the last: hold the console form.
+  let kA = 0, kB = 0, kT = 0, lastInterval = -1;
+  function locate(){
+    const n = SECTIONS.length;
+    if (n === 0) { kA = kB = 0; kT = 0; return; }
+    const anchor = window.scrollY + window.innerHeight * 0.5;
+    if (anchor <= keyY[0]) { kA = kB = 0; kT = 0; }
+    else if (anchor >= keyY[n - 1]) { kA = kB = n - 1; kT = 0; }
+    else {
+      let i = 0;
+      while (i < n - 2 && anchor >= keyY[i + 1]) i++;
+      kA = i; kB = i + 1;
+      const span = keyY[kB] - keyY[kA];
+      kT = span > 0 ? Math.min(1, Math.max(0, (anchor - keyY[kA]) / span)) : 0;
+    }
+    const fa = keyForm[kA], fb = keyForm[kB];
+    sceneStats.formA = fa; sceneStats.formB = fb; sceneStats.t = kT;
+    sceneStats.form = kT < 0.5 ? fa : fb;
+    sceneStats.scattered = Math.abs(kT - 0.5) < 0.15 && fa !== fb;
+    if (kA !== lastInterval) {                                 // once per interval crossing
+      lastInterval = kA;
+      console.info(fa === fb ? 'turnstyl scene: ' + fa + ' (hold)'
+                             : 'turnstyl scene: ' + fa + ' -> scatter -> ' + fb);
+    }
+  }
 
   /* ── state ──────────────────────────────────────────────────────── */
-  const consoleEl = document.getElementById('console');
-  const hero = document.querySelector('.hero');
-  function consoleActive(){
-    if (!consoleEl) return false;
-    return consoleEl.getBoundingClientRect().top <= window.innerHeight * 0.42;
-  }
-  function heroScrolled(){                                     // fraction of the hero above the top edge
-    if (!hero) return 0;
-    const r = hero.getBoundingClientRect();
-    return r.height > 0 ? Math.min(1, Math.max(0, -r.top / r.height)) : 0;
-  }
-  function formFor(s){
-    if (s === 'pulse') return 'logo';
-    if (s === 'reform') return 'brain';
-    if (s === 'scatter') return 'scatter';
-    if (consoleActive()) return 'logo';                        // 'ring' in the console
-    return heroScrolled() >= HERO_SCROLL_TRIGGER ? 'logo' : 'brain';  // 'ring' in the hero
-  }
-
   let state = document.body.dataset.state || 'ring';
   let missing = document.body.classList.contains('memory-missing');
-  let form = missing ? 'scatter' : formFor(state);
-  let transitUntil = 0, wasTransit = false, colT = 1;
-  let swayT = 0, swayAmp = 0.30, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
-  let greyMix = 0, redMix = 0, lastTint = '';
-  let offX = 0, offXFrac = 0.76, groupY = 0;
+  let swayT = 0, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
+  let greyMix = 0, redMix = 0, lastColourKey = '';
+  let offX = 0, groupY = 0;
   let rotX = 0, rotY = 0;
   let mouseX = 0, mouseY = 0, hasPointer = false;
   let fitScale = 1;
-  sceneStats.form = form; sceneStats.target = form;
 
-  function setForm(next){
-    if (next === form) return;
-    const prev = form;
-    colFrom.set(colCur);
-    colT = 0;
-    form = next;
-    // pass through a scatter unless we are already in one
-    const via = !(next === 'scatter' || prev === 'scatter' || reduced);
-    transitUntil = via ? performance.now() + SCATTER_TRANSIT_MS : 0;
-    sceneStats.target = next;
-    sceneStats.form = via ? 'scatter' : next;
-    console.info(via ? 'turnstyl scene: ' + prev + ' -> scatter -> ' + next
-                     : 'turnstyl scene: ' + prev + ' -> ' + next);
-  }
   function triggerPulse(){ pulseAt = performance.now(); }
   function triggerReform(){
     reformAt = performance.now();
@@ -1386,38 +1401,25 @@ import * as THREE from 'three';
       drift[i*3] = dx/dl; drift[i*3+1] = dy/dl; drift[i*3+2] = dz/dl;
     }
   }
-  function applyState(){
-    const inHero = (state === 'ring' && !consoleActive());
-    offXFrac = inHero ? 0.76 : 0.78;                           // form centre, % of viewport width
-    if (missing) { setForm('scatter'); return; }
-    setForm(formFor(state));
-  }
-  function setState(next){
+
+  // The page's story state no longer chooses the form; the scroll does. It is
+  // still read for the flourishes the sections trigger.
+  window.addEventListener('scenestate', function(e){
+    const next = e && e.detail && e.detail.state;
     if (!next || next === state) return;
     const prev = state;
     state = next;
-    applyState();
     if (state === 'pulse' && prev !== 'pulse') triggerPulse();
     if (state === 'reform' && prev !== 'reform') triggerReform();
     if (reduced) draw(0);
-  }
-  applyState();
-
-  window.addEventListener('scenestate', function(e){
-    if (e && e.detail && e.detail.state) setState(e.detail.state);
   });
 
-  /* memory-missing locks the form apart and turns it red */
+  /* memory-missing locks the form apart and turns it red, whatever the scroll */
   new MutationObserver(function(){
     const now = document.body.classList.contains('memory-missing');
     if (now === missing) return;
     missing = now;
-    applyState();
-    if (!missing) {                    // memory came back: re-form into the state
-      setState(document.body.dataset.state || state);
-      applyState();
-      triggerReform();
-    }
+    if (!missing) triggerReform();       // memory came back: settle into the scroll target
     if (reduced) draw(0);
   }).observe(document.body, { attributes:true, attributeFilter:['class'] });
 
@@ -1447,11 +1449,11 @@ import * as THREE from 'three';
     mouseY = -((e.clientY / window.innerHeight) * 2 - 1);
     hasPointer = true;
   }, { passive:true });
+  const hero = document.querySelector('.hero');
   if (hero) hero.addEventListener('click', function(){ triggerPulse(); });
   window.addEventListener('scroll', function(){
     groupY = Math.max(-0.6, Math.min(0.6, -0.0005 * window.scrollY));
-    // the hero->logo morph is decided here from geometry, not by the section observer
-    if (state === 'ring' && !missing) applyState();
+    if (reduced) draw(0);
   }, { passive:true });
 
   /* ── scratch objects: nothing is allocated per frame ────────────── */
@@ -1475,6 +1477,28 @@ import * as THREE from 'three';
     bulgeOn = true;
   }
 
+  // Three-point blend between keyframes A and B through the fixed scatter:
+  // returns the source array pair and the blend weight for this frame.
+  let srcA = posBrain, srcB = posBrain, colA = colBrain, colB = colBrain, sizA = sBrain, sizB = sBrain, blendW = 0;
+  function blendTarget(){
+    if (missing) {                                             // forced apart, regardless of scroll
+      srcA = srcB = posScatter; colA = colB = colScatter; sizA = sizB = sScatter; blendW = 0; return;
+    }
+    const fa = keyForm[kA], fb = keyForm[kB];
+    if (fa === fb) {                                           // same form both sides: hold it
+      srcA = srcB = FORMS[fa]; colA = colB = FORM_COLS[fa]; sizA = sizB = SIZES[fa]; blendW = 0; return;
+    }
+    if (kT < 0.5) {
+      srcA = FORMS[fa]; colA = FORM_COLS[fa]; sizA = SIZES[fa];
+      srcB = posScatter; colB = colScatter; sizB = sScatter;
+      blendW = smoothstep(0, 1, kT * 2);
+    } else {
+      srcA = posScatter; colA = colScatter; sizA = sScatter;
+      srcB = FORMS[fb]; colB = FORM_COLS[fb]; sizB = SIZES[fb];
+      blendW = smoothstep(0, 1, (kT - 0.5) * 2);
+    }
+  }
+
   function draw(dt){
     const now = performance.now();
     const pulseP = (now - pulseAt) / PULSE_MS;
@@ -1482,48 +1506,47 @@ import * as THREE from 'three';
     const waving = pulseP >= 0 && pulseP <= 1 && !reduced;
     const env = waving ? (1 - pulseP) * (1 - pulseP) : 0;
     const loose = (reformP >= 0 && reformP <= 1 && !reduced) ? (1 - reformP) : 0;
-    const inTransit = now < transitUntil;
-    if (wasTransit && !inTransit) sceneStats.form = form;      // the scatter leg is over
-    wasTransit = inTransit;
-    const target = inTransit ? posScatter : FORMS[form];
-    const brainNow = form === 'brain' && !inTransit;
 
-    /* group: sway (bounded, never edge-on), parallax, offset, scroll drift */
+    if (document.documentElement.scrollHeight !== docHeight) measureKeys();  // layout moved
+    locate();
+    blendTarget();
+    const w = blendW, iw = 1 - w;
+    const shownForm = missing ? 'scatter' : (kT < 0.5 ? keyForm[kA] : keyForm[kB]);
+
+    /* group: scroll turn, bounded sway, parallax, offset, scroll drift */
     if (!reduced) swayT += dt;
     const gk = reduced ? 1 : 1 - Math.exp(-2 * dt);            // eased at 2/s
-    swayAmp += ((form === 'logo' ? 0.25 : 0.30) - swayAmp) * gk;
     rotX += (mouseY * 0.18 - rotX) * gk;
     rotY += (mouseX * 0.28 - rotY) * gk;
-    const offXT = (offXFrac - 0.5) * visW;                     // form centre at 76% / 78%
+    const fracA = kA === 0 ? 0.76 : 0.78, fracB = kB === 0 ? 0.76 : 0.78;
+    const offXT = (fracA + (fracB - fracA) * kT - 0.5) * visW;  // form centre at 76% / 78%
     offX += (offXT - offX) * (reduced ? 1 : 1 - Math.exp(-2.5 * dt));
-    group.rotation.set(rotX, (reduced ? 0 : swayAmp * Math.sin(swayT * SWAY_W)) + rotY, 0);
+    const sway = reduced ? 0 : (shownForm === 'logo' ? 0.25 : 0.30) * Math.sin(swayT * SWAY_W);
+    group.rotation.set(rotX, window.scrollY * SCROLL_TURN + sway + rotY, 0);
     group.position.set(offX, groupY, 0);
     group.scale.setScalar(fitScale);
     group.updateMatrixWorld();
 
-    /* material opacity follows the form: 0.6 on the brain, 0.85 elsewhere */
-    const wantOp = brainNow ? BRAIN_OPACITY : OTHER_OPACITY;
+    /* material opacity follows the shown form: 0.7 on the brain, 0.85 elsewhere */
+    const wantOp = OPACITY[shownForm] || OTHER_OPACITY;
     mat.opacity += (wantOp - mat.opacity) * (reduced ? 1 : 1 - Math.exp(-3 * dt));
 
-    /* colours: per-form crossfade over the whole transition, then tints */
-    if (colT < 1) colT = Math.min(1, colT + dt * (1000 / MORPH_MS));
+    /* colours: the same three-point blend, then grey / red tints. Written only
+       when something moved, so a page at rest costs nothing here. */
     const flashing = (now - flashAt) < FLASH_MS;
-    const wantGrey = (form === 'scatter' && !missing) ? 1 : 0;
+    const wantGrey = (shownForm === 'scatter' && !missing) ? 1 : 0;
     const wantRed = missing ? 0.85 : (flashing ? 0.8 : 0);
     const tk = reduced ? 1 : 1 - Math.exp(-4 * dt);
     greyMix += (wantGrey - greyMix) * tk;
     redMix += (wantRed - redMix) * tk;
-    const tint = greyMix.toFixed(2) + ':' + redMix.toFixed(2);
-    if (colT < 1 || tint !== lastTint) {
-      lastTint = tint;
-      const cols = FORM_COLS[form];
-      const e = colT * colT * (3 - 2 * colT);
+    const colourKey = kA + ':' + kB + ':' + w.toFixed(3) + ':' + greyMix.toFixed(2) + ':' + redMix.toFixed(2) + ':' + (missing ? 1 : 0);
+    if (colourKey !== lastColourKey) {
+      lastColourKey = colourKey;
       for (let i = 0; i < COUNT; i++) {
         const j = i*3;
-        let r = colFrom[j]   + (cols[j]   - colFrom[j])   * e;
-        let g = colFrom[j+1] + (cols[j+1] - colFrom[j+1]) * e;
-        let b = colFrom[j+2] + (cols[j+2] - colFrom[j+2]) * e;
-        colCur[j] = r; colCur[j+1] = g; colCur[j+2] = b;
+        let r = colA[j]   * iw + colB[j]   * w;
+        let g = colA[j+1] * iw + colB[j+1] * w;
+        let b = colA[j+2] * iw + colB[j+2] * w;
         r += (cGrey.r - r)*greyMix; g += (cGrey.g - g)*greyMix; b += (cGrey.b - b)*greyMix;
         colOut[j]   = r + (cRed.r - r)*redMix;
         colOut[j+1] = g + (cRed.g - g)*redMix;
@@ -1534,15 +1557,17 @@ import * as THREE from 'three';
 
     pointerIntoScene();
 
-    const sk = reduced ? 1 : 1 - Math.exp(-3 * dt);            // size class follows the form
+    const k = reduced ? 1 : 1 - Math.exp(-EASE_RATE * dt);     // follow the scroll target
     for (let i = 0; i < COUNT; i++) {
       const j = i*3;
-      let tx = target[j], ty = target[j+1], tz = target[j+2];
+      let tx = srcA[j]   * iw + srcB[j]   * w;
+      let ty = srcA[j+1] * iw + srcB[j+1] * w;
+      let tz = srcA[j+2] * iw + srcB[j+2] * w;
 
       if (waving && i < FORM_N) {                              // radial wave
         const pr = Math.hypot(tx, tz) || 1e-4;
-        const w = Math.max(0, Math.sin(Math.atan2(tz, tx) * 2 - pulseP * Math.PI * 2));
-        const out = 0.5 * env * w;
+        const wv = Math.max(0, Math.sin(Math.atan2(tz, tx) * 2 - pulseP * Math.PI * 2));
+        const out = 0.5 * env * wv;
         tx += (tx/pr) * out; tz += (tz/pr) * out;
       }
       if (loose > 0 && i < FORM_N) {
@@ -1551,14 +1576,9 @@ import * as THREE from 'three';
         tz += drift[j+2] * 0.9 * loose;
       }
 
-      if (reduced) {
-        cur[j] = tx; cur[j+1] = ty; cur[j+2] = tz;
-      } else {
-        const k = 1 - Math.exp(-moveRate[i] * dt);
-        cur[j]   += (tx - cur[j])   * k;
-        cur[j+1] += (ty - cur[j+1]) * k;
-        cur[j+2] += (tz - cur[j+2]) * k;
-      }
+      cur[j]   += (tx - cur[j])   * k;
+      cur[j+1] += (ty - cur[j+1]) * k;
+      cur[j+2] += (tz - cur[j+2]) * k;
 
       /* bulge: additive, applied after the form lerp so it never fights it */
       let wantBx = 0, wantBy = 0, wantBz = 0, wantS = 0;
@@ -1585,7 +1605,7 @@ import * as THREE from 'three';
         sBulge[i]  += (wantS  - sBulge[i])  * bk;
         spinAng[i] += spinVel[i] * dt;
       }
-      sBase[i] += ((brainNow ? sBrain[i] : sOther[i]) - sBase[i]) * sk;
+      sBase[i] += ((sizA[i] * iw + sizB[i] * w) - sBase[i]) * k;   // scale blends the same way
 
       dummy.position.set(cur[j] + bulge[j], cur[j+1] + bulge[j+1], cur[j+2] + bulge[j+2]);
       _axis.set(axis[j], axis[j+1], axis[j+2]);
@@ -1612,6 +1632,7 @@ import * as THREE from 'three';
     visW = visH * camera.aspect;
     const formH = Math.max(0.001, brainMaxY - brainMinY);
     fitScale = (0.62 * visH / formH) * Math.min(1, Math.min(w, h) / 900);
+    measureKeys();
     if (reduced) draw(0);
   }
   window.addEventListener('resize', resize);
@@ -1636,7 +1657,8 @@ import * as THREE from 'three';
   });
 
   resize();
-  offX = (offXFrac - 0.5) * visW;      // start in place, no slide-in on load
+  locate();
+  offX = ((kA === 0 ? 0.76 : 0.78) - 0.5) * visW;   // start in place, no slide-in on load
   if (reduced) draw(0); else start();
 })();
 </script>

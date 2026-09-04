@@ -75,6 +75,10 @@ def render_step(outcome: Outcome) -> None:
         f"{served} | {outcome.tokens} tokens | {outcome.seconds:.2f}s | "
         f"{outcome.price_usdc:.2f} USDC | sha256 {S.sha256_text(outcome.output)[:12]}"
     )
+    if outcome.diff_applies is not None:
+        # The patch step's mechanical verdict belongs with the step's other
+        # facts, inside the panel it describes.
+        subtitle += f" | PATCH APPLIES: {'yes' if outcome.diff_applies else 'no'}"
     console.print(
         Panel(
             # Text(), not a bare str: step output is Solidity, and rich would

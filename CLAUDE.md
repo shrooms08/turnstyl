@@ -5,6 +5,8 @@ These apply to every change in this repo. No exceptions without being asked.
 1. **Python 3.12 via uv only.** Install with `uv pip install`, run with
    `.venv/bin/python` or `uv run`. Do not use system pip, poetry, or conda.
 2. **No TypeScript.** No Node, no npm, no package.json anywhere in this project.
+   Exception: files inside vendored third-party dependencies such as
+   `contracts/lib/` are left untouched.
 3. **Never print or commit `.env`.** Do not `cat`, `echo`, `head`, or otherwise
    display `.env` or any private key or wallet secret, and never stage it.
    `.gitignore` excludes it — keep it that way.

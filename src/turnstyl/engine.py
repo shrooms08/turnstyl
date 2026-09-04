@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import policy
 from . import schema as S
+from .llm import Usage as LLMUsage
 from .llm import run_step as llm_run_step
 from .memory import TurnstylMemory, TurnstylStore
 from .payments import PaymentBackend, get_backend
@@ -48,6 +49,7 @@ class Outcome:
     seconds: float = 0.0
     invoice: S.OpenInvoice | None = None
     price_reason: str = ""
+    diff_applies: bool | None = None
     commit_tx: str | None = None
     commit_hash: str | None = None
     commit_error: str | None = None
@@ -516,12 +518,19 @@ class Engine:
 
         started = time.monotonic()
         if cached_output is not None:
-            output, tokens, cached = cached_output, 0, True
+            output, usage, cached = cached_output, LLMUsage(), True
+            diff_applies = None
         else:
             text = contract_text or self._require_contract_text(state)
             prior = {int(k): v.output for k, v in entity.steps.items()}
-            output, tokens = llm_run_step(step, text, prior)
+            result = llm_run_step(step, text, prior)
+            output, usage, diff_applies = (
+                result.output,
+                result.usage,
+                result.diff_applies,
+            )
             cached = False
+        tokens = usage.total
         seconds = round(time.monotonic() - started, 3)
 
         invoice = state.open_invoice
@@ -538,8 +547,11 @@ class Engine:
             paid=(decision == S.RUN_PAID) or price_usdc == 0.0,
             tx_hash=invoice.tx_hash if invoice and invoice.step == step else None,
             tokens=tokens,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
             seconds=seconds,
             cached=cached,
+            diff_applies=diff_applies,
         )
         entity.steps[str(step)] = record
         self.store.put_job_entity(job_id, entity)
@@ -569,6 +581,11 @@ class Engine:
             f"seconds={seconds}"
         ]
 
+        if diff_applies is not None:
+            acted.append(
+                f"mechanical check: `patch --dry-run` "
+                f"{'accepted' if diff_applies else 'REJECTED'} the produced diff"
+            )
         if commit_tx:
             acted.append(
                 f"committed output_sha256={record.output_sha256[:12]}... on chain "
@@ -675,6 +692,7 @@ class Engine:
             price_usdc=price_usdc,
             tokens=tokens,
             seconds=seconds,
+            diff_applies=diff_applies,
             invoice=next_invoice,
             price_reason=price_reason,
             commit_tx=commit_tx,

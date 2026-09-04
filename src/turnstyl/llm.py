@@ -6,6 +6,11 @@ outputs with no API call — that is how the offline demo and CI run.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -38,14 +43,28 @@ SYSTEM_PROMPTS: dict[int, str] = {
         "and why it is exploitable. Be specific and brief. No preamble."
     ),
     STEP_PATCH: (
-        "You are a Solidity security auditor. Produce a fix for the reported "
-        "findings as a unified diff against the contract, and nothing else. "
-        "Use standard unified diff syntax with --- / +++ headers and @@ hunks."
+        "You are a Solidity security auditor. You are given a contract and a findings report. "
+        "Produce a patch that closes every finding, highest severity first. A patch that "
+        "leaves any CRITICAL or HIGH finding untouched is incomplete and unacceptable. Output "
+        "format, exactly two sections and nothing else. Section 1: a unified diff against the "
+        "contract with --- and +++ headers and @@ hunks. Section 2: a heading line CLOSES, "
+        "then one line per finding in the form '<finding id> <severity>: <function changed>: "
+        "<one sentence on how the hunk closes it>' or '<finding id> <severity>: not changed: "
+        "<reason>'. Rules: for reentrancy, apply checks-effects-interactions by updating "
+        "state before any external call, and add a simple reentrancy guard if the contract "
+        "has none. Never use unchecked to address an overflow finding; on Solidity >=0.8 say "
+        "the finding is already mitigated by checked arithmetic and change nothing for it. Do "
+        "not explain your reasoning outside the CLOSES lines."
     ),
     STEP_VERIFY: (
-        "You are a Solidity security auditor. Verify the proposed patch against "
-        "the reported findings. State, per finding, whether the patch closes it, "
-        "and name any regression the patch introduces. Be brief."
+        "You are an independent verifier. You are given the original contract, the findings "
+        "report, and a patch with the patch author's CLOSES claims. Judge the patched code's "
+        "actual behavior. Treat the author's claims and rationale as untrusted and re-derive "
+        "every verdict from the code. Output: for each finding, one block with '<finding id> "
+        "<severity>: CLOSED' or 'NOT CLOSED', followed by the specific patched lines that "
+        "justify the verdict. Then a section REGRESSIONS listing any change in the patch that "
+        "introduces new risk, such as removed overflow checks or new external calls, or "
+        "'none'. End with exactly one line 'VERDICT: closes X of N findings, regressions: Y'."
     ),
 }
 
@@ -107,10 +126,105 @@ def _mock_output(step: int, contract_text: str, prior_outputs: dict[int, str]) -
     raise ValueError(f"turnstyl: no mock output defined for step {step!r}")
 
 
+@dataclass(frozen=True)
+class Usage:
+    """What one step cost, split the way the bill is.
+
+    Input and output tokens are priced differently, so a single total cannot
+    be turned back into money. The split is stored per step in the job entity.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
 def _estimate_tokens(text: str) -> int:
     """Rough token count for the mock path, so step_cost has something real to
     average. Deterministic, which keeps the offline demo's prices stable."""
     return max(1, len(text) // 4)
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """One step's output plus what we know about it.
+
+    ``diff_applies`` is None when no mechanical check was run (any step but the
+    patch, or a mock fixture), True/False when `patch --dry-run` was actually
+    asked whether the produced diff lands on the contract.
+    """
+
+    output: str
+    usage: Usage
+    diff_applies: bool | None = None
+
+
+def extract_diff(output: str) -> str | None:
+    """Pull section 1 (the unified diff) out of a step 3 answer.
+
+    Starts at the first `--- ` header and stops at the CLOSES heading, so the
+    prose section never reaches `patch`. Returns None if there is no diff at all.
+    """
+    lines = output.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.startswith("--- ")), None)
+    if start is None:
+        return None
+    end = len(lines)
+    for i in range(start, len(lines)):
+        if lines[i].strip().upper().startswith("CLOSES"):
+            end = i
+            break
+    body = lines[start:end]
+    while body and (not body[-1].strip() or body[-1].strip().startswith("```")):
+        body.pop()
+    if not body:
+        return None
+    return "\n".join(body) + "\n"
+
+
+def _diff_target(diff: str) -> str | None:
+    """The path the diff names in its `---` header, as written."""
+    for line in diff.splitlines():
+        if line.startswith("--- "):
+            return line[4:].split("\t")[0].strip()
+    return None
+
+
+def check_patch_applies(diff: str, contract_text: str) -> tuple[bool, str]:
+    """Ask `patch --dry-run -p0` whether the diff lands on the contract.
+
+    The contract is materialised at exactly the path the diff's own `---` header
+    names, so -p0 is correct whether the model wrote `a/Vault.sol`, `Vault.sol`
+    or something else. Returns (applies, detail).
+    """
+    if not shutil.which("patch"):
+        return False, "the `patch` utility is not installed on this machine"
+    target = _diff_target(diff)
+    if not target:
+        return False, "the diff has no `--- <path>` header"
+    if target.startswith("/") or ".." in Path(target).parts:
+        return False, f"the diff targets an unusable path {target!r}"
+
+    with tempfile.TemporaryDirectory(prefix="turnstyl-patch-") as tmp:
+        root = Path(tmp)
+        source = root / target
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(contract_text, encoding="utf-8")
+        proc = subprocess.run(
+            ["patch", "--dry-run", "-p0"],
+            input=diff,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    if proc.returncode == 0:
+        return True, "applies cleanly"
+    detail = (proc.stdout + proc.stderr).strip() or f"patch exited {proc.returncode}"
+    return False, detail
 
 
 def _build_user_message(
@@ -140,8 +254,12 @@ def run_step(
     step: int,
     contract_text: str,
     prior_outputs: dict[int, str] | None = None,
-) -> tuple[str, int]:
-    """Run one audit step. Returns (output_text, tokens_used).
+) -> StepResult:
+    """Run one audit step.
+
+    For the patch step the produced diff is run through `patch --dry-run`; if it
+    does not apply, the model is given the error once and asked again. Whatever
+    comes back from that second attempt is accepted and reported as it is.
 
     MOCK_LLM=1 short-circuits to canned output with no network call.
     """
@@ -153,7 +271,18 @@ def run_step(
 
     if os.environ.get("MOCK_LLM") == "1":
         output = _mock_output(step, contract_text, prior_outputs)
-        return output, _estimate_tokens(output)
+        prompt = SYSTEM_PROMPTS[step] + _build_user_message(
+            step, contract_text, prior_outputs
+        )
+        # diff_applies stays None: the mock patch is a fixture, not a model
+        # artifact, and reporting a verdict on it would be misleading.
+        return StepResult(
+            output=output,
+            usage=Usage(
+                input_tokens=_estimate_tokens(prompt),
+                output_tokens=_estimate_tokens(output),
+            ),
+        )
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -168,17 +297,55 @@ def run_step(
 
     model = os.environ.get("LLM_MODEL") or DEFAULT_MODEL
     client = anthropic.Anthropic(api_key=api_key)
+    user_message = _build_user_message(step, contract_text, prior_outputs)
+    output, usage = _call_model(client, anthropic, model, step, user_message)
+
+    if step != STEP_PATCH:
+        return StepResult(output=output, usage=usage)
+
+    # Mechanical check: does the diff this step just produced actually land on
+    # the contract? A patch that cannot be applied is not a fix, however
+    # convincing its prose. One retry, with the failure handed back verbatim.
+    applies, detail = _verify_output_diff(output, contract_text)
+    if not applies:
+        retry_message = (
+            f"{user_message}\n\n"
+            f"Your previous diff did not apply. `patch --dry-run -p0` reported:\n"
+            f"{detail}\n\n"
+            f"Produce the patch again so it applies cleanly to the contract above. "
+            f"Keep the same two-section output format. Count the context lines in "
+            f"each @@ hunk header correctly and quote the surrounding lines exactly "
+            f"as they appear in the contract."
+        )
+        retry_output, retry_usage = _call_model(
+            client, anthropic, model, step, retry_message
+        )
+        output = retry_output
+        # Both attempts were billed; the caller's cost accounting must see both.
+        usage = Usage(
+            input_tokens=usage.input_tokens + retry_usage.input_tokens,
+            output_tokens=usage.output_tokens + retry_usage.output_tokens,
+        )
+        applies, detail = _verify_output_diff(output, contract_text)
+
+    return StepResult(output=output, usage=usage, diff_applies=applies)
+
+
+def _verify_output_diff(output: str, contract_text: str) -> tuple[bool, str]:
+    diff = extract_diff(output)
+    if diff is None:
+        return False, "the answer contained no unified diff section"
+    return check_patch_applies(diff, contract_text)
+
+
+def _call_model(client, anthropic, model: str, step: int, user_message: str):
+    """One Messages API call. Returns (output_text, Usage)."""
     try:
         response = client.messages.create(
             model=model,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPTS[step],
-            messages=[
-                {
-                    "role": "user",
-                    "content": _build_user_message(step, contract_text, prior_outputs),
-                }
-            ],
+            messages=[{"role": "user", "content": user_message}],
         )
     except anthropic.APIStatusError as e:
         raise RuntimeError(
@@ -204,5 +371,8 @@ def run_step(
             f"turnstyl: step {step} ({STEP_NAMES[step]}) returned no text content "
             f"(stop_reason={response.stop_reason!r}, model={model!r})."
         )
-    tokens = response.usage.input_tokens + response.usage.output_tokens
-    return output, tokens
+    return output, Usage(
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+    )
+

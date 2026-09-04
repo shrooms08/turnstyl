@@ -198,9 +198,14 @@ class StepRecord(_Model):
     paid: bool = False
     tx_hash: str | None = None
     tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     seconds: float = 0.0
     cached: bool = False
     commit_tx: str | None = None
+    # Patch step only: did `patch --dry-run` accept the produced diff?
+    # None means no mechanical check was run for this step.
+    diff_applies: bool | None = None
 
 
 class JobEntity(_Model):

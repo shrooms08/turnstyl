@@ -200,6 +200,10 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   .reveal{transition:none;opacity:1;transform:none}
   .blip{animation:none}
 }
+
+/* ── part 6: display type ───────────────────────────────────────── */
+.hero h1{font-size:clamp(64px,8.5vw,132px);line-height:1.02}
+.story h2{font-size:clamp(48px,5.5vw,84px)}
 </style>
 </head>
 <body>
@@ -788,99 +792,253 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 <script type="module">
 import * as THREE from 'three';
 
-(async function scene(){
+(function scene(){
   const canvas = document.getElementById('scene');
   if (!canvas) return;
 
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  const RING_R = 2.2, TUBE_R = 0.35, SPIN = 0.05;
-  const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, RED = 0xE24B4A, GREY = 0x6a6a6a;
-  const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600;
+  /* ── constants ──────────────────────────────────────────────────── */
+  const COUNT = 5000;
+  const AMBIENT = 300;                 // excluded from every form
+  const FORM_N = COUNT - AMBIENT;
+  const SPIN = 0.05;                   // group rad/s around Y
+  const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600, MORPH_MS = 1200;
+  const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
+  const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890,
+        TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
 
-  /* particle count follows how much the agent remembers */
-  let records = 0;
-  try {
-    const res = await fetch('/api/status', { cache:'no-store' });
-    if (res.ok) {
-      const s = await res.json();
-      if (typeof s.records === 'number') records = s.records;
-    }
-  } catch (e) { /* API down: fall through to the floor of 160 */ }
-  const COUNT = Math.min(600, Math.max(160, records));
+  /* ── inline value noise (no library) ────────────────────────────── */
+  function hash3(i, j, k){
+    let n = Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ Math.imul(k, 1274126177);
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+  }
+  function fade(t){ return t * t * (3 - 2 * t); }
+  function lerp1(a, b, t){ return a + (b - a) * t; }
+  function noise3(x, y, z){
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = fade(xf), v = fade(yf), w = fade(zf);
+    const c000 = hash3(xi,   yi,   zi  ), c100 = hash3(xi+1, yi,   zi  );
+    const c010 = hash3(xi,   yi+1, zi  ), c110 = hash3(xi+1, yi+1, zi  );
+    const c001 = hash3(xi,   yi,   zi+1), c101 = hash3(xi+1, yi,   zi+1);
+    const c011 = hash3(xi,   yi+1, zi+1), c111 = hash3(xi+1, yi+1, zi+1);
+    const x00 = lerp1(c000, c100, u), x10 = lerp1(c010, c110, u);
+    const x01 = lerp1(c001, c101, u), x11 = lerp1(c011, c111, u);
+    return lerp1(lerp1(x00, x10, v), lerp1(x01, x11, v), w) * 2 - 1;
+  }
+  function smoothstep(e0, e1, x){
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  }
 
-  /* renderer */
+  /* ── renderer ───────────────────────────────────────────────────── */
   let renderer;
   try {
     renderer = new THREE.WebGLRenderer({ canvas, alpha:true, antialias:true });
-  } catch (e) { return; }            // no WebGL: leave the page unharmed
+  } catch (e) { return; }              // no WebGL: leave the page unharmed
   renderer.setClearColor(0x000000, 0);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
 
-  const scene = new THREE.Scene();
+  const scene3 = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
-  camera.position.set(0, 0.85, 6);   // slightly above, tilted down at the ring
+  camera.position.set(0, 0.85, 6);
   camera.lookAt(0, 0, 0);
 
-  /* unlit tetrahedra, one draw call */
-  const geo = new THREE.TetrahedronGeometry(0.06);
-  const mat = new THREE.MeshBasicMaterial({ transparent:true, opacity:1 });
+  const group = new THREE.Group();
+  scene3.add(group);
+
+  const geo = new THREE.TetrahedronGeometry(1, 0);
+  const mat = new THREE.MeshBasicMaterial({
+    wireframe: true, transparent: true, opacity: 0.85,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
   const mesh = new THREE.InstancedMesh(geo, mat, COUNT);
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  scene.add(mesh);
+  mesh.frustumCulled = false;
+  group.add(mesh);
 
-  /* per-instance data */
-  const base = [], ang = [], tubeU = [], tubeV = [], scat = [], drift = [],
-        rot = [], spin = [], loosen = [], speed = [];
+  /* ── flat per-instance stores, allocated once ───────────────────── */
+  const F = Float32Array;
+  const posBrain = new F(COUNT*3), posRing = new F(COUNT*3), posScatter = new F(COUNT*3);
+  const colBrain = new F(COUNT*3), colRing = new F(COUNT*3), colScatter = new F(COUNT*3);
+  const cur = new F(COUNT*3), bulge = new F(COUNT*3), drift = new F(COUNT*3);
+  const axis = new F(COUNT*3), colFrom = new F(COUNT*3), colCur = new F(COUNT*3);
+  const spinAng = new F(COUNT), spinVel = new F(COUNT);
+  const sBase = new F(COUNT), sBulge = new F(COUNT), moveRate = new F(COUNT);
+
+  const cGold = new THREE.Color(GOLD), cViolet = new THREE.Color(VIOLET),
+        cWhite = new THREE.Color(WHITE), cTeal = new THREE.Color(TEAL),
+        cRed = new THREE.Color(RED), cGrey = new THREE.Color(GREY);
+
+  function put(arr, i, c){ arr[i*3] = c.r; arr[i*3+1] = c.g; arr[i*3+2] = c.b; }
+
+  /* size classes: 92% fine, 6% mid, 2% large */
   for (let i = 0; i < COUNT; i++) {
-    base.push(new THREE.Color((i % 10) < 7 ? GOLD : VIOLET));   // 70% gold
-    ang.push((i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.08);
-    const t = Math.random() * Math.PI * 2, rr = TUBE_R * Math.sqrt(Math.random());
-    tubeU.push(Math.cos(t) * rr);
-    tubeV.push(Math.sin(t) * rr);
-    scat.push(new THREE.Vector3((Math.random()-0.5)*7, (Math.random()-0.5)*4, (Math.random()-0.5)*4));
-    drift.push(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize());
-    rot.push(new THREE.Euler(Math.random()*Math.PI*2, Math.random()*Math.PI*2, Math.random()*Math.PI*2));
-    spin.push(new THREE.Vector3((Math.random()-0.5)*0.35, (Math.random()-0.5)*0.35, (Math.random()-0.5)*0.35));
-    loosen.push(new THREE.Vector3());
-    speed.push(3 + Math.random() * 2);                          // 3..5 units/s
+    const r = Math.random();
+    let s;
+    if (i >= FORM_N) s = 0.012 + Math.random()*0.018;          // ambient: tiny class
+    else if (r < 0.92) s = 0.012 + Math.random()*0.018;
+    else if (r < 0.98) s = 0.04  + Math.random()*0.04;
+    else               s = 0.18  + Math.random()*0.17;
+    sBase[i] = s;
+    const ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
+    const al = Math.hypot(ax, ay, az) || 1;
+    axis[i*3] = ax/al; axis[i*3+1] = ay/al; axis[i*3+2] = az/al;
+    spinAng[i] = Math.random()*Math.PI*2;
+    spinVel[i] = (Math.random()-0.5) * 0.5;                    // slow tumble
+    moveRate[i] = 3 + Math.random()*2;
+    const dx = Math.random()*2-1, dy = Math.random()*2-1, dz = Math.random()*2-1;
+    const dl = Math.hypot(dx, dy, dz) || 1;
+    drift[i*3] = dx/dl; drift[i*3+1] = dy/dl; drift[i*3+2] = dz/dl;
   }
 
-  const cur = [], tgt = [];
-  for (let i = 0; i < COUNT; i++) {
-    const a = ang[i], R = RING_R + tubeU[i];
-    const p = new THREE.Vector3(Math.cos(a)*R, tubeV[i], Math.sin(a)*R);
-    cur.push(p.clone());
-    tgt.push(p.clone());
+  const isTeal = new Uint8Array(COUNT);
+  for (let i = 0; i < COUNT; i++) isTeal[i] = Math.random() < 0.04 ? 1 : 0;
+
+  /* ── form: brain ────────────────────────────────────────────────── */
+  const AX = 1.55, AY = 1.15, AZ = 1.9;                        // semi-axes
+  const CB = { x:0, y:-0.75, z:-0.9, ax:0.55, ay:0.4, az:0.55 };
+  const RX = 0.35, RY = 0.6;                                   // form rotation
+  const cosX = Math.cos(RX), sinX = Math.sin(RX);
+  const cosY = Math.cos(RY), sinY = Math.sin(RY);
+
+  function brainSurface(ux, uy, uz, out){
+    const gx = 0.55 + 0.45 * smoothstep(0.05, 0.35, Math.abs(ux));  // sagittal groove
+    let px = ux * AX * gx, py = uy * AY, pz = uz * AZ;
+    // ellipsoid normal
+    let nx = px/(AX*AX*gx*gx), ny = py/(AY*AY), nz = pz/(AZ*AZ);
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl; ny /= nl; nz /= nl;
+    const d = 0.09 * noise3(px*5.5, py*5.5, pz*5.5) + 0.04 * noise3(px*11, py*11, pz*11);
+    px += nx*d; py += ny*d; pz += nz*d;
+    if (py < 0) py *= 0.85;                                    // flatter underside
+    out[0] = px; out[1] = py; out[2] = pz;
+  }
+  const _s = [0,0,0];
+  function rotateForm(x, y, z, arr, i){
+    let y1 = y*cosX - z*sinX, z1 = y*sinX + z*cosX;            // X
+    let x2 = x*cosY + z1*sinY, z2 = -x*sinY + z1*cosY;         // Y
+    arr[i*3] = x2; arr[i*3+1] = y1; arr[i*3+2] = z2;
+  }
+  function unitDir(o){
+    const z = Math.random()*2-1, t = Math.random()*Math.PI*2, r = Math.sqrt(1-z*z);
+    o[0] = r*Math.cos(t); o[1] = r*Math.sin(t); o[2] = z;
+  }
+  const _u = [0,0,0];
+  let brainMinY = Infinity, brainMaxY = -Infinity;
+  for (let i = 0; i < FORM_N; i++) {
+    const cereb = Math.random() < 0.08;
+    unitDir(_u);
+    let rim, x, y, z;
+    if (cereb) {
+      const t = Math.random() < 0.85 ? 1 : Math.cbrt(Math.random())*0.9;
+      x = CB.x + _u[0]*CB.ax*t; y = CB.y + _u[1]*CB.ay*t; z = CB.z + _u[2]*CB.az*t;
+      rim = t > 0.88;
+    } else {
+      brainSurface(_u[0], _u[1], _u[2], _s);
+      const surf = Math.random() < 0.85;
+      const t = surf ? 1 : Math.cbrt(Math.random())*0.92;
+      x = _s[0]*t; y = _s[1]*t; z = _s[2]*t;
+      const radius = Math.hypot(_s[0], _s[1], _s[2]);
+      rim = surf || (1-t)*radius < 0.1;                        // within 0.1 of the shell
+    }
+    rotateForm(x, y, z, posBrain, i);
+    if (posBrain[i*3+1] < brainMinY) brainMinY = posBrain[i*3+1];
+    if (posBrain[i*3+1] > brainMaxY) brainMaxY = posBrain[i*3+1];
+    const c = isTeal[i] ? cTeal
+      : rim ? (Math.random() < 0.55 ? cGold : cWhite)
+            : (Math.random() < 0.60 ? cViolet : cWhite);
+    put(colBrain, i, c);
   }
 
-  const dummy = new THREE.Object3D(), col = new THREE.Color();
-  const cGrey = new THREE.Color(GREY), cRed = new THREE.Color(RED);
+  /* ── form: ring ─────────────────────────────────────────────────── */
+  const RING_MAJOR = 1.9, RING_TUBE = 0.75, RING_TILT = 0.55;
+  const rc = Math.cos(RING_TILT), rs = Math.sin(RING_TILT);
+  for (let i = 0; i < FORM_N; i++) {
+    const a = Math.random()*Math.PI*2, b = Math.random()*Math.PI*2;
+    const onSkin = Math.random() < 0.8;
+    const r = onSkin ? RING_TUBE - Math.random()*0.12
+                     : RING_TUBE * Math.cbrt(Math.random()) * 0.84;
+    const rr = RING_MAJOR + r*Math.cos(b);
+    const x = rr*Math.cos(a), z = rr*Math.sin(a), y = r*Math.sin(b);
+    posRing[i*3] = x;
+    posRing[i*3+1] = y*rc - z*rs;
+    posRing[i*3+2] = y*rs + z*rc;
+    const c = isTeal[i] ? cTeal
+      : onSkin ? cGold
+               : (Math.random() < 0.6 ? cViolet : cWhite);
+    put(colRing, i, c);
+  }
 
-  /* state */
+  /* ── form: scatter ──────────────────────────────────────────────── */
+  for (let i = 0; i < FORM_N; i++) {
+    posScatter[i*3]   = (Math.random()-0.5)*9;
+    posScatter[i*3+1] = (Math.random()-0.5)*5;
+    posScatter[i*3+2] = (Math.random()-0.5)*5;
+    put(colScatter, i, isTeal[i] ? cTeal : cWhite);
+  }
+
+  /* ── ambient field: same place in every form ────────────────────── */
+  for (let i = FORM_N; i < COUNT; i++) {
+    const x = (Math.random()-0.5)*12, y = (Math.random()-0.5)*7, z = (Math.random()-0.5)*6;
+    posBrain[i*3] = posRing[i*3] = posScatter[i*3] = x;
+    posBrain[i*3+1] = posRing[i*3+1] = posScatter[i*3+1] = y;
+    posBrain[i*3+2] = posRing[i*3+2] = posScatter[i*3+2] = z;
+    const c = isTeal[i] ? cTeal : cWhite;
+    put(colBrain, i, c); put(colRing, i, c); put(colScatter, i, c);
+  }
+
+  const FORMS = { brain: posBrain, ring: posRing, scatter: posScatter };
+  const FORM_COLS = { brain: colBrain, ring: colRing, scatter: colScatter };
+  const STATE_FORM = { ring:'brain', pulse:'ring', reform:'brain', scatter:'scatter' };
+
+  cur.set(posBrain); colCur.set(colBrain); colFrom.set(colBrain);
+
+  /* ── state ──────────────────────────────────────────────────────── */
   let state = document.body.dataset.state || 'ring';
   let missing = document.body.classList.contains('memory-missing');
-  let ringSpin = 0, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
-  let greyMix = 0, redMix = 0, opacity = 1;
-  let lastColorKey = '';
+  let form = missing ? 'scatter' : (STATE_FORM[state] || 'brain');
+  let colT = 1;
+  let baseSpin = 0, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
+  let greyMix = 0, redMix = 0, lastTint = '';
+  let offX = 1.7, offXTarget = 1.7, groupY = 0;
+  let rotX = 0, rotY = 0, rotXT = 0, rotYT = 0;
+  let mouseX = 0, mouseY = 0, hasPointer = false;
+  let fitScale = 1;
 
+  function setForm(next){
+    if (next === form) return;
+    colFrom.set(colCur);
+    colT = 0;
+    form = next;
+  }
+  function triggerPulse(){ pulseAt = performance.now(); }
   function triggerReform(){
     reformAt = performance.now();
     for (let i = 0; i < COUNT; i++) {
-      drift[i].set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
+      const dx = Math.random()*2-1, dy = Math.random()*2-1, dz = Math.random()*2-1;
+      const dl = Math.hypot(dx, dy, dz) || 1;
+      drift[i*3] = dx/dl; drift[i*3+1] = dy/dl; drift[i*3+2] = dz/dl;
     }
   }
-  function triggerPulse(){ pulseAt = performance.now(); }
-
+  function applyState(){
+    offXTarget = (state === 'ring') ? 1.7 : 2.2;               // hero vs story
+    if (missing) { setForm('scatter'); return; }
+    setForm(STATE_FORM[state] || 'brain');
+  }
   function setState(next){
     if (!next || next === state) return;
     const prev = state;
     state = next;
+    applyState();
     if (state === 'pulse' && prev !== 'pulse') triggerPulse();
     if (state === 'reform' && prev !== 'reform') triggerReform();
     if (reduced) draw(0);
   }
+  applyState();
 
   window.addEventListener('scenestate', function(e){
     if (e && e.detail && e.detail.state) setState(e.detail.state);
@@ -891,8 +1049,10 @@ import * as THREE from 'three';
     const now = document.body.classList.contains('memory-missing');
     if (now === missing) return;
     missing = now;
-    if (!missing) {                      // memory came back
-      setState(document.body.dataset.state || 'ring');
+    applyState();
+    if (!missing) {                    // memory came back: re-form into the state
+      setState(document.body.dataset.state || state);
+      applyState();
       triggerReform();
     }
     if (reduced) draw(0);
@@ -918,85 +1078,181 @@ import * as THREE from 'three';
   pollJournal();
   setInterval(pollJournal, 3000);
 
-  /* targets */
-  function aim(now){
-    const active = missing ? 'scatter' : state;
-    const pulseP = (now - pulseAt) / PULSE_MS;
-    const reformP = (now - reformAt) / REFORM_MS;
-    const wave = (active === 'pulse' || (pulseP >= 0 && pulseP <= 1)) && !reduced;
-    const env = pulseP >= 0 && pulseP <= 1 ? (1 - pulseP) * (1 - pulseP) : 0;
-    const loose = reformP >= 0 && reformP <= 1 ? (1 - reformP) : 0;
+  /* ── interaction ────────────────────────────────────────────────── */
+  window.addEventListener('mousemove', function(e){
+    mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+    mouseY = -((e.clientY / window.innerHeight) * 2 - 1);
+    hasPointer = true;
+  }, { passive:true });
+  const hero = document.querySelector('.hero');
+  if (hero) hero.addEventListener('click', function(){ triggerPulse(); });
+  window.addEventListener('scroll', function(){
+    groupY = Math.max(-0.6, Math.min(0.6, -0.0005 * window.scrollY));
+  }, { passive:true });
 
-    for (let i = 0; i < COUNT; i++) {
-      if (active === 'scatter') { tgt[i].copy(scat[i]); continue; }
-      const a = ang[i] + ringSpin;
-      let R = RING_R + tubeU[i];
-      if (wave) R += 0.5 * env * Math.max(0, Math.sin(ang[i] * 2 - pulseP * Math.PI * 2));
-      tgt[i].set(Math.cos(a) * R, tubeV[i], Math.sin(a) * R);
-      if (loose > 0 && !reduced) {
-        loosen[i].copy(drift[i]).multiplyScalar(0.9 * loose);
-        tgt[i].add(loosen[i]);
-      }
-    }
-    return active;
+  /* ── scratch objects: nothing is allocated per frame ────────────── */
+  const dummy = new THREE.Object3D();
+  const _q = new THREE.Quaternion(), _v = new THREE.Vector3();
+  const _axis = new THREE.Vector3(), _col = new THREE.Color();
+  const _hit = new THREE.Vector3(), _dir = new THREE.Vector3();
+  let bulgeX = 0, bulgeY = 0, bulgeZ = 0, bulgeOn = false;
+
+  function pointerIntoScene(){
+    bulgeOn = false;
+    if (reduced || !hasPointer) return;
+    _v.set(mouseX, mouseY, 0.5).unproject(camera);
+    _dir.copy(_v).sub(camera.position);
+    if (Math.abs(_dir.z) < 1e-6) return;
+    const t = (0 - camera.position.z) / _dir.z;               // plane z = 0
+    if (t <= 0) return;
+    _hit.copy(camera.position).addScaledVector(_dir, t);
+    group.updateMatrixWorld();
+    group.worldToLocal(_hit);
+    bulgeX = _hit.x; bulgeY = _hit.y; bulgeZ = _hit.z;
+    bulgeOn = true;
   }
 
   function draw(dt){
     const now = performance.now();
-    if (!reduced) ringSpin += SPIN * dt;
-    const active = aim(now);
+    if (!reduced) baseSpin += SPIN * dt;
 
-    /* colour + opacity targets */
+    const pulseP = (now - pulseAt) / PULSE_MS;
+    const reformP = (now - reformAt) / REFORM_MS;
+    const waving = pulseP >= 0 && pulseP <= 1 && !reduced;
+    const env = waving ? (1 - pulseP) * (1 - pulseP) : 0;
+    const loose = (reformP >= 0 && reformP <= 1 && !reduced) ? (1 - reformP) : 0;
+    const target = FORMS[form];
+
+    /* colours: per-form, crossfaded over MORPH_MS, then tinted */
+    if (colT < 1) colT = Math.min(1, colT + dt * (1000 / MORPH_MS));
     const flashing = (now - flashAt) < FLASH_MS;
-    const wantGrey = active === 'scatter' && !missing ? 1 : 0;
+    const wantGrey = (form === 'scatter' && !missing) ? 1 : 0;
     const wantRed = missing ? 0.85 : (flashing ? 0.8 : 0);
-    const wantOpacity = active === 'scatter' ? 0.35 : 1;
-    const k = reduced ? 1 : 1 - Math.exp(-4 * dt);
-    greyMix += (wantGrey - greyMix) * k;
-    redMix += (wantRed - redMix) * k;
-    opacity += (wantOpacity - opacity) * k;
-    mat.opacity = opacity;
-
-    const key = greyMix.toFixed(2) + ':' + redMix.toFixed(2);
-    if (key !== lastColorKey) {
-      lastColorKey = key;
+    const tk = reduced ? 1 : 1 - Math.exp(-4 * dt);
+    greyMix += (wantGrey - greyMix) * tk;
+    redMix += (wantRed - redMix) * tk;
+    const tint = greyMix.toFixed(2) + ':' + redMix.toFixed(2);
+    if (colT < 1 || tint !== lastTint) {
+      lastTint = tint;
+      const cols = FORM_COLS[form];
+      const e = colT * colT * (3 - 2 * colT);
       for (let i = 0; i < COUNT; i++) {
-        col.copy(base[i]).lerp(cGrey, greyMix).lerp(cRed, redMix);
-        mesh.setColorAt(i, col);
+        const j = i*3;
+        const r = colFrom[j]   + (cols[j]   - colFrom[j])   * e;
+        const g = colFrom[j+1] + (cols[j+1] - colFrom[j+1]) * e;
+        const b = colFrom[j+2] + (cols[j+2] - colFrom[j+2]) * e;
+        colCur[j] = r; colCur[j+1] = g; colCur[j+2] = b;
+        _col.setRGB(
+          r + (cGrey.r - r)*greyMix + (cRed.r - (r + (cGrey.r - r)*greyMix))*redMix,
+          g + (cGrey.g - g)*greyMix + (cRed.g - (g + (cGrey.g - g)*greyMix))*redMix,
+          b + (cGrey.b - b)*greyMix + (cRed.b - (b + (cGrey.b - b)*greyMix))*redMix
+        );
+        mesh.setColorAt(i, _col);
       }
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
+    /* group: spin, mouse parallax, offset, scroll drift.
+       Set before projecting the pointer so the bulge maps into the group's
+       current transform rather than last frame's. */
+    rotXT = mouseY * 0.18;
+    rotYT = mouseX * 0.28;
+    const gk = reduced ? 1 : 1 - Math.exp(-2 * dt);            // eased at 2/s
+    rotX += (rotXT - rotX) * gk;
+    rotY += (rotYT - rotY) * gk;
+    offX += (offXTarget - offX) * (reduced ? 1 : 1 - Math.exp(-2.5 * dt));
+    group.rotation.set(rotX, baseSpin + rotY, 0);
+    group.position.set(clampOffsetX(offX), groupY, 0);
+    group.scale.setScalar(fitScale);
+
+    pointerIntoScene();
+
     for (let i = 0; i < COUNT; i++) {
-      if (reduced) {
-        cur[i].copy(tgt[i]);
-      } else {
-        cur[i].lerp(tgt[i], 1 - Math.exp(-speed[i] * dt));
-        rot[i].x += spin[i].x * dt * (active === 'scatter' ? 1.4 : 0.4);
-        rot[i].y += spin[i].y * dt * (active === 'scatter' ? 1.4 : 0.4);
-        rot[i].z += spin[i].z * dt * (active === 'scatter' ? 1.4 : 0.4);
+      const j = i*3;
+      let tx = target[j], ty = target[j+1], tz = target[j+2];
+
+      if (waving && i < FORM_N) {                              // radial wave
+        const pr = Math.hypot(tx, tz) || 1e-4;
+        const w = Math.max(0, Math.sin(Math.atan2(tz, tx) * 2 - pulseP * Math.PI * 2));
+        const out = 0.5 * env * w;
+        tx += (tx/pr) * out; tz += (tz/pr) * out;
       }
-      dummy.position.copy(cur[i]);
-      dummy.rotation.copy(rot[i]);
-      dummy.updateMatrix();
+      if (loose > 0 && i < FORM_N) {
+        tx += drift[j]   * 0.9 * loose;
+        ty += drift[j+1] * 0.9 * loose;
+        tz += drift[j+2] * 0.9 * loose;
+      }
+
+      if (reduced) {
+        cur[j] = tx; cur[j+1] = ty; cur[j+2] = tz;
+      } else {
+        const k = 1 - Math.exp(-moveRate[i] * dt);
+        cur[j]   += (tx - cur[j])   * k;
+        cur[j+1] += (ty - cur[j+1]) * k;
+        cur[j+2] += (tz - cur[j+2]) * k;
+      }
+
+      /* bulge: additive, applied after the form lerp so it never fights it */
+      let wantBx = 0, wantBy = 0, wantBz = 0, wantS = 0;
+      if (bulgeOn) {
+        const dx = cur[j] - bulgeX, dy = cur[j+1] - bulgeY, dz = cur[j+2] - bulgeZ;
+        const d = Math.hypot(dx, dy, dz);
+        if (d < BULGE_R) {
+          const f = 1 - d / BULGE_R;
+          const s = f * f;
+          const inv = d > 1e-4 ? 1/d : 0;
+          wantBx = dx * inv * s * BULGE_PUSH;
+          wantBy = dy * inv * s * BULGE_PUSH;
+          wantBz = dz * inv * s * BULGE_PUSH;
+          wantS = s * BULGE_SCALE;                             // up to 1.6x
+        }
+      }
+      if (reduced) {
+        bulge[j] = bulge[j+1] = bulge[j+2] = 0; sBulge[i] = 0;
+      } else {
+        const bk = 1 - Math.exp(-BULGE_RATE * dt);             // settles over ~0.6s
+        bulge[j]   += (wantBx - bulge[j])   * bk;
+        bulge[j+1] += (wantBy - bulge[j+1]) * bk;
+        bulge[j+2] += (wantBz - bulge[j+2]) * bk;
+        sBulge[i]  += (wantS  - sBulge[i])  * bk;
+        spinAng[i] += spinVel[i] * dt;
+      }
+
+      dummy.position.set(cur[j] + bulge[j], cur[j+1] + bulge[j+1], cur[j+2] + bulge[j+2]);
+      _axis.set(axis[j], axis[j+1], axis[j+2]);
+      _q.setFromAxisAngle(_axis, spinAng[i]);
+      const sc = sBase[i] * (1 + sBulge[i]);
+      dummy.scale.set(sc, sc, sc);
+      dummy.matrix.compose(dummy.position, _q, dummy.scale);
       mesh.setMatrixAt(i, dummy.matrix);
     }
     mesh.instanceMatrix.needsUpdate = true;
-    renderer.render(scene, camera);
+
+    renderer.render(scene3, camera);
   }
 
-  /* resize */
+  /* ── composition ────────────────────────────────────────────────── */
+  let visW = 8, visH = 5;
+  function clampOffsetX(x){
+    // never let the form centre fall into the left 55% of the viewport
+    const min = visW * 0.06, max = visW * 0.32;
+    return Math.min(max, Math.max(min, x));
+  }
   function resize(){
     const w = window.innerWidth, h = window.innerHeight;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setSize(w, h, false);
+    visH = 2 * camera.position.z * Math.tan((camera.fov * Math.PI / 180) / 2);
+    visW = visH * camera.aspect;
+    const formH = Math.max(0.001, brainMaxY - brainMinY);
+    fitScale = (0.62 * visH / formH) * Math.min(1, Math.min(w, h) / 900);
     if (reduced) draw(0);
   }
   window.addEventListener('resize', resize);
 
-  /* loop, paused while the tab is hidden */
+  /* ── loop, paused while the tab is hidden ───────────────────────── */
   let raf = 0, last = performance.now();
   function frame(){
     const now = performance.now();

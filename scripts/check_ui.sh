@@ -62,6 +62,36 @@ has "listens for the scenestate event"  "scenestate"
 has "honours the memory-missing class"  "memory-missing"
 
 echo
+echo "particles and forms"
+has "COUNT is 5000"                   "COUNT = 5000"
+has "wireframe material"              "wireframe: true"
+has "additive blending"               "THREE.AdditiveBlending"
+has "depthWrite disabled"             "depthWrite: false"
+has "TetrahedronGeometry(1, 0)"       "TetrahedronGeometry(1, 0)"
+has "inline noise function"           "function noise3("
+has "inline smoothstep"               "function smoothstep("
+has "brain form generator"            "function brainSurface("
+has "ambient field excluded from forms" "AMBIENT = 300"
+for f in brain ring scatter; do
+  if grep -qE "[\"']${f}[\"']|\b${f}:" "$PAGE"; then
+    ok "form present: $f"
+  else
+    bad "form present: $f" "no form named '${f}'"
+  fi
+done
+has "state to form mapping"           "STATE_FORM"
+has "teal accent"                     "0x5DCAA5"
+
+echo
+echo "interaction"
+has "mousemove listener on window"    "window.addEventListener('mousemove'"
+has "click fires a pulse"             "hero.addEventListener('click'"
+has "scroll parallax listener"        "window.addEventListener('scroll'"
+has "pointer projected into the scene" "function pointerIntoScene("
+has "bulge offset applied"            "bulge[j]"
+has "bulge radius 0.9"                "BULGE_R = 0.9"
+
+echo
 echo "motion and hygiene"
 has "pauses when the tab is hidden"     "document.hidden"
 has "respects prefers-reduced-motion"   "prefers-reduced-motion"

@@ -795,7 +795,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 <script type="module">
 import * as THREE from 'three';
 
-(function scene(){
+(async function scene(){
   const canvas = document.getElementById('scene');
   if (!canvas) return;
 
@@ -807,11 +807,13 @@ import * as THREE from 'three';
   const FORM_N = COUNT - AMBIENT;
   const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600;
   const EASE_RATE = 9;                 // positions follow the scroll target at 9/s
-  const SCROLL_TURN = 0.0009;          // rad of Y rotation per px scrolled
+  const FULL_TURN = 2 * Math.PI;       // one revolution while travelling through scatter
   const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s
   const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
   const BRAIN_OPACITY = 0.7, OTHER_OPACITY = 0.85;
   const LOGO_DIAMETER = 2.6, LOGO_STROKE = 1.4, LOGO_DEPTH = 0.7;   // grid units except diameter
+  const COIN_R = 1.35, COIN_STROKE = 0.16, COIN_DEPTH = 0.35;     // ring
+  const COIN_GLYPH_H = 1.7, COIN_GLYPH_Z = 0.12, COIN_DISC_R = 1.2, COIN_DISC_Z = -0.2;
   const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890, LOGO_WHITE = 0xF2F0EA,
         DIM_WHITE = 0x6f6e68, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
 
@@ -874,12 +876,12 @@ import * as THREE from 'three';
 
   /* ── flat per-instance stores, allocated once ───────────────────── */
   const F = Float32Array;
-  const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posScatter = new F(COUNT*3);
-  const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colScatter = new F(COUNT*3);
+  const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posCoin = new F(COUNT*3), posScatter = new F(COUNT*3);
+  const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colCoin = new F(COUNT*3), colScatter = new F(COUNT*3);
   const cur = new F(COUNT*3), bulge = new F(COUNT*3), drift = new F(COUNT*3);
   const axis = new F(COUNT*3);
   const spinAng = new F(COUNT), spinVel = new F(COUNT);
-  const sBrain = new F(COUNT), sLogo = new F(COUNT), sScatter = new F(COUNT);  // size per form
+  const sBrain = new F(COUNT), sLogo = new F(COUNT), sCoin = new F(COUNT), sScatter = new F(COUNT);  // size per form
   const sBase = new F(COUNT), sBulge = new F(COUNT);
 
   const cGold = new THREE.Color(GOLD), cViolet = new THREE.Color(VIOLET),
@@ -892,9 +894,9 @@ import * as THREE from 'three';
     arr[i*3] = (Math.random()-0.5)*12; arr[i*3+1] = (Math.random()-0.5)*7; arr[i*3+2] = (Math.random()-0.5)*6;
   }
 
-  /* sizes. Brain and logo particles are the fine class only (0.014-0.024);
-     scatter keeps the three classes; the 2% large shards belong to the
-     ambient field and the scatter form only. */
+  /* sizes. Brain, logo and coin particles are the fine class only
+     (0.014-0.024); scatter keeps the three classes; the 2% large shards belong
+     to the ambient field and the scatter form only. */
   for (let i = 0; i < COUNT; i++) {
     const r = Math.random();
     let s;
@@ -905,6 +907,7 @@ import * as THREE from 'three';
     sScatter[i] = s;
     sBrain[i] = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
     sLogo[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sCoin[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
     sBase[i] = sBrain[i];
     const ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
     const al = Math.hypot(ax, ay, az) || 1;
@@ -1016,13 +1019,14 @@ import * as THREE from 'three';
     return Math.min(polylineDist(x, y, SYLVIAN, false), polylineDist(x, y, CEREB_LINE, false));
   }
 
-  const RX = 0.12, RY = 0.35;                                  // front-left three-quarter, from above
-  const cosX = Math.cos(RX), sinX = Math.sin(RX), cosY = Math.cos(RY), sinY = Math.sin(RY);
+  // The brain pose (front-left three-quarter, from above) is applied by the
+  // group at brain keyframes, not baked into the positions, so the rotation can
+  // interpolate to the coin's and logo's camera-facing pose between keyframes.
+  const RX = 0.12, RY = 0.35;
   let brainMinY = Infinity, brainMaxY = -Infinity;
   function rotateInto(x, y, z, arr, i){
-    const y1 = y*cosX - z*sinX, z1 = y*sinX + z*cosX;          // X
-    arr[i*3] = x*cosY + z1*sinY; arr[i*3+1] = y1; arr[i*3+2] = -x*sinY + z1*cosY;  // Y
-    if (y1 < brainMinY) brainMinY = y1; if (y1 > brainMaxY) brainMaxY = y1;
+    arr[i*3] = x; arr[i*3+1] = y; arr[i*3+2] = z;
+    if (y < brainMinY) brainMinY = y; if (y > brainMaxY) brainMaxY = y;
   }
 
   /* particle budget over the 4700 form instances */
@@ -1308,6 +1312,83 @@ import * as THREE from 'three';
   }
   buildLogo();
 
+  /* ── form: coin, a gold ring around a rasterised dollar glyph ─────── */
+  const coinStats = { ring:0, glyph:0, disc:0, glyphPixels:0, font:'' };
+  function rasteriseGlyph(){
+    // "$" in the page's display font, sampled from an offscreen 2D canvas.
+    const size = 512, cw = 768, ch = 768;
+    const cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    const loaded = !!(document.fonts && document.fonts.check && document.fonts.check('300 ' + size + 'px Outfit'));
+    coinStats.font = loaded ? 'Outfit 300' : 'sans-serif fallback';
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.fillStyle = '#fff';
+    ctx.font = '300 ' + size + 'px Outfit, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('$', cw / 2, ch / 2);
+    const data = ctx.getImageData(0, 0, cw, ch).data;
+    const xs = [], ys = [];
+    let minX = cw, maxX = 0, minY = ch, maxY = 0;
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      if (data[(y * cw + x) * 4 + 3] > 128) {                    // alpha > 128: ink
+        xs.push(x); ys.push(y);
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+    if (xs.length === 0) return null;
+    return { xs, ys, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, h: Math.max(1, maxY - minY) };
+  }
+  function buildCoin(){
+    const nRing = Math.round(FORM_N * 0.34), nGlyph = Math.round(FORM_N * 0.46);
+    const nDisc = FORM_N - nRing - nGlyph;                       // 20%, absorbs rounding
+    let i = 0;
+    function place(x, y, z, c){
+      posCoin[i*3] = x; posCoin[i*3+1] = y; posCoin[i*3+2] = z;
+      put(colCoin, i, c);
+      i++;
+    }
+    // ring: evenly spaced around the circle, jittered across the stroke and depth
+    for (let k = 0; k < nRing; k++) {
+      const a = (k / nRing) * Math.PI * 2;
+      const r = COIN_R + (Math.random() - 0.5) * COIN_STROKE;
+      place(r * Math.cos(a), r * Math.sin(a), (Math.random() - 0.5) * COIN_DEPTH, cGold);
+    }
+    coinStats.ring = nRing;
+    // glyph: random picks from the ink pixels, mapped to 1.7 units tall, centred
+    const g = rasteriseGlyph();
+    if (g) {
+      coinStats.glyphPixels = g.xs.length;
+      const sc = COIN_GLYPH_H / g.h;
+      for (let k = 0; k < nGlyph; k++) {
+        const p = (Math.random() * g.xs.length) | 0;
+        place((g.xs[p] - g.cx) * sc, -(g.ys[p] - g.cy) * sc, (Math.random() - 0.5) * 2 * COIN_GLYPH_Z,
+              Math.random() < 0.08 ? cViolet : cLogoWhite);
+      }
+      coinStats.glyph = nGlyph;
+    } else {
+      // no canvas or no ink: the glyph's budget joins the disc so the count holds
+      for (let k = 0; k < nGlyph; k++) {
+        const r = COIN_DISC_R * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
+        place(r * Math.cos(a), r * Math.sin(a), COIN_DISC_Z, cDim);
+      }
+    }
+    // faint disc fill behind the glyph
+    for (let k = 0; k < nDisc; k++) {
+      const r = COIN_DISC_R * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
+      place(r * Math.cos(a), r * Math.sin(a), COIN_DISC_Z, cDim);
+    }
+    coinStats.disc = nDisc;
+    return i;
+  }
+  // the glyph is drawn in the page's display font, so wait for it (bounded)
+  if (document.fonts && document.fonts.ready) {
+    await Promise.race([document.fonts.ready, new Promise(function(r){ setTimeout(r, 2000); })]);
+  }
+  buildCoin();
+
   /* ── form: scatter ──────────────────────────────────────────────── */
   for (let i = 0; i < FORM_N; i++) {
     posScatter[i*3]   = (Math.random()-0.5)*9;
@@ -1319,28 +1400,31 @@ import * as THREE from 'three';
   /* ── ambient field: same place in every form ────────────────────── */
   for (let i = FORM_N; i < COUNT; i++) {
     ambientXYZ(posBrain, i);
-    posLogo[i*3] = posScatter[i*3] = posBrain[i*3];
-    posLogo[i*3+1] = posScatter[i*3+1] = posBrain[i*3+1];
-    posLogo[i*3+2] = posScatter[i*3+2] = posBrain[i*3+2];
+    posLogo[i*3] = posCoin[i*3] = posScatter[i*3] = posBrain[i*3];
+    posLogo[i*3+1] = posCoin[i*3+1] = posScatter[i*3+1] = posBrain[i*3+1];
+    posLogo[i*3+2] = posCoin[i*3+2] = posScatter[i*3+2] = posBrain[i*3+2];
     const c = isTeal[i] ? cTeal : cWhite;
-    put(colBrain, i, c); put(colLogo, i, c); put(colScatter, i, c);
+    put(colBrain, i, c); put(colLogo, i, c); put(colCoin, i, c); put(colScatter, i, c);
   }
 
-  const FORMS = { brain: posBrain, logo: posLogo, scatter: posScatter };
-  const FORM_COLS = { brain: colBrain, logo: colLogo, scatter: colScatter };
+  const FORMS = { brain: posBrain, logo: posLogo, coin: posCoin, scatter: posScatter };
+  const FORM_COLS = { brain: colBrain, logo: colLogo, coin: colCoin, scatter: colScatter };
+  // base group rotation per form: the brain's pose; coin and logo face the camera
+  const BASE_ROT = { brain: [RX, RY], logo: [0, 0], coin: [0, 0], scatter: [0, 0] };
+  const SWAY_AMP = { brain: 0.30, logo: 0.25, coin: 0.20, scatter: 0.30 };
 
-  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats,
+  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats, coin: coinStats,
                        formA: 'brain', formB: 'brain', t: 0, form: 'brain', scattered: false };
   if (window.TURNSTYL) window.TURNSTYL.sceneStats = sceneStats;
 
-  const SIZES = { brain: sBrain, logo: sLogo, scatter: sScatter };
-  const OPACITY = { brain: BRAIN_OPACITY, logo: OTHER_OPACITY, scatter: OTHER_OPACITY };
+  const SIZES = { brain: sBrain, logo: sLogo, coin: sCoin, scatter: sScatter };
+  const OPACITY = { brain: BRAIN_OPACITY, logo: OTHER_OPACITY, coin: OTHER_OPACITY, scatter: OTHER_OPACITY };
   cur.set(posBrain);
 
   /* ── keyframes: one per section, in document order ──────────────── */
-  // hero = brain, story 1 (pulse) = logo, story 2 (reform) = brain,
+  // hero = brain, story 1 (pulse) = coin, story 2 (reform) = brain,
   // story 3 (scatter) = scatter, story 4 (reform) = logo, console = logo
-  const KEY_FORMS = ['brain', 'logo', 'brain', 'scatter', 'logo', 'logo'];
+  const KEY_FORMS = ['brain', 'coin', 'brain', 'scatter', 'logo', 'logo'];
   const SECTIONS = Array.from(document.querySelectorAll('section[data-state]'));
   const keyY = new F(Math.max(1, SECTIONS.length));
   const keyForm = SECTIONS.map(function(_, i){ return KEY_FORMS[i] || 'logo'; });
@@ -1513,7 +1597,8 @@ import * as THREE from 'three';
     const w = blendW, iw = 1 - w;
     const shownForm = missing ? 'scatter' : (kT < 0.5 ? keyForm[kA] : keyForm[kB]);
 
-    /* group: scroll turn, bounded sway, parallax, offset, scroll drift */
+    /* group: per-keyframe base rotation, one full Y turn while travelling
+       through scatter, bounded sway, mouse parallax, offset, scroll drift */
     if (!reduced) swayT += dt;
     const gk = reduced ? 1 : 1 - Math.exp(-2 * dt);            // eased at 2/s
     rotX += (mouseY * 0.18 - rotX) * gk;
@@ -1521,8 +1606,14 @@ import * as THREE from 'three';
     const fracA = kA === 0 ? 0.76 : 0.78, fracB = kB === 0 ? 0.76 : 0.78;
     const offXT = (fracA + (fracB - fracA) * kT - 0.5) * visW;  // form centre at 76% / 78%
     offX += (offXT - offX) * (reduced ? 1 : 1 - Math.exp(-2.5 * dt));
-    const sway = reduced ? 0 : (shownForm === 'logo' ? 0.25 : 0.30) * Math.sin(swayT * SWAY_W);
-    group.rotation.set(rotX, window.scrollY * SCROLL_TURN + sway + rotY, 0);
+    const fa = keyForm[kA], fb = keyForm[kB];
+    const ra = BASE_ROT[fa] || BASE_ROT.scatter, rb = BASE_ROT[fb] || BASE_ROT.scatter;
+    const st = smoothstep(0, 1, kT);
+    const turn = (fa !== fb && !reduced) ? FULL_TURN : 0;      // spin only where a scatter passage exists
+    const baseX = ra[0] + (rb[0] - ra[0]) * st;
+    const baseY = ra[1] + (rb[1] + turn - ra[1]) * st;         // arrives at B's base exactly
+    const sway = reduced ? 0 : (SWAY_AMP[shownForm] || 0.30) * Math.sin(swayT * SWAY_W);
+    group.rotation.set(baseX + rotX, baseY + sway + rotY, 0);
     group.position.set(offX, groupY, 0);
     group.scale.setScalar(fitScale);
     group.updateMatrixWorld();

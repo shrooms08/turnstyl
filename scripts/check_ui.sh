@@ -89,13 +89,15 @@ has "parked scale 0.004"              "PARKED_SCALE = 0.004"
 has "parked count exposed"            "stats.parked++"
 has "brain pose 0.12 / +0.35"         "RX = 0.12, RY = 0.35"
 has "sceneStats.form exposed"         "sceneStats.form"
-has "keyframe form array"             "KEY_FORMS = ["
+has "keyframes: coin at 1, logo at 4 and 5" "KEY_FORMS = ['brain', 'coin', 'brain', 'scatter', 'logo', 'logo']"
 has "keyframes measured per section"  "function measureKeys("
 has "scroll anchor located"           "function locate("
 has "three-point blend through scatter" "function blendTarget("
 has "smoothstep on t"                 "smoothstep(0, 1, kT"
 has "rate 9 ease"                     "EASE_RATE = 9"
-has "rotation bound to scroll"        "SCROLL_TURN = 0.0009"
+has "per-keyframe base rotation"      "BASE_ROT = {"
+has "one full turn through scatter"   "FULL_TURN = 2 * Math.PI"
+has "arrives at B's base rotation"    "rb[1] + turn - ra[1]"
 has "sceneStats.t exposed"            "sceneStats.t = kT"
 has "sceneStats.formA / formB"        "sceneStats.formA"
 has "sceneStats.scattered"            "sceneStats.scattered"
@@ -104,8 +106,15 @@ has "logo form generator"             "function buildLogo("
 has "logo diameter 2.6"               "LOGO_DIAMETER = 2.6"
 has "logo stroke 1.4 / depth 0.7"     "LOGO_STROKE = 1.4, LOGO_DEPTH = 0.7"
 has "logo fine size class only"       "sLogo[i]  = (i >= FORM_N) ? s : 0.014"
+has "coin form generator"             "function buildCoin("
+has "canvas glyph sampling"           "getImageData("
+has "waits for document.fonts.ready"  "document.fonts.ready"
+has "coin ring 1.35 / stroke 0.16 / depth 0.35" "COIN_R = 1.35, COIN_STROKE = 0.16, COIN_DEPTH = 0.35"
+has "coin glyph 1.7 tall"             "COIN_GLYPH_H = 1.7"
+has "coin fine size class only"       "sCoin[i]  = (i >= FORM_N) ? s : 0.014"
+has "coin in sceneStats"              "coin: coinStats"
 has "ambient field excluded from forms" "AMBIENT = 300"
-for f in brain logo scatter; do
+for f in brain logo coin scatter; do
   if grep -qE "[\"']${f}[\"']|\b${f}:" "$PAGE"; then
     ok "form present: $f"
   else
@@ -116,10 +125,10 @@ has "teal accent"                     "0x5DCAA5"
 if grep -qF "RIM_DOT" "$PAGE"; then bad "per-frame rim recolour removed" "RIM_DOT still present"; else ok "per-frame rim recolour removed"; fi
 MODULE="$TMPDIR_RUN/module.js"
 sed -n '/<script type="module">/,/<\/script>/p' "$PAGE" > "$MODULE"
-if grep -qE "IntersectionObserver|SCATTER_TRANSIT_MS|HERO_SCROLL_TRIGGER|consoleActive" "$MODULE"; then
-  bad "no observer-driven form switch in the scene" "old form-switch machinery still in the module"
+if grep -qE "IntersectionObserver|SCATTER_TRANSIT_MS|HERO_SCROLL_TRIGGER|consoleActive|SCROLL_TURN|scrollY \* 0" "$MODULE"; then
+  bad "no observer-driven or scrollY-based rotation in the scene" "old machinery still in the module"
 else
-  ok "no observer-driven form switch in the scene"
+  ok "no observer-driven or scrollY-based rotation in the scene"
 fi
 
 echo

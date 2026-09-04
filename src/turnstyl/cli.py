@@ -6,6 +6,7 @@
     turnstyl ledger <buyer>
     turnstyl status
     turnstyl reset --db <path>
+    turnstyl serve --port 8787 --db <path>
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from rich.text import Text
 
 from . import schema as S
 from .engine import Engine, Outcome
+from .memory import DB_PATH_ENV_VAR as DB_PATH_ENV_VAR_MEMORY
 from .memory import PROJECT_ROOT
 from .payments import explorer_address, explorer_tx
 
@@ -381,6 +383,39 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
             )
         console.print(table)
     console.print(Text(f"memory read: {', '.join(data['memory_read'])}", style="dim"))
+
+
+@app.command("serve")
+def serve(
+    port: int = typer.Option(8787, "--port", help="Port to listen on."),
+    db: str = typer.Option(
+        None, "--db", help="Database to read. Defaults to $TURNSTYL_DB."
+    ),
+) -> None:
+    """Serve the read-only web view of this agent's memory.
+
+    Binds 127.0.0.1 only. The API never writes to the store.
+    """
+    import uvicorn
+
+    if db:
+        # api.py resolves the path per request, so setting it here is enough.
+        os.environ[DB_PATH_ENV_VAR_MEMORY] = db
+
+    from .api import db_path
+
+    target = db_path()
+    console.print(
+        Text(f"turnstyl serving http://127.0.0.1:{port}", style="bold")
+    )
+    console.print(
+        Text(
+            f"reading {target}"
+            f"{'' if target.is_file() else ' (does not exist yet)'}",
+            style="dim",
+        )
+    )
+    uvicorn.run("turnstyl.api:app", host="127.0.0.1", port=port, log_level="warning")
 
 
 @app.command("reset")

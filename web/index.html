@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>turnstyl</title>
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         margin: 1.5rem; line-height: 1.4; }
+  pre  { white-space: pre-wrap; word-break: break-word; }
+  h2   { margin: 1.5rem 0 .4rem; font-size: 1rem; }
+  a    { color: inherit; }
+</style>
+
+<h1>turnstyl</h1>
+<p id="mode"></p>
+<p><a href="/">all jobs</a> &middot; <a href="/api/docs">api docs</a></p>
+
+<div id="panes"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const job = params.get("job");
+
+function pane(title, id) {
+  const h = document.createElement("h2");
+  h.textContent = title;
+  const pre = document.createElement("pre");
+  pre.id = id;
+  pre.textContent = "loading...";
+  document.getElementById("panes").append(h, pre);
+}
+
+async function load(url, id) {
+  const pre = document.getElementById(id);
+  if (!pre) return;
+  try {
+    const res = await fetch(url);
+    const body = await res.json();
+    pre.textContent = JSON.stringify(body, null, 2);
+    return body;
+  } catch (err) {
+    pre.textContent = "request failed: " + err;
+    return null;
+  }
+}
+
+function jobLinks(jobs) {
+  const pre = document.getElementById("jobs");
+  if (!pre || !jobs || !jobs.length) return;
+  const nav = document.createElement("p");
+  nav.id = "joblinks";
+  for (const j of jobs) {
+    const a = document.createElement("a");
+    a.href = "/?job=" + encodeURIComponent(j.job_id);
+    a.textContent = j.job_id + " (" + j.status + ")";
+    nav.append(a, document.createTextNode(" · "));
+  }
+  const existing = document.getElementById("joblinks");
+  if (existing) existing.replaceWith(nav); else pre.before(nav);
+}
+
+document.getElementById("mode").textContent =
+  job ? "job " + job : "polling /api/status and /api/jobs every 3s";
+
+pane("/api/status", "status");
+if (job) {
+  pane("/api/jobs/" + job, "job");
+  pane("/api/buyers/<buyer>", "buyer");
+  pane("/api/journal?job=" + job, "journal");
+} else {
+  pane("/api/jobs", "jobs");
+}
+
+async function tick() {
+  await load("/api/status", "status");
+  if (job) {
+    const detail = await load("/api/jobs/" + encodeURIComponent(job), "job");
+    if (detail && detail.buyer) {
+      await load("/api/buyers/" + encodeURIComponent(detail.buyer), "buyer");
+    }
+    await load("/api/journal?job=" + encodeURIComponent(job) + "&limit=50", "journal");
+  } else {
+    const body = await load("/api/jobs", "jobs");
+    if (body) jobLinks(body.jobs);
+  }
+}
+
+tick();
+setInterval(tick, 3000);
+</script>

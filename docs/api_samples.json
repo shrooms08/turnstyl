@@ -1,0 +1,243 @@
+{
+  "_note": "Real output from a live turnstyl API against ./data/ui.db: one completed four-step audit (archived) and one active job, both created with MOCK_LLM=1 PAYMENTS=fake. Captured verbatim.",
+  "GET /api/status": {
+    "db_path": "data/ui.db",
+    "db_exists": true,
+    "db_size_bytes": 495616,
+    "tenant": "turnstyl",
+    "agent_address": "0x4463aC72Fa96E419c46185cbaA5313fB75C2FdA3",
+    "receipts_address": "0xD2Bb3c9741D7c26A8B161895bb91471706B17477",
+    "chain_id": 84532,
+    "explorer": "https://sepolia.basescan.org",
+    "payments_backend": "fake",
+    "memory_missing": false
+  },
+  "GET /api/jobs/9e333f58d973": {
+    "memory_missing": false,
+    "job_id": "9e333f58d973",
+    "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+    "contract_hash": "7c779e61ee00b90008a47686d43790be06677f501dd92b8ae51e0df56625cb33",
+    "status": "complete",
+    "current_step": 4,
+    "created_at": "2026-09-04T13:14:54.595Z",
+    "updated_at": "2026-09-04T13:14:55.850Z",
+    "archived": true,
+    "archived_at": "2026-09-04T13:14:55.844Z",
+    "open_invoice": null,
+    "steps": [
+      {
+        "step": 1,
+        "name": "scope",
+        "price_usdc": 0.0,
+        "paid": true,
+        "cached": false,
+        "tokens_in": 432,
+        "tokens_out": 82,
+        "seconds": 0.0,
+        "output_sha256": "b975491491f0022b30d7050bf7d6ed4e122a4ca209f97139c19ae04ac1323373",
+        "commit_tx": null,
+        "pay_tx": null,
+        "output": "SCOPE (contract 7c779e61)\nEntry points: deposit() payable, withdraw(uint256), getBalance(address) view.\nValue-moving functions: deposit(), withdraw().\nTrust assumptions: no owner, no pause, no upgrade path; any address may deposit and withdraw its own balance.\nOut of scope: compiler version, gas optimisation, deployment scripts."
+      },
+      {
+        "step": 2,
+        "name": "findings",
+        "price_usdc": 0.5,
+        "paid": true,
+        "cached": false,
+        "tokens_in": 522,
+        "tokens_out": 141,
+        "seconds": 0.0,
+        "output_sha256": "a4e17dd7ad87fc28ccd26542b63b6259814a85afd3b75e1382a22d50a6234da3",
+        "commit_tx": null,
+        "pay_tx": "0xfake9e333f58d9732",
+        "output": "FINDINGS (contract 7c779e61)\n1. Reentrancy in withdraw() - HIGH. withdraw() sends ETH with a raw call to msg.sender BEFORE it reduces balances[msg.sender]. A contract caller re-enters withdraw() from its receive() hook while its recorded balance is still the pre-withdrawal amount and drains the vault. Violates checks-effects-interactions.\n2. Unchecked low-level call return value in withdraw() - MEDIUM. A failed transfer does not revert, so the balance change is lost.\n3. No event emitted on deposit/withdraw - LOW. Off-chain accounting cannot follow vault state."
+      },
+      {
+        "step": 3,
+        "name": "patch",
+        "price_usdc": 0.75,
+        "paid": true,
+        "cached": false,
+        "tokens_in": 863,
+        "tokens_out": 472,
+        "seconds": 0.174,
+        "output_sha256": "9545b16f324e2a5507319a250bea56913f5cfc763a5d89272dcce4908a2896e3",
+        "commit_tx": null,
+        "pay_tx": "0xfake9e333f58d9733",
+        "output": "--- a/Vault.sol\n+++ b/Vault.sol\n@@ -2,34 +2,43 @@\n pragma solidity ^0.8.20;\n \n /// @title Vault\n-/// @notice A minimal ETH vault. Anyone may deposit and withdraw their own\n-///         balance. Deliberately vulnerable: used as the sample contract for\n-///         the turnstyl metered audit agent.\n+/// @notice A minimal ETH vault, patched by the turnstyl audit agent.\n contract Vault {\n     mapping(address => uint256) private balances;\n \n     uint256 public totalDeposits;\n+\n+    bool private locked;\n+\n+    event Deposited(address indexed account, uint256 amount);\n+    event Withdrawn(address indexed account, uint256 amount);\n+\n+    modifier nonReentrant() {\n+        require(!locked, \"reentrant call\");\n+        locked = true;\n+        _;\n+        locked = false;\n+    }\n \n     /// @notice Deposit ETH into the caller's vault balance.\n     function deposit() external payable {\n         require(msg.value > 0, \"zero deposit\");\n         balances[msg.sender] += msg.value;\n         totalDeposits += msg.value;\n+        emit Deposited(msg.sender, msg.value);\n     }\n \n     /// @notice Withdraw ETH from the caller's vault balance.\n-    /// @dev BUG (reentrancy): the external call to msg.sender happens BEFORE\n-    ///      balances[msg.sender] is reduced, so a contract caller can re-enter\n-    ///      withdraw() from its receive() hook while its recorded balance is\n-    ///      still the full pre-withdrawal amount and drain the vault. The\n-    ///      return value of the low-level call is also ignored.\n-    function withdraw(uint256 amount) external {\n+    /// @dev Effects precede the interaction, and the call result is checked.\n+    function withdraw(uint256 amount) external nonReentrant {\n         require(balances[msg.sender] >= amount, \"insufficient balance\");\n-\n-        (bool ok, ) = msg.sender.call{value: amount}(\"\");\n \n         balances[msg.sender] -= amount;\n         totalDeposits -= amount;\n+\n+        (bool ok, ) = msg.sender.call{value: amount}(\"\");\n+        require(ok, \"transfer failed\");\n+        emit Withdrawn(msg.sender, amount);\n     }\n \n     /// @notice Read the vault balance of an account.\n\nCLOSES\n1 HIGH: withdraw: balances and totalDeposits are decremented before the external call, and a nonReentrant modifier blocks re-entry.\n2 MEDIUM: withdraw: the low-level call result is checked with require(ok, \"transfer failed\").\n3 LOW: deposit/withdraw: Deposited and Withdrawn events are emitted so off-chain accounting can follow vault state.\n",
+        "compiles": true
+      },
+      {
+        "step": 4,
+        "name": "verify",
+        "price_usdc": 0.25,
+        "paid": true,
+        "cached": false,
+        "tokens_in": 1488,
+        "tokens_out": 113,
+        "seconds": 0.0,
+        "output_sha256": "9a1d5df65a4ac2f21153fddb0014b13411206c6c190413f70d07c635a194bdba",
+        "commit_tx": null,
+        "pay_tx": "0xfake9e333f58d9734",
+        "output": "VERIFY (contract 7c779e61)\nFinding 1 (reentrancy): CLOSED. The balance decrement now happens before the external call, so a re-entrant withdraw() sees the reduced balance and fails the require.\nFinding 2 (unchecked call): CLOSED. require(ok) reverts the whole withdrawal on a failed transfer.\nFinding 3 (no events): CLOSED for withdraw via Withdrawn; deposit still emits nothing.\nNo regression found. Patch checked against the recorded findings output."
+      }
+    ],
+    "source": "archived_entities (read-only)"
+  },
+  "GET /api/buyers/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8": {
+    "memory_missing": false,
+    "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+    "known": true,
+    "ledger": {
+      "paid_steps": 3,
+      "paid_usdc": 1.5,
+      "open_invoices": 0,
+      "unpaid_from_prior_jobs": 0,
+      "defaults": 0,
+      "consecutive_paid_since_default": 3,
+      "trust_tier": "trusted",
+      "jobs": [
+        "9e333f58d973",
+        "2e9c42df40db"
+      ],
+      "outstanding": []
+    },
+    "trust": {
+      "trust_tier": "trusted",
+      "would_decide": "RUN_ON_CREDIT",
+      "explanation": "step 2 is unpaid but buyer is trusted: paid_steps=3 >= 2, open_invoices=0, unpaid_from_prior_jobs=0",
+      "steps_until_credit": 1,
+      "earned_back": true
+    },
+    "outstanding": [],
+    "jobs": [
+      "9e333f58d973",
+      "2e9c42df40db"
+    ],
+    "source": "entity buyer/<address>; trust.explanation is the reason string policy.decide produces for the next paid step"
+  },
+  "GET /api/journal?job=9e333f58d973&limit=50": {
+    "memory_missing": false,
+    "job": "9e333f58d973",
+    "limit": 50,
+    "count": 4,
+    "events": [
+      {
+        "ts": "2026-09-04T13:14:55.855Z",
+        "decision": "RUN_PAID",
+        "step": 4,
+        "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+        "evaluated": [
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=2, paid_usdc=1.25, open_invoices=0, unpaid_from_prior_jobs=0, trust_tier=trusted",
+          "job:9e333f58d973 -> current_step=4, status=awaiting_payment",
+          "entity findings/7c779e61ee00... -> step 4 (verify) is not cached"
+        ],
+        "acted": [
+          "RUN_PAID step 4 (verify) via the model; output_sha256=9a1d5df65a4a..., tokens=1601, seconds=0.0",
+          "entity step_cost/4 -> runs=1, avg_tokens=1601, avg_seconds=0.00",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=3, paid_usdc=1.50, consecutive_paid_since_default=3 (settled turnstyl:9e333f58d973:step4)",
+          "entity findings/7c779e61ee00... -> filled ['findings', 'patch', 'scope', 'verify']",
+          "archived entity job/9e333f58d973",
+          "active_jobs -> removed 9e333f58d973",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> trust_tier=trusted"
+        ],
+        "forward": [
+          "job 9e333f58d973 is complete; findings cached under contract_hash 7c779e61ee00..."
+        ],
+        "extra": {
+          "job_id": "9e333f58d973",
+          "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+          "step": 4,
+          "decision": "RUN_PAID",
+          "price": 0.25
+        }
+      },
+      {
+        "ts": "2026-09-04T13:14:55.537Z",
+        "decision": "RUN_PAID",
+        "step": 3,
+        "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+        "evaluated": [
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=1, paid_usdc=0.50, open_invoices=0, unpaid_from_prior_jobs=0, trust_tier=new",
+          "job:9e333f58d973 -> current_step=3, status=awaiting_payment",
+          "entity findings/7c779e61ee00... -> step 3 (patch) is not cached",
+          "entity step_cost/4 -> runs=0, avg_tokens=0; priced step 4: base 0.25 for step 4 (verify); no discount (not cached), no surcharge (step_cost/4 avg_tokens=0 over 0 run(s)); buyer trust_tier=new = 0.25 USDC"
+        ],
+        "acted": [
+          "RUN_PAID step 3 (patch) via the model; output_sha256=9545b16f324e..., tokens=1335, seconds=0.174",
+          "mechanical check: the patched contract compiles",
+          "entity step_cost/3 -> runs=1, avg_tokens=1335, avg_seconds=0.17",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=2, paid_usdc=1.25, consecutive_paid_since_default=2 (settled turnstyl:9e333f58d973:step3)",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> trust_tier=trusted"
+        ],
+        "forward": [
+          "await 0.25 USDC for step 4 (turnstyl:9e333f58d973:step4), then run again"
+        ],
+        "extra": {
+          "job_id": "9e333f58d973",
+          "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+          "step": 3,
+          "decision": "RUN_PAID",
+          "price": 0.75
+        }
+      },
+      {
+        "ts": "2026-09-04T13:14:55.040Z",
+        "decision": "RUN_PAID",
+        "step": 2,
+        "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+        "evaluated": [
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=0, paid_usdc=0.00, open_invoices=0, unpaid_from_prior_jobs=0, trust_tier=new",
+          "job:9e333f58d973 -> current_step=2, status=awaiting_payment",
+          "entity findings/7c779e61ee00... -> step 2 (findings) is not cached",
+          "entity step_cost/3 -> runs=0, avg_tokens=0; priced step 3: base 0.75 for step 3 (patch); no discount (not cached), no surcharge (step_cost/3 avg_tokens=0 over 0 run(s)); buyer trust_tier=new = 0.75 USDC"
+        ],
+        "acted": [
+          "RUN_PAID step 2 (findings) via the model; output_sha256=a4e17dd7ad87..., tokens=663, seconds=0.0",
+          "entity step_cost/2 -> runs=1, avg_tokens=663, avg_seconds=0.00",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=1, paid_usdc=0.50, consecutive_paid_since_default=1 (settled turnstyl:9e333f58d973:step2)",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> trust_tier=new"
+        ],
+        "forward": [
+          "await 0.75 USDC for step 3 (turnstyl:9e333f58d973:step3), then run again"
+        ],
+        "extra": {
+          "job_id": "9e333f58d973",
+          "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+          "step": 2,
+          "decision": "RUN_PAID",
+          "price": 0.5
+        }
+      },
+      {
+        "ts": "2026-09-04T13:14:54.623Z",
+        "decision": "RUN_FREE",
+        "step": 1,
+        "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+        "evaluated": [
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> paid_steps=0, paid_usdc=0.00, open_invoices=0, unpaid_from_prior_jobs=0, trust_tier=new",
+          "job:9e333f58d973 -> current_step=1, status=new",
+          "entity findings/7c779e61ee00... -> step 1 (scope) is not cached",
+          "entity step_cost/2 -> runs=0, avg_tokens=0; priced step 2: base 0.50 for step 2 (findings); no discount (not cached), no surcharge (step_cost/2 avg_tokens=0 over 0 run(s)); buyer trust_tier=new = 0.50 USDC"
+        ],
+        "acted": [
+          "RUN_FREE step 1 (scope) via the model; output_sha256=b975491491f0..., tokens=514, seconds=0.0",
+          "entity step_cost/1 -> runs=1, avg_tokens=514, avg_seconds=0.00",
+          "entity buyer/0x0964dc1e37aca77c6df395db7c0eec848b1ceff8 -> trust_tier=new"
+        ],
+        "forward": [
+          "await 0.50 USDC for step 2 (turnstyl:9e333f58d973:step2), then run again"
+        ],
+        "extra": {
+          "job_id": "9e333f58d973",
+          "buyer": "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8",
+          "step": 1,
+          "decision": "RUN_FREE",
+          "price": 0.0
+        }
+      }
+    ],
+    "source": "journal (COLD tier), newest first"
+  }
+}

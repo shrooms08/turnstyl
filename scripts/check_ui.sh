@@ -241,8 +241,23 @@ has "chip: amber dot on another chain" '<span class="dot warn"></span>'
 has "chip: gray dot disconnected"     '<span class="dot"></span><span class="addr">'
 has "chip: switch label on wrong chain" "switch to Base Sepolia"
 has "chip: copy flash"                'addr.textContent = "copied"'
-has "chip: own row under 900px"       "@media (max-width:900px)"
-has "top gradient over the scene"     'id="topfade"'
+has "chip: same row at every width"  ".topbar{position:fixed;top:var(--banner-h)"
+if grep -qF 'id="topfade"' "$PAGE"; then bad "top gradient removed (solid header)" "topfade still present"; else ok "top gradient removed (solid header)"; fi
+has "fixed solid header"              "height:var(--header-h);z-index:30"
+has "header background solid black"  "background:#000;border-bottom:1px solid rgba(255,255,255,.08)"
+has "header 64px desktop"            "--header-h:64px"
+has "header 56px mobile"             ":root{--header-h:56px}"
+has "banner height drives the header" "--banner-h"
+has "script sets the banner height"  'setProperty("--banner-h"'
+has "page pads for header + banner"  "padding-top:calc(var(--header-h) + var(--banner-h))"
+has "status row is the console's first row" '<div class="statusrow" id="statusCluster">'
+has "700px media query"              "@media (max-width:700px)"
+has "mobile h1 clamp"                "clamp(38px,11vw,56px)"
+has "mobile h2 clamp"                "clamp(30px,8.5vw,42px)"
+has "mobile chip 11px, 60vw"         "max-width:60vw"
+has "story copy gradient on mobile"  "linear-gradient(to right,rgba(0,0,0,.7)"
+has "tables as label/value on mobile" "content:attr(data-label)"
+has "memory read closed on mobile"   "i === 0 && !mobile"
 has "outstanding item pay button"     'data-settle="1"'
 has "ledger memo comes from the API"  "o.memo"
 has "one pay sequence for both"       "function payMemo("

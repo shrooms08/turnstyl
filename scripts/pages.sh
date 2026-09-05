@@ -34,7 +34,14 @@ if [ "$MODE" = "--config-only" ]; then
   cp web/config.js "$WT/config.js"
 else
   cp web/index.html "$WT/index.html"
-  cp web/config.js "$WT/config.js"
+  # Never knock a live session offline: the local config.js is the empty
+  # default unless tunnel.sh wrote it, so when gh-pages already publishes a
+  # URL and the local file is empty, the published one is kept.
+  if grep -q 'TURNSTYL_API = ""' web/config.js && grep -qE 'TURNSTYL_API = "https://' "$WT/config.js" 2>/dev/null; then
+    echo "turnstyl pages: keeping the live API URL already on gh-pages ($(tr -d '\n' < "$WT/config.js"))"
+  else
+    cp web/config.js "$WT/config.js"
+  fi
   rm -rf "$WT/static"; mkdir -p "$WT/static"
   cp -R web/static/. "$WT/static/"
   find "$WT/static" \( -name .DS_Store -o -name .gitkeep \) -delete

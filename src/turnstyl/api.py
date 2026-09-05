@@ -1,10 +1,12 @@
-"""Read-only HTTP view of turnstyl's memory.
+"""HTTP view of turnstyl's memory, plus one way in.
 
-Every endpoint answers from the same Sibyl Memory store the agent uses, through
-the same ``TurnstylMemory`` wrapper. Nothing here writes a domain row: there is
-no ``set_state``, ``set_entity``, ``write_event`` or ``archive_entity`` call in
-this module, and the store is only opened when the database file already exists,
-so a request can never bring one into being.
+Every GET answers from the same Sibyl Memory store the agent uses, through the
+same ``TurnstylMemory`` wrapper, and writes nothing. The one write endpoint,
+``POST /api/jobs``, hands a contract to the engine exactly as the CLI's
+``job new`` does; the engine, not this module, decides what to store. The store
+is only opened when the database file already exists, so no request can bring
+one into being: after the delete beat, POST answers 409 and every GET answers
+200 with ``memory_missing: true``.
 
 The delete beat is a first-class case. When the file is gone, ``/api/status``
 reports ``db_exists: false`` and every other endpoint answers 200 with empty
@@ -14,17 +16,24 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from . import policy
 from . import schema as S
+from .engine import Engine
 from .memory import TENANT_ID, TurnstylMemory, TurnstylStore, default_db_path
+from .payments import get_backend
 
 CHAIN_ID = 84532
 EXPLORER = "https://sepolia.basescan.org"
@@ -33,7 +42,7 @@ WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
 app = FastAPI(
     title="turnstyl",
-    description="Read-only view of the agent's memory.",
+    description="The agent's memory over HTTP, and one endpoint that gives it work.",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
@@ -167,10 +176,13 @@ def job_summary(state: S.JobState, archived: bool, source: str) -> dict[str, Any
 
 
 @app.get("/api/jobs")
-def api_jobs() -> dict[str, Any]:
+def api_jobs(
+    buyer: str | None = Query(default=None, description="Only this buyer's jobs."),
+) -> dict[str, Any]:
     store = open_store()
     if store is None:
-        return missing({"jobs": [], "source": "no database"})
+        return missing({"jobs": [], "buyer": buyer, "source": "no database"})
+    buyer_key = buyer.strip().lower() if buyer else None
 
     path = db_path()
     active = set(store.get_active_jobs())
@@ -210,9 +222,12 @@ def api_jobs() -> dict[str, Any]:
                 job_summary(state, archived=True, source="state + buyer.jobs")
             )
 
+    if buyer_key:
+        jobs = [j for j in jobs if j["buyer"] == buyer_key]
     jobs.sort(key=lambda j: j["created_at"], reverse=True)
     return {
         "memory_missing": False,
+        "buyer": buyer_key,
         "jobs": jobs,
         "source": (
             "The SDK archives entities but exposes no reader for them, so "
@@ -270,12 +285,8 @@ def not_started_view(step: int) -> dict[str, Any]:
     return view
 
 
-@app.get("/api/jobs/{job_id}")
-def api_job(job_id: str) -> dict[str, Any]:
-    store = open_store()
-    if store is None:
-        return missing({"job": None})
-
+def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
+    """The full view of one job. Shared by GET and by the POST that made it."""
     state = store.get_job_state(job_id)
     if state is None:
         raise HTTPException(
@@ -332,6 +343,100 @@ def api_job(job_id: str) -> dict[str, Any]:
         "steps": steps,
         "source": entity_source,
     }
+
+
+@app.get("/api/jobs/{job_id}")
+def api_job(job_id: str) -> dict[str, Any]:
+    store = open_store()
+    if store is None:
+        return missing({"job": None})
+    return job_detail(store, job_id)
+
+
+# ----------------------------------------------------------------------
+# POST /api/jobs: the one write
+# ----------------------------------------------------------------------
+ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+SOURCE_MAX_BYTES = 65536
+
+# In-process rate limit: at most 10 job creations per minute across all
+# callers. This is a demo guard against a runaway client, not an access
+# control; a real deployment would put a proxy in front of this.
+RATE_LIMIT = 10
+RATE_WINDOW_SECONDS = 60.0
+_recent_posts: deque[float] = deque()
+_rate_lock = threading.Lock()
+
+
+def rate_limited() -> bool:
+    now = time.monotonic()
+    with _rate_lock:
+        while _recent_posts and now - _recent_posts[0] > RATE_WINDOW_SECONDS:
+            _recent_posts.popleft()
+        if len(_recent_posts) >= RATE_LIMIT:
+            return True
+        _recent_posts.append(now)
+        return False
+
+
+class NewJobRequest(BaseModel):
+    buyer: str = Field(description="Buyer wallet, 0x + 40 hex.")
+    source: str = Field(description="Solidity source text, 1 to 65536 bytes.")
+    filename: str | None = Field(default="Vault.sol", description="Display name only.")
+
+
+@app.post("/api/jobs")
+def api_create_job(body: NewJobRequest) -> dict[str, Any]:
+    """Give the agent a contract. Same path as `turnstyl job new`.
+
+    Validates the buyer address and the source, then hands the text to
+    ``Engine.new_job_from_source``, which stores the source under the same
+    contract reference the CLI uses, runs the free scope step and issues the
+    invoice for step 2. Returns the job as GET /api/jobs/{id} would, plus
+    ``resumed`` when an open job for this buyer and contract already existed.
+    """
+    if not db_path().is_file():
+        raise HTTPException(
+            status_code=409, detail="memory file missing; the agent cannot take jobs"
+        )
+    buyer = (body.buyer or "").strip()
+    if not ADDRESS_RE.match(buyer):
+        raise HTTPException(
+            status_code=400,
+            detail="buyer must be a 0x-prefixed 40-hex-character address",
+        )
+    buyer = buyer.lower()
+    source = body.source or ""
+    size = len(source.encode("utf-8"))
+    if size < 1 or size > SOURCE_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source must be 1 to {SOURCE_MAX_BYTES} bytes of Solidity; got {size}",
+        )
+    if "contract" not in source and "pragma" not in source:
+        raise HTTPException(
+            status_code=400,
+            detail="source does not look like Solidity: no 'contract' or 'pragma' in it",
+        )
+    if rate_limited():
+        raise HTTPException(
+            status_code=429,
+            detail=f"at most {RATE_LIMIT} job creations per minute; try again shortly",
+        )
+    filename = (body.filename or "contract.sol").strip() or "contract.sol"
+    filename = os.path.basename(filename)[:80]
+
+    store = TurnstylStore(TurnstylMemory(db_path()))
+    engine = Engine(store=store, payments=get_backend(store.memory))
+    try:
+        outcome = engine.new_job_from_source(source, buyer, filename=filename)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    detail = job_detail(store, outcome.job_id)
+    detail["resumed"] = bool(outcome.resumed)
+    detail["decision"] = outcome.decision
+    return detail
 
 
 # ----------------------------------------------------------------------

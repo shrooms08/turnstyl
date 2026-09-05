@@ -385,16 +385,46 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
     console.print(Text(f"memory read: {', '.join(data['memory_read'])}", style="dim"))
 
 
+@app.command("worker")
+def worker(
+    db: str = typer.Option(
+        None, "--db", help="Database to watch. Defaults to $TURNSTYL_DB."
+    ),
+    interval: float = typer.Option(3.0, "--interval", help="Seconds between passes."),
+    once: bool = typer.Option(False, "--once", help="One pass, then exit."),
+) -> None:
+    """Run active jobs automatically as their invoices are settled.
+
+    Every pass reconciles each buyer and runs the current step of any job the
+    policy would run, through the same engine as `job run`. Waiting jobs are
+    looked at but not written about. Ctrl-C stops it cleanly.
+    """
+    from .worker import main as worker_main
+
+    if db:
+        os.environ[DB_PATH_ENV_VAR_MEMORY] = db
+    raise typer.Exit(code=worker_main(None, interval, once))
+
+
 @app.command("serve")
 def serve(
     port: int = typer.Option(8787, "--port", help="Port to listen on."),
     db: str = typer.Option(
         None, "--db", help="Database to read. Defaults to $TURNSTYL_DB."
     ),
+    with_worker: bool = typer.Option(
+        False, "--with-worker", help="Also run the worker loop in this process."
+    ),
+    interval: float = typer.Option(
+        3.0, "--interval", help="Worker pass interval in seconds (with --with-worker)."
+    ),
 ) -> None:
-    """Serve the read-only web view of this agent's memory.
+    """Serve the web view of this agent's memory.
 
-    Binds 127.0.0.1 only. The API never writes to the store.
+    Binds 127.0.0.1 only. GET endpoints never write; POST /api/jobs hands a
+    contract to the engine exactly as `job new` does. With --with-worker the
+    worker loop runs in a background thread of the same process, so the demo
+    is one command.
     """
     import uvicorn
 
@@ -433,6 +463,10 @@ def serve(
             style="dim",
         )
     )
+    if with_worker:
+        from .worker import start_in_thread
+
+        start_in_thread(None, interval)
     uvicorn.run("turnstyl.api:app", host="127.0.0.1", port=port, log_level="warning")
 
 

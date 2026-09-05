@@ -81,7 +81,7 @@ class Engine:
     # Public API
     # ------------------------------------------------------------------
     def new_job(self, contract_path: str | Path, buyer: str) -> Outcome:
-        """Start an audit, or resume the one already open for this contract."""
+        """Start an audit from a .sol file, or resume the one already open."""
         path = Path(contract_path)
         if not path.is_file():
             raise RuntimeError(
@@ -91,6 +91,19 @@ class Engine:
         contract_text = path.read_text(encoding="utf-8")
         if not contract_text.strip():
             raise RuntimeError(f"turnstyl: contract file {path} is empty.")
+        return self.new_job_from_source(contract_text, buyer, filename=path.name)
+
+    def new_job_from_source(
+        self, contract_text: str, buyer: str, *, filename: str = "contract.sol"
+    ) -> Outcome:
+        """Start an audit from contract text, or resume the one already open.
+
+        The path form above is a thin wrapper over this: the API hands in the
+        text it was posted, the CLI hands in what it read from disk, and from
+        here on nothing knows or cares which.
+        """
+        if not contract_text.strip():
+            raise RuntimeError("turnstyl: the contract source is empty.")
         contract_hash = S.sha256_text(contract_text)
         buyer_key = self.store.buyer_key(buyer)
 
@@ -98,7 +111,7 @@ class Engine:
         hints = self._memory_hints(contract_text, contract_hash)
         read: list[str] = [S.STATE_ACTIVE_JOBS]
         if hints:
-            read.append(f"fts5 findings/* for {Path(path).name} function names")
+            read.append(f"fts5 findings/* for {filename} function names")
         existing = self._find_open_job(buyer_key, contract_hash, read)
         if existing is not None:
             self.store.journal(
@@ -217,6 +230,30 @@ class Engine:
         outcome = self._advance(state, contract_text, extra_reads=read)
         outcome.reconciled = reconciled
         return outcome
+
+    def peek(self, job_id: str) -> tuple[str, str, tuple | None, S.JobState] | None:
+        """What ``run`` would decide right now, without writing a journal event.
+
+        Syncs the open invoice against the payment backend (a real fact, and
+        it is recorded in the state document) and asks the policy, but does
+        not act and does not journal. The worker loop uses this every pass so
+        a job that is simply waiting for payment does not leave one journal
+        event per interval. Returns (decision, reason, invoice_signature,
+        state), or None for a job that is complete or unknown.
+        """
+        state = self.store.get_job_state(job_id)
+        if state is None or state.status == S.STATUS_COMPLETE:
+            return None
+        entity = self.store.get_job_entity(job_id)
+        if entity is not None and str(state.current_step) in entity.steps:
+            # already recorded: run() will skip or close it, which is an action
+            return ("SKIP_ALREADY_DONE", "step already recorded", None, state)
+        self._sync_invoice(state, [])
+        ledger = self.store.get_buyer(state.buyer)
+        decision, reason = policy.decide(state.current_step, ledger, state)
+        inv = state.open_invoice
+        signature = (inv.step, inv.paid, inv.amount_usdc) if inv is not None else None
+        return decision, reason, signature, state
 
     def pay(self, job_id: str, step: int, tx_hash: str | None = None) -> str:
         """Settle one invoice out of band. Test backends only."""

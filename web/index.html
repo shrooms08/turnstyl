@@ -607,6 +607,23 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
     return '<div class="actions"><button type="button" class="btn" id="payBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Pay '+usdc(inv.amount_usdc)+' USDC</button>' + status + '</div>';
   }
 
+  // same pattern as the invoice panel: Pay on Base, Simulate on the fake backend
+  function outstandingControls(b, o){
+    var st = S.status || {};
+    var mine = (P.jobId === o.job_id && P.step === Number(o.step));
+    var line = mine && P.status ? P.status : "";
+    var link = (mine && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (mine && P.tx ? ' ' + cp(P.tx) : "");
+    var status = line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "";
+    var attrs = ' data-settle="1" data-job="'+esc(o.job_id)+'" data-step="'+esc(o.step)+'" data-memo="'+esc(o.memo||"")+'" data-amount="'+esc(o.amount_usdc)+'" data-buyer="'+esc(b.buyer)+'"';
+    if(st.payments_backend === "fake")
+      return '<div class="actions"><button type="button" class="btn"'+attrs+(mine && P.busy ? " disabled" : "")+'>Simulate payment</button>' + status + '</div>';
+    if(!W.addr) return '<div class="actions"><span class="wait">connect as '+esc(trunc(b.buyer))+' to pay</span></div>';
+    if(!isYou(b.buyer)) return '<div class="actions"><span class="wait">connect as '+esc(trunc(b.buyer))+' to pay (you are '+esc(trunc(W.addr))+')</span></div>';
+    if(W.chainId && W.chainId !== BASE_CHAIN)
+      return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
+    return '<div class="actions"><button type="button" class="btn"'+attrs+(mine && P.busy ? " disabled" : "")+'>Pay '+usdc(o.amount_usdc)+' USDC</button>' + status + '</div>';
+  }
+
   function invoicePanel(job){
     var inv = job.open_invoice;
     if(!inv || inv.paid) return "";
@@ -662,8 +679,14 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       return '<div class="card"><h3>buyer ledger</h3><div class="empty">buyer unknown to memory</div></div>';
     var L = b.ledger, T = b.trust || {};
     function cell(k,v){ return '<div><div class="k">'+esc(k)+'</div><div class="v">'+v+"</div></div>"; }
-    var outs = (L.outstanding||[]).map(function(o){
-      return '<div class="o"><span>'+esc(o.job_id)+'</span><span>step '+esc(o.step)+'</span><span>'+usdc(o.amount_usdc)+' USDC</span></div>';
+    // the API's outstanding list carries the memo the chain expects
+    // (keccak256("<job_id>:<step>"), computed server-side); the raw ledger
+    // copy does not, so the API list is the one rendered
+    var items = (b.outstanding && b.outstanding.length) ? b.outstanding : (L.outstanding||[]);
+    var outs = items.map(function(o){
+      return '<div class="o"><span>'+esc(o.job_id)+'</span><span>step '+esc(o.step)+'</span><span>'+usdc(o.amount_usdc)+' USDC</span>' +
+        (o.memo && /^0x[0-9a-fA-F]{64}$/.test(o.memo) ? '<span>'+cp(o.memo)+'</span>' : "") + '</div>' +
+        outstandingControls(b, o);
     }).join("");
     return '<div class="card"><h3>buyer ledger</h3>' +
       '<div class="kv">' +
@@ -893,13 +916,20 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
   /* ── pay: allowance, approve if short, pay, wait ─────────────────── */
   function payInvoice(job){
-    var inv = job && job.open_invoice, st = S.status;
-    if(!inv || !st || !W.addr || P.busy) return;
-    P = { jobId:job.job_id, step:inv.step, status:"checking allowance", tx:null, busy:true };
+    var inv = job && job.open_invoice;
+    if(!inv) return;
+    payMemo(job.job_id, inv.step, inv.memo, inv.amount_usdc, "confirmed; the agent will run the step");
+  }
+  // one sequence for an open invoice and for an outstanding item on a closed
+  // job: allowance, approve once if short, pay(memo, units), wait
+  function payMemo(jobId, step, memo, amountUsdc, doneText){
+    var st = S.status;
+    if(!st || !W.addr || P.busy) return;
+    P = { jobId:jobId, step:Number(step), status:"checking allowance", tx:null, busy:true };
     render();
-    var units = BigInt(Math.round(Number(inv.amount_usdc) * 1e6));
-    if(!/^0x[0-9a-fA-F]{64}$/.test(String(inv.memo || ""))){
-      P.status = "this invoice has no on-chain memo (fake backend?)"; P.busy = false; render(); return;
+    var units = BigInt(Math.round(Number(amountUsdc) * 1e6));
+    if(!/^0x[0-9a-fA-F]{64}$/.test(String(memo || ""))){
+      P.status = "no on-chain memo for this item (fake backend?)"; P.busy = false; render(); return;
     }
     if(!st.usdc_address || !st.receipts_address){
       P.status = "server did not report the USDC or receipts address"; P.busy = false; render(); return;
@@ -913,15 +943,29 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
         return usdcC.approve(st.receipts_address, BigInt(100) * BigInt(1000000)).then(function(tx){ return tx.wait(); });
       }).then(function(){
         P.status = "paying"; render();
-        return rc.pay(inv.memo, units);
+        return rc.pay(memo, units);
       }).then(function(tx){
         P.tx = tx.hash; P.status = "confirming"; render();
         return tx.wait();
       }).then(function(){
-        P.status = "confirmed; the agent will run the step"; P.busy = false; render();
+        P.status = doneText; P.busy = false; render();
         refreshBalance();
       });
     }).catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+  function simulateSettle(buyer, jobId, step){
+    if(P.busy) return;
+    P = { jobId:jobId, step:Number(step), status:"marking paid", tx:null, busy:true };
+    render();
+    fetch("/api/buyers/" + encodeURIComponent(buyer) + "/settle/" + encodeURIComponent(jobId) + "/" + encodeURIComponent(step),
+          { method:"POST", headers:{ accept:"application/json" } })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        if(res.ok){ P.tx = (res.body.settled && res.body.settled.tx_hash) || null; P.status = "settled (simulated); reconciled from memory"; }
+        else P.status = "error " + res.status + ": " + ((res.body && res.body.detail) || "request failed");
+        P.busy = false; render();
+      })
+      .catch(function(e){ P.status = errText(e); P.busy = false; render(); });
   }
   function simulatePay(job){
     if(!job || P.busy) return;
@@ -947,6 +991,13 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
     if(hit("submitBtn")){ submitAudit(); return; }
     if(hit("payBtn")){ payInvoice(S.job); return; }
     if(hit("simPayBtn")){ simulatePay(S.job); return; }
+    var settle = t.closest && t.closest("[data-settle]");
+    if(settle){
+      var o = settle.dataset;
+      if((S.status||{}).payments_backend === "fake") simulateSettle(o.buyer, o.job, o.step);
+      else payMemo(o.job, o.step, o.memo, o.amount, "confirmed; the agent will reconcile it on the next pass");
+      return;
+    }
     if(hit("mineBtn")){ S.mine = !S.mine; S.jobs = null; render(); poll(); return; }
     var stepBtn = e.target.closest && e.target.closest(".step");
     var copyEl = e.target.closest && e.target.closest("[data-copy]");

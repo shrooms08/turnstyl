@@ -33,7 +33,7 @@ from . import policy
 from . import schema as S
 from .engine import Engine
 from .memory import TENANT_ID, TurnstylMemory, TurnstylStore, default_db_path
-from .payments import ERC20_ABI, RECEIPTS_ABI, get_backend
+from .payments import ERC20_ABI, RECEIPTS_ABI, get_backend, hex0x, memo_bytes32
 
 CHAIN_ID = 84532
 EXPLORER = "https://sepolia.basescan.org"
@@ -528,12 +528,81 @@ def api_buyer(address: str) -> dict[str, Any]:
             "steps_until_credit": policy.steps_until_credit(ledger),
             "earned_back": policy.earned_back(ledger),
         },
-        "outstanding": [item.model_dump() for item in ledger.outstanding],
+        "outstanding": outstanding_view(ledger),
         "jobs": ledger.jobs,
         "source": (
             "entity buyer/<address>; trust.explanation is the reason string "
-            "policy.decide produces for the next paid step"
+            "policy.decide produces for the next paid step; outstanding[].memo "
+            "is keccak256(\"<job_id>:<step>\") computed here, the same bytes "
+            "payments.memo_bytes32 puts on chain"
         ),
+    }
+
+
+def outstanding_view(ledger: S.BuyerLedger) -> list[dict[str, Any]]:
+    """The buyer's outstanding items with the memo the chain expects.
+
+    Computed server-side from the same function the payment backend uses,
+    so the page never re-implements keccak and can never pay a wrong memo.
+    """
+    items = []
+    for item in ledger.outstanding:
+        view = item.model_dump()
+        view["memo"] = hex0x(memo_bytes32(item.job_id, item.step))
+        view["memo_source"] = "keccak256(\"<job_id>:<step>\")"
+        view["amount_units"] = S.usdc_base_units(item.amount_usdc)
+        items.append(view)
+    return items
+
+
+@app.post("/api/buyers/{address}/settle/{job_id}/{step}")
+def api_settle_outstanding(address: str, job_id: str, step: int) -> dict[str, Any]:
+    """Settle one outstanding item on a closed job. Fake backend only.
+
+    The same thing `turnstyl pay` followed by a reconcile does. On the Base
+    backend the only evidence of payment is a Paid log, so this answers 404
+    there and the page pays through the wallet instead.
+    """
+    backend = (os.environ.get("PAYMENTS") or "fake").strip().lower()
+    if backend != "fake":
+        raise HTTPException(
+            status_code=404, detail="payments are on chain; use the Pay button"
+        )
+    if not db_path().is_file():
+        raise HTTPException(
+            status_code=409, detail="memory file missing; the agent cannot take payments"
+        )
+    store = TurnstylStore(TurnstylMemory(db_path()))
+    key = store.buyer_key(address)
+    if not store.buyer_exists(key):
+        raise HTTPException(status_code=404, detail=f"buyer {key} is unknown to memory")
+    ledger = store.get_buyer(key)
+    if not any(o.job_id == job_id and o.step == step for o in ledger.outstanding):
+        raise HTTPException(
+            status_code=404,
+            detail=f"buyer {key} has no outstanding step {step} on job {job_id}",
+        )
+    payments = get_backend(store.memory)
+    tx_hash = payments.mark_paid(job_id, step)
+    # The worker sweeps outstanding buyers every pass and may reconcile this
+    # item between the mark and the call below; settlement is judged by
+    # re-reading the ledger, not by who got there first.
+    cleared = payments.reconcile(key)
+    ledger = store.get_buyer(key)
+    still_open = any(o.job_id == job_id and o.step == step for o in ledger.outstanding)
+    if still_open:
+        raise HTTPException(
+            status_code=500,
+            detail=f"marked step {step} of job {job_id} paid but it is still outstanding",
+        )
+    return {
+        "memory_missing": False,
+        "buyer": key,
+        "settled": {"job_id": job_id, "step": step, "tx_hash": tx_hash, "simulated": True},
+        "reconciled": cleared,
+        "reconciled_by": "this request" if cleared else "the worker, between the mark and the check",
+        "ledger": ledger.model_dump(),
+        "outstanding": outstanding_view(ledger),
     }
 
 

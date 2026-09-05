@@ -213,13 +213,33 @@ has "new audit panel"                 'id="auditPanel"'
 has "POST /api/jobs from the page"    'fetch("/api/jobs", { method:"POST"'
 has "pay: allowance first"            ".allowance(W.addr, st.receipts_address)"
 has "pay: approve when short"         ".approve(st.receipts_address"
-has "pay: then pay(memo, units)"      ".pay(inv.memo, units)"
+has "pay: then pay(memo, units)"      ".pay(memo, units)"
 has "user rejection reads cancelled"  'return "cancelled"'
 has "Simulate payment on fake backend" "Simulate payment"
 has "simulate calls POST /api/jobs/{id}/pay" '"/pay"'
 has "your jobs filter"                '"/api/jobs?buyer=" + encodeURIComponent(W.addr)'
 has "this is you pill"                "this is you"
 has "memory-missing disables submit"  "cannot take jobs while memory is missing"
+has "outstanding item pay button"     'data-settle="1"'
+has "ledger memo comes from the API"  "o.memo"
+has "one pay sequence for both"       "function payMemo("
+has "settle endpoint on fake backend" '"/settle/"'
+# the API computes the memo for every outstanding item
+FIRST_BUYER=$(curl -s "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['buyer'] if j else '')" 2>/dev/null)
+if [ -n "$FIRST_BUYER" ]; then
+  OUTS=$(curl -s "$BASE/api/buyers/$FIRST_BUYER" 2>/dev/null | .venv/bin/python -c "
+import json,sys,re
+d=json.load(sys.stdin); o=d.get('outstanding') or []
+ok=all(re.match(r'^0x[0-9a-f]{64}$', x.get('memo','')) and 'amount_units' in x for x in o)
+print(len(o), 'ok' if ok else 'bad')" 2>/dev/null)
+  case "$OUTS" in
+    "0 ok") ok "GET /api/buyers outstanding carries memo (none outstanding right now)";;
+    *" ok") ok "GET /api/buyers outstanding carries a keccak memo ($OUTS items)";;
+    *) bad "GET /api/buyers outstanding carries a keccak memo" "got: $OUTS";;
+  esac
+else
+  bad "GET /api/buyers outstanding carries a keccak memo" "no job in the store to find a buyer"
+fi
 for k in usdc_address receipts_abi usdc_abi; do
   if grep -q "\"$k\"" "$STATUS"; then ok "status carries $k"; else bad "status carries $k" "no \"$k\" in /api/status"; fi
 done

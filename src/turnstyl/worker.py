@@ -72,6 +72,10 @@ class Worker:
             actions = 0
             for job_id in list(store.get_active_jobs()):
                 actions += self._tick(engine, store, job_id)
+            # A debt on a closed job belongs to a buyer who may have no open
+            # job at all, so the per-job sweep above would never reconcile it.
+            # Walk every buyer carrying outstanding items as well.
+            actions += self._reconcile_outstanding(engine, store)
             # forget jobs that are no longer active
             active = set(store.get_active_jobs())
             for job_id in list(self.last_seen):
@@ -82,6 +86,37 @@ class Worker:
             closer = getattr(getattr(store.memory, "client", None), "storage", None)
             if closer is not None and hasattr(closer, "close"):
                 closer.close()
+
+    def _reconcile_outstanding(self, engine: Engine, store: TurnstylStore) -> int:
+        cleared_total = 0
+        try:
+            rows = store.memory.list_entities(S.CAT_BUYER, limit=200)
+        except Exception as e:  # noqa: BLE001
+            _log(f"worker: could not list buyers: {type(e).__name__}: {e}")
+            return 0
+        for row in rows:
+            try:
+                ledger = S.BuyerLedger.model_validate(row["body"])
+            except Exception:  # noqa: BLE001 - a malformed row is not this loop's problem
+                continue
+            if not ledger.outstanding:
+                continue
+            buyer = row["name"]
+            try:
+                cleared = engine.payments.reconcile(buyer)
+            except Exception as e:  # noqa: BLE001 - say it once, keep sweeping
+                key = ("reconcile", str(e)[:80])
+                if self.last_seen.get(f"{buyer}:reconcile") != key:
+                    _log(f"worker: buyer {buyer} reconcile failed: {type(e).__name__}: {e}")
+                    self.last_seen[f"{buyer}:reconcile"] = key
+                continue
+            for item in cleared:
+                _log(
+                    f"worker: reconciled step {item['step']} of job {item['job_id']} "
+                    f"for {buyer} ({item['amount_usdc']:.2f} USDC, {item['tx_hash']})"
+                )
+            cleared_total += len(cleared)
+        return cleared_total
 
     def _tick(self, engine: Engine, store: TurnstylStore, job_id: str) -> int:
         state = store.get_job_state(job_id)

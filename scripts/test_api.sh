@@ -76,6 +76,20 @@ D=$(jget "/api/jobs/$JOB")
 [ "$(echo "$D" | jq_ "[s['pay_tx'] for s in d['steps'] if s['step']==4][0]")" = "None" ] && ok "step 4 has no pay tx (credit)" || bad "step 4 has no pay tx (credit)"
 [ "$(jget "/api/journal?job=$JOB&limit=50" | jq_ "any(e['decision']=='RUN_ON_CREDIT' and e['step']==4 for e in d['events'])")" = "True" ] && ok "journal records RUN_ON_CREDIT for step 4" || bad "journal records RUN_ON_CREDIT for step 4"
 
+# ---------------------------------------------------------------- outstanding on a closed job
+B=$(jget "/api/buyers/$BUYER")
+[ "$(echo "$B" | jq_ "len(d['outstanding']), d['outstanding'][0]['job_id'], d['outstanding'][0]['step']")" = "1 $JOB 4" ] && ok "ledger carries the credit step as outstanding" || bad "ledger carries the credit step as outstanding" "$(echo "$B" | jq_ "d['outstanding']")"
+API_MEMO=$(echo "$B" | jq_ "d['outstanding'][0]['memo']")
+PY_MEMO=$($PY -c "import sys;sys.path.insert(0,'src');from turnstyl.payments import memo_bytes32,hex0x;print(hex0x(memo_bytes32('$JOB',4)))")
+[ -n "$API_MEMO" ] && [ "$API_MEMO" = "$PY_MEMO" ] && ok "outstanding memo equals payments.memo_bytes32($JOB, 4): $API_MEMO" || bad "outstanding memo equals payments.memo_bytes32" "api=$API_MEMO py=$PY_MEMO"
+[ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs']")" = "1" ] && ok "unpaid_from_prior_jobs is 1 before settling" || bad "unpaid_from_prior_jobs is 1 before settling"
+SR=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/4"); SC=$(echo "$SR" | tail -1); SB=$(echo "$SR" | sed '$d')
+[ "$SC" = "200" ] && [ "$(echo "$SB" | jq_ "d['settled']['step'], d['settled']['simulated']")" = "4 True" ] && ok "POST /api/buyers/{addr}/settle/{job}/{step} settles it (fake backend; reconciled by $(echo "$SB" | jq_ "d['reconciled_by']"))" || bad "settle endpoint" "got $SC: $(echo "$SB" | head -c 200)"
+B=$(jget "/api/buyers/$BUYER")
+[ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], len(d['outstanding'])")" = "0 0" ] && ok "after settling: unpaid_from_prior_jobs 0, outstanding empty" || bad "after settling: unpaid_from_prior_jobs 0, outstanding empty" "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], d['outstanding']")"
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/4")
+[ "$C" = "404" ] && ok "settling it again -> 404 (nothing outstanding)" || bad "settling it again -> 404" "got $C"
+
 # ---------------------------------------------------------------- quiet when idle
 # a waiting job must not grow the journal each pass: open one and leave it unpaid
 RESP3=$(curl -s -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}")
@@ -99,8 +113,10 @@ PAYMENTS=base .venv/bin/turnstyl serve --port $PORT2 --db "$DB" > /tmp/turnstyl-
 SERVER2=$!; disown $SERVER2 2>/dev/null   # so the shell does not report the kill below
 for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$PORT2/api/status" && break; sleep 0.5; done
 R2=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/jobs/$JOB2/pay"); C2=$(echo "$R2" | tail -1); B2=$(echo "$R2" | sed '$d')
+R3=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/buyers/$BUYER/settle/$JOB/4"); C3=$(echo "$R3" | tail -1); B3=$(echo "$R3" | sed '$d')
 kill $SERVER2 2>/dev/null
 [ "$C2" = "404" ] && grep -q "payments are on chain; use the Pay button" <<< "$B2" && ok "PAYMENTS=base: simulate -> 404 with the on-chain detail" || bad "PAYMENTS=base: simulate -> 404" "got $C2: $(echo "$B2" | head -c 120)"
+[ "$C3" = "404" ] && grep -q "payments are on chain; use the Pay button" <<< "$B3" && ok "PAYMENTS=base: settle -> 404 with the on-chain detail" || bad "PAYMENTS=base: settle -> 404" "got $C3: $(echo "$B3" | head -c 120)"
 
 # ---------------------------------------------------------------- validation
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"0xnotanaddress\",\"source\":$SRC}")

@@ -111,6 +111,12 @@ h1{font-family:var(--disp);font-weight:200;font-size:clamp(42px,6.6vw,88px);line
 .livelink .e{color:var(--mute);word-break:break-word;max-width:64ch}
 .reveal{opacity:0;transform:translateY(26px);transition:opacity 1s cubic-bezier(.2,.7,.2,1),transform 1s cubic-bezier(.2,.7,.2,1)}
 .reveal.in{opacity:1;transform:none}
+/* backing panel behind the hero and story text: negative margins equal to the
+   padding, so the text's left edge stays exactly where it was */
+.panel{position:relative;background:rgba(0,0,0,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:28px 32px;margin:-28px -32px}
+.story .inner.panel{max-width:calc(760px + 64px)}
+.hero .panel{align-self:flex-start;width:fit-content;max-width:calc(56vw + 64px)}
+.story.danger .panel{border-color:rgba(229,72,77,.25)}
 
 /* ── console ────────────────────────────────────────────────────── */
 .console{padding:70px 0 40px}
@@ -240,7 +246,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 /* ── mobile ─────────────────────────────────────────────────────── */
 @media (max-width:700px){
   :root{--header-h:56px}
-  .wrap{padding:0 18px}
+  .wrap{padding:0 24px}
   .topbar{padding:0 16px;gap:10px}
   .mark img{height:18px !important}
   /* chip: dot, address, balance; 11px; never wider than 60% of the viewport */
@@ -266,7 +272,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   #loader{gap:18px}
   /* story: 40% less vertical padding, copy readable over the particles */
   .story{min-height:auto;padding:48px 0}
-  .story .inner{position:relative;padding:14px 18px 14px 0;background:linear-gradient(to right,rgba(0,0,0,.7) 0%,rgba(0,0,0,0) 100%)}
+  .panel{padding:18px 20px;margin:-18px -20px}
+  .story .inner.panel,.hero .panel{max-width:none;width:auto}
   /* console */
   .console{padding:44px 0 30px}
   .chead{flex-direction:column;align-items:flex-start;gap:8px}
@@ -315,7 +322,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 <div class="shell" id="top">
 
   <section class="hero wrap" data-state="ring">
-    <div class="reveal in">
+    <div class="reveal in panel">
       <h1>An agent that never forgets who paid.</h1>
       <p class="sub">Paid per step in USDC on Base. Everything it knows lives in one memory file.</p>
       <div class="live"><span class="dot on" id="liveDot"></span><span><b id="recCount">—</b> <span id="recLabel">records in memory</span></span></div>
@@ -324,7 +331,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   </section>
 
   <section class="story wrap" data-state="pulse">
-    <div class="inner reveal">
+    <div class="inner reveal panel">
       <p class="kicker">01 — metering</p>
       <h2>Every step is paid.</h2>
       <p>Scope is free. It reads the contract, states what it will look at, and stops. Findings, patch and verify are sold one at a time — each with its own price, its own invoice, its own receipt.</p>
@@ -333,7 +340,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   </section>
 
   <section class="story wrap" data-state="reform">
-    <div class="inner reveal">
+    <div class="inner reveal panel">
       <p class="kicker">02 — memory</p>
       <h2>Restart it. It remembers.</h2>
       <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer with three fully paid jobs behind them gets credit — the next step runs before the invoice clears.</p>
@@ -344,7 +351,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   </section>
 
   <section class="story wrap danger" data-state="scatter">
-    <div class="inner reveal">
+    <div class="inner reveal panel">
       <p class="kicker">03 — failure</p>
       <h2>Delete the memory.</h2>
       <p>Nothing on chain tells the agent it has met this buyer. It invoices the same address again for work already paid, and the second payment lands next to the first — two receipts, one answer, no way to tell from the ledger which one was owed.</p>
@@ -352,7 +359,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   </section>
 
   <section class="story wrap" data-state="reform">
-    <div class="inner reveal">
+    <div class="inner reveal panel">
       <p class="kicker">04 — the split</p>
       <h2>The chain remembers the money. Not the reason.</h2>
       <p>Base holds payments and output hashes. It does not hold findings, prices, cost history, or trust. A memo is opaque without the memory that wrote it: the same bytes mean "paid step 3 for a trusted buyer" or nothing at all.</p>

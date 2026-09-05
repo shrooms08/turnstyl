@@ -255,7 +255,16 @@ has "700px media query"              "@media (max-width:700px)"
 has "mobile h1 clamp"                "clamp(38px,11vw,56px)"
 has "mobile h2 clamp"                "clamp(30px,8.5vw,42px)"
 has "mobile chip 11px, 60vw"         "max-width:60vw"
-has "story copy gradient on mobile"  "linear-gradient(to right,rgba(0,0,0,.7)"
+if grep -qF "linear-gradient(to right,rgba(0,0,0,.7)" "$PAGE"; then bad "mobile story gradient removed (panel replaces it)" "gradient still present"; else ok "mobile story gradient removed (panel replaces it)"; fi
+has "backing panel rule"              ".panel{position:relative;background:rgba(0,0,0,.62)"
+has "panel blur with prefix"          "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)"
+has "panel radius, border, padding"   "border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:28px 32px;margin:-28px -32px"
+has "panel hugs the story text"       ".story .inner.panel{max-width:calc(760px + 64px)}"
+has "panel hugs the hero text"        ".hero .panel{align-self:flex-start;width:fit-content;max-width:calc(56vw + 64px)}"
+has "danger panel border tinted red"  ".story.danger .panel{border-color:rgba(229,72,77,.25)}"
+has "mobile panel padding"            ".panel{padding:18px 20px;margin:-18px -20px}"
+N_STORY=$(grep -c 'class="inner reveal panel"' "$PAGE"); N_HERO=$(grep -c 'class="reveal in panel"' "$PAGE")
+[ "$N_STORY" = "4" ] && [ "$N_HERO" = "1" ] && ok "panel class on all five text blocks (4 story + 1 hero)" || bad "panel class on all five text blocks" "story=$N_STORY hero=$N_HERO"
 has "tables as label/value on mobile" "content:attr(data-label)"
 has "memory read closed on mobile"   "i === 0 && !mobile"
 has "outstanding item pay button"     'data-settle="1"'

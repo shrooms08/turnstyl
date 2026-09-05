@@ -27,7 +27,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -441,6 +441,278 @@ class NewJobRequest(BaseModel):
     buyer: str = Field(description="Buyer wallet, 0x + 40 hex.")
     source: str = Field(description="Solidity source text, 1 to 65536 bytes.")
     filename: str | None = Field(default="Vault.sol", description="Display name only.")
+
+
+# ----------------------------------------------------------------------
+# Report: the audit as a document the buyer can keep
+# ----------------------------------------------------------------------
+def payment_label(step: dict[str, Any]) -> str:
+    if step.get("status") != "done":
+        return "not started"
+    if float(step.get("price_usdc") or 0) == 0:
+        return "free"
+    return "paid" if step.get("paid") else "credit (delivered before the invoice cleared)"
+
+
+def report_data(store: TurnstylStore, job_id: str) -> dict[str, Any]:
+    """Everything the report needs, from the same view the job page renders
+    (live entity first, then the read-only archive)."""
+    detail = job_detail(store, job_id)
+    receipts = os.environ.get("RECEIPTS_ADDRESS")
+    steps = []
+    for st in detail["steps"]:
+        steps.append(
+            {
+                "step": st["step"],
+                "name": st["name"],
+                "status": st["status"],
+                "price_usdc": st["price_usdc"],
+                "payment": payment_label(st),
+                "cached": st.get("cached", False),
+                "pay_tx": st.get("pay_tx"),
+                "pay_tx_url": f"{EXPLORER}/tx/{st['pay_tx']}" if st.get("pay_tx") and not str(st["pay_tx"]).startswith("0xfake") else None,
+                "commit_tx": st.get("commit_tx"),
+                "commit_tx_url": f"{EXPLORER}/tx/{st['commit_tx']}" if st.get("commit_tx") else None,
+                "output_sha256": st.get("output_sha256"),
+                "output": st.get("output"),
+            }
+        )
+    return {
+        "job_id": detail["job_id"],
+        "contract_hash": detail["contract_hash"],
+        "buyer": detail["buyer"],
+        "status": detail["status"],
+        "created_at": detail["created_at"],
+        "updated_at": detail["updated_at"],
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "archived": detail["archived"],
+        "chain_id": CHAIN_ID,
+        "explorer": EXPLORER,
+        "receipts_address": receipts,
+        "receipts_url": f"{EXPLORER}/address/{receipts}" if receipts else None,
+        "steps": steps,
+        "verification": [
+            {"step": s_["step"], "name": s_["name"], "output_sha256": s_["output_sha256"],
+             "commit_tx": s_["commit_tx"], "commit_tx_url": s_["commit_tx_url"]}
+            for s_ in steps if s_["status"] == "done"
+        ],
+    }
+
+
+def report_markdown(r: dict[str, Any]) -> str:
+    """The report as Markdown. Outputs go in tilde fences: model output for the
+    patch step contains backtick fences of its own."""
+    lines = [
+        f"# turnstyl audit report: job {r['job_id']}",
+        "",
+        f"- contract sha256: `{r['contract_hash']}`",
+        f"- buyer: `{r['buyer']}`",
+        f"- job status: {r['status']}" + (" (archived)" if r["archived"] else ""),
+        f"- opened: {r['created_at']}",
+        f"- generated: {r['generated_at']}",
+        f"- chain: Base Sepolia ({r['chain_id']}), receipts contract "
+        + (f"[{r['receipts_address']}]({r['receipts_url']})" if r["receipts_address"] else "not configured"),
+        "",
+    ]
+    for st in r["steps"]:
+        lines += [f"## Step {st['step']}: {st['name']}", ""]
+        lines.append(f"- price: {float(st['price_usdc'] or 0):.2f} USDC, {st['payment']}")
+        if st["cached"]:
+            lines.append("- served from memory (a prior audit of this contract)")
+        if st["pay_tx"]:
+            lines.append(f"- payment: [{st['pay_tx']}]({st['pay_tx_url']})" if st["pay_tx_url"] else f"- payment: `{st['pay_tx']}` (fake backend)")
+        if st["commit_tx"]:
+            lines.append(f"- commit: [{st['commit_tx']}]({st['commit_tx_url']})")
+        if st["output_sha256"]:
+            lines.append(f"- output sha256: `{st['output_sha256']}`")
+        lines.append("")
+        if st["status"] == "done":
+            lines += ["~~~~text", st["output"] or "", "~~~~", ""]
+        else:
+            lines += ["_not started_", ""]
+    lines += [
+        "## Verification",
+        "",
+        "Each step's output is hashed with sha256 and, when it was paid for, the hash was "
+        "committed on Base Sepolia as `Committed(memo, outputHash)` on the receipts contract "
+        "at payment time. Open the commit transaction on BaseScan and compare its `outputHash` "
+        "with the sha256 below; recompute the sha256 from the output above to check the "
+        "report itself.",
+        "",
+        "| step | sha256 of output | Committed event tx |",
+        "| --- | --- | --- |",
+    ]
+    for v in r["verification"]:
+        tx = f"[{v['commit_tx']}]({v['commit_tx_url']})" if v["commit_tx"] else "no commit (free step or fake backend)"
+        lines.append(f"| {v['step']} {v['name']} | `{v['output_sha256']}` | {tx} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+@app.get("/api/jobs/{job_id}/report.json")
+def api_report_json(job_id: str) -> dict[str, Any]:
+    store = open_store()
+    if store is None:
+        return missing({"job_id": job_id, "report": None})
+    return {"memory_missing": False, **report_data(store, job_id)}
+
+
+@app.get("/api/jobs/{job_id}/report.md", include_in_schema=True)
+def api_report_md(job_id: str):
+    store = open_store()
+    if store is None:
+        return PlainTextResponse(
+            "memory missing: no report can be produced from an absent store\n",
+            media_type="text/markdown",
+        )
+    md = report_markdown(report_data(store, job_id))
+    return PlainTextResponse(
+        md,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="turnstyl-audit-{job_id}.md"'},
+    )
+
+
+# ----------------------------------------------------------------------
+# Verify: does the output the buyer holds match the hash committed at payment?
+# ----------------------------------------------------------------------
+VERIFY_TTL_SECONDS = 60.0
+_verify_cache: dict[tuple[str, int, str], tuple[float, dict[str, Any]]] = {}
+_verify_lock = threading.Lock()
+COMMITTED_SIGNATURE = "Committed(bytes32,bytes32)"
+
+
+def _rpc_retry(fn, *args):
+    """Three attempts with backoff; the caller turns a final failure into a
+    per-step 'rpc unavailable', never a 500."""
+    last = None
+    for attempt in range(3):
+        try:
+            return fn(*args)
+        except Exception as e:  # noqa: BLE001 - retried, then reported per step
+            last = e
+            if attempt < 2:
+                time.sleep(1.0 * (2**attempt))
+    raise RuntimeError(f"{type(last).__name__}: {last}")
+
+
+def verify_step(job_id: str, step: int, record: S.StepRecord) -> dict[str, Any]:
+    recomputed = S.sha256_text(record.output)
+    memo = hex0x(memo_bytes32(job_id, step))
+    result: dict[str, Any] = {
+        "step": step,
+        "name": S.STEP_NAMES.get(step, str(step)),
+        "memo": memo,
+        "cached": record.cached,
+        "output_sha256_stored": record.output_sha256,
+        "output_sha256_recomputed": recomputed,
+        "onchain_hash": None,
+        "onchain_memo": None,
+        "tx": record.commit_tx,
+        "tx_url": f"{EXPLORER}/tx/{record.commit_tx}" if record.commit_tx else None,
+        "block": None,
+        "matches": None,
+        "reason": None,
+    }
+    if not record.commit_tx:
+        result["reason"] = "no commit for this step (free step, or the fake payment backend)"
+        return result
+
+    key = (job_id, step, record.commit_tx)
+    now = time.monotonic()
+    with _verify_lock:
+        hit = _verify_cache.get(key)
+        if hit and now - hit[0] < VERIFY_TTL_SECONDS:
+            cached = dict(hit[1])
+            cached["from_cache"] = True
+            return cached
+
+    rpc = os.environ.get("BASE_SEPOLIA_RPC")
+    receipts = os.environ.get("RECEIPTS_ADDRESS")
+    if not rpc or not receipts:
+        result["reason"] = "rpc not configured (BASE_SEPOLIA_RPC / RECEIPTS_ADDRESS)"
+        return result
+    try:
+        from web3 import HTTPProvider, Web3
+
+        w3 = Web3(HTTPProvider(rpc, request_kwargs={"timeout": 20}))
+        receipt = _rpc_retry(w3.eth.get_transaction_receipt, record.commit_tx)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "not found" in msg.lower():
+            result["reason"] = "transaction not found on Base Sepolia"
+        else:
+            result["reason"] = f"rpc unavailable: {msg[:160]}"
+        return result
+
+    topic = hex0x(Web3.keccak(text=COMMITTED_SIGNATURE))
+    log = None
+    for lg in receipt["logs"]:
+        if str(lg["address"]).lower() == receipts.lower() and lg["topics"] and hex0x(lg["topics"][0]) == topic:
+            log = lg
+            break
+    result["block"] = int(receipt["blockNumber"])
+    if log is None:
+        result["matches"] = False
+        result["reason"] = "no Committed event from the receipts contract in this transaction"
+    else:
+        result["onchain_memo"] = hex0x(log["topics"][1]) if len(log["topics"]) > 1 else None
+        data = bytes(log["data"])
+        result["onchain_hash"] = hex0x(data[-32:]) if len(data) >= 32 else None
+        hash_ok = result["onchain_hash"] == "0x" + recomputed
+        memo_ok = result["onchain_memo"] == memo
+        result["matches"] = bool(hash_ok and memo_ok)
+        if result["matches"]:
+            result["reason"] = "matches on-chain commit"
+        elif not memo_ok:
+            result["reason"] = "the committed memo is not this job and step"
+        elif recomputed != record.output_sha256:
+            result["reason"] = "the stored output no longer hashes to its recorded sha256; the on-chain hash matches the original"
+        else:
+            result["reason"] = "the on-chain hash differs from the output the buyer holds"
+    with _verify_lock:
+        _verify_cache[key] = (now, dict(result))
+    return result
+
+
+@app.get("/api/jobs/{job_id}/verify")
+def api_verify(job_id: str) -> dict[str, Any]:
+    """Prove, per step, that the output in memory is the one committed on chain.
+
+    Needs both sides: the chain holds the hash, memory holds the output. Either
+    alone proves nothing. Steps served from memory carry their own commit and
+    are checked like any other; a step without a commit says so.
+    """
+    store = open_store()
+    if store is None:
+        return missing({"job_id": job_id, "steps": []})
+    state = store.get_job_state(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    entity = store.get_job_entity(job_id)
+    source = "entity job/<id>"
+    if entity is None:
+        archive = read_archived_job(db_path(), job_id)
+        if archive is None:
+            raise HTTPException(status_code=404, detail=f"job {job_id!r} has no step records to verify")
+        entity = S.JobEntity.model_validate(archive["body"])
+        source = "archived_entities (read-only)"
+    steps = [verify_step(job_id, int(k), rec) for k, rec in sorted(entity.steps.items(), key=lambda kv: int(kv[0]))]
+    return {
+        "memory_missing": False,
+        "job_id": job_id,
+        "contract_hash": state.contract_hash,
+        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cache_ttl_seconds": int(VERIFY_TTL_SECONDS),
+        "steps": steps,
+        "summary": {
+            "checked": len(steps),
+            "matches": sum(1 for x in steps if x["matches"] is True),
+            "mismatches": sum(1 for x in steps if x["matches"] is False),
+            "no_commit": sum(1 for x in steps if x["matches"] is None),
+        },
+        "source": source + "; Committed events decoded from each commit transaction's receipt",
+    }
 
 
 @app.post("/api/jobs")

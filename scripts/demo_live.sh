@@ -237,6 +237,61 @@ check 3 "one completed paid job on the ledger" "completed paid jobs 1"
 check 3 "buyer trust tier still new" "trust tier new"
 beat_result 3 "first job fully paid, still no credit" $before
 
+# ----------------------------------------------------------------- beat 3b
+before=$FAILURES
+echo "BEAT 3b: VERIFY. Every paid step's output matches its on-chain commit; a tampered copy does not"
+VPORT=8796
+$CLI serve --port $VPORT --db "$DB" > /tmp/turnstyl-demo-verify.log 2>&1 & VSRV=$!; disown $VSRV 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$VPORT/api/status" && break; sleep 0.5; done
+curl -s "http://127.0.0.1:$VPORT/api/jobs/$JOB1/verify" > "$OUT"
+VSUM=$($PY -c "
+import json,sys; d=json.load(open('$OUT'))
+paid=[x for x in d['steps'] if x['tx']]
+print(len(d['steps']), len(paid), all(x['matches'] is True for x in paid), [x['step'] for x in d['steps'] if x['matches'] is None])")
+case "$VSUM" in
+  "4 3 True [1]") echo "  ok   verify: steps 2-4 match their Committed events; step 1 (free) has no commit";;
+  *) echo "  FAIL verify on the first job: $VSUM"; FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("3b: verify");;
+esac
+VERIFY_SAMPLE=$($PY -c "import json; d=json.load(open('$OUT')); print(json.dumps([x for x in d['steps'] if x['step']==2][0], indent=2))")
+kill $VSRV 2>/dev/null
+
+# tamper: a copy of the store, one byte of step 2's output changed through the
+# SDK, verified against the same chain. The archive row of a closed job cannot
+# be edited through the SDK, so the job entity is re-materialised from it with
+# the altered byte via put_job_entity, which verify reads first (as the page does).
+TAMPER="${DB%.db}_tamper.db"
+rm -f "$TAMPER" "$TAMPER-wal" "$TAMPER-shm"
+cp "$DB" "$TAMPER"; [ -f "$DB-wal" ] && cp "$DB-wal" "$TAMPER-wal"; [ -f "$DB-shm" ] && cp "$DB-shm" "$TAMPER-shm"
+TDESC=$(TURNSTYL_DB="$TAMPER" $PY -c "
+import sys; sys.path.insert(0,'src')
+from pathlib import Path
+from turnstyl import schema as S
+from turnstyl.memory import TurnstylMemory, TurnstylStore
+from turnstyl.api import read_archived_job
+store = TurnstylStore(TurnstylMemory(Path('$TAMPER')))
+arch = read_archived_job(Path('$TAMPER'), '$JOB1')
+ent = S.JobEntity.model_validate(arch['body'])
+rec = ent.steps['2']; out = rec.output; i = len(out)//2
+rec.output = out[:i] + ('X' if out[i] != 'X' else 'Y') + out[i+1:]   # sha256 field left as recorded
+store.put_job_entity('$JOB1', ent)
+print('changed byte', i, 'of step 2 output; recorded sha kept', rec.output_sha256[:12])")
+echo "    $TDESC"
+$CLI serve --port 8797 --db "$TAMPER" > /tmp/turnstyl-demo-tamper.log 2>&1 & TSRV=$!; disown $TSRV 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:8797/api/status" && break; sleep 0.5; done
+curl -s "http://127.0.0.1:8797/api/jobs/$JOB1/verify" > "$OUT"
+TSUM=$($PY -c "
+import json; d=json.load(open('$OUT')); s2=[x for x in d['steps'] if x['step']==2][0]
+print(s2['matches'], s2['output_sha256_recomputed']!=s2['output_sha256_stored'], s2['onchain_hash']=='0x'+s2['output_sha256_stored'], [x['matches'] for x in d['steps'] if x['step'] in (3,4)])")
+case "$TSUM" in
+  "False True True [True, True]") echo "  ok   tampered copy: step 2 matches false (output no longer hashes to the committed value); steps 3-4 still match";;
+  *) echo "  FAIL tamper test: $TSUM"; FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("3b: tamper");;
+esac
+TAMPER_REASON=$($PY -c "import json; d=json.load(open('$OUT')); print([x for x in d['steps'] if x['step']==2][0]['reason'])")
+echo "    reason: $TAMPER_REASON"
+kill $TSRV 2>/dev/null
+rm -f "$TAMPER" "$TAMPER-wal" "$TAMPER-shm"
+beat_result 3b "outputs verified against their commits; a tampered store is caught" $before
+
 # ----------------------------------------------------------------- beat 4
 before=$FAILURES
 echo "BEAT 4: two more fully paid jobs, served from memory at half price"
@@ -375,6 +430,9 @@ echo "  beat 5 (credit):          $DECISION_5"
 echo "  beat 6 (refuse):          $DECISION_6"
 echo "  beat 7 (after default):   $DECISION_7"
 echo "  beat 8 (earned back):     $DECISION_8"
+echo
+echo "verify response for job 1, step 2 (live run):"
+echo "${VERIFY_SAMPLE:-n/a}" | sed 's/^/  /'
 echo
 echo "double-charge transaction: ${DOUBLE_TX:-none}"
 echo

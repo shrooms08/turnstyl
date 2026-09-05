@@ -35,6 +35,15 @@ on chain tells the agent which invoice it already collected, so it charges again
 | consolidation | `Engine._complete` (`engine.py:808`) copies the four step outputs into `findings/<contract_hash>` and archives the job entity via `TurnstylStore.archive_job_entity` (`memory.py:293`) | closed jobs leave the working set; their outputs become the cache that prices the next audit of the same contract |
 | semantic search (FTS5) | `TurnstylStore.search_findings` (`memory.py:329`), called from `Engine._memory_hints` (`engine.py:297`) on every `job new` | queries `findings/*` with the contract's own function names and prints any hit as a dim "memory hint" line |
 
+## Verify: what the chain proves, and what it cannot
+
+`GET /api/jobs/{id}/verify` decodes the `Committed(memo, outputHash)` event from
+each step's commit transaction and compares it with the sha256 of the output
+held in memory. A match proves the output the buyer received is the one the
+agent committed at payment time. The proof needs both stores: the chain has the
+hash, memory has the output; either alone proves nothing, which is also why the
+delete test cannot be undone from chain.
+
 ## Why not rebuild memory from chain
 
 The chain holds two things: that a payment of some amount arrived under a memo,

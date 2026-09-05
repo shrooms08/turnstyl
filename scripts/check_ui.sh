@@ -269,6 +269,21 @@ has "tables as label/value on mobile" "content:attr(data-label)"
 has "memory read closed on mobile"   "i === 0 && !mobile"
 has "outstanding item pay button"     'data-settle="1"'
 has "ledger memo comes from the API"  "o.memo"
+has "download report button"          'id="downloadReportBtn"'
+has "report link hits report.md"      '/report.md'
+has "verify all button"               'id="verifyAllBtn"'
+has "per-step verify control"         'data-verify="'
+has "verify result: match"            "matches on-chain commit"
+has "verify result: mismatch"         "does not match the on-chain commit"
+has "verify result: no commit"        "no commit for this step"
+has "verify calls the API, not the chain" '"/verify"'
+FIRST_JOB2=$(curl -s "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['job_id'] if j else '')" 2>/dev/null)
+if [ -n "$FIRST_JOB2" ]; then
+  RCODE=$(curl -s -D "$TMPDIR_RUN/rh" -o /dev/null -w "%{http_code}" "$BASE/api/jobs/$FIRST_JOB2/report.md" 2>/dev/null)
+  [ "$RCODE" = "200" ] && grep -qi "content-disposition: attachment" "$TMPDIR_RUN/rh" && ok "GET report.md returns an attachment" || bad "GET report.md returns an attachment" "HTTP $RCODE"
+  VCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/jobs/$FIRST_JOB2/verify" 2>/dev/null)
+  [ "$VCODE" = "200" ] && ok "GET verify returns 200" || bad "GET verify returns 200" "HTTP $VCODE"
+fi
 has "one pay sequence for both"       "function payMemo("
 has "settle endpoint on fake backend" '"/settle/"'
 # the API computes the memo for every outstanding item

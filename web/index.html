@@ -237,6 +237,11 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 .drop.over{border-color:var(--gold);color:var(--gold)}
 .actions{margin-top:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .actions .wait{margin-top:0}
+.vbtn{align-self:flex-start}
+.vres{font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word}
+.vres.ok{color:#4FB56E}
+.vres.bad{color:var(--red)}
+.vres.none{color:var(--mute)}
 
 /* ── part 6: display type ───────────────────────────────────────── */
 .hero h1{font-size:clamp(64px,8.5vw,132px);line-height:1.02}
@@ -480,6 +485,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     openStep:null, openMem:{}, memTouched:{}, mine:false,
     statusFails:0, offline:false
   };
+  // per-step verification results for the open job; rendered inline
+  var V = { jobId:null, byStep:{}, shown:{}, busy:false, err:null, summary:null };
   // wallet: nothing is requested on load except a silent eth_accounts when
   // this tab connected before (sessionStorage "wasConnected")
   var W = { available:false, addr:null, chainId:null, balance:null, busy:false, err:null };
@@ -661,6 +668,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
       (step.cached ? '<span class="tag">served from memory</span>' : "") +
       (facts.length ? '<div class="facts">'+facts.map(function(f){ return "<div>"+f+"</div>"; }).join("")+"</div>" : "") +
       (txs ? '<div class="txs">'+txs+"</div>" : "") +
+      (step.status === "done" ? '<span class="btn quiet vbtn" role="button" data-verify="'+step.step+'">Verify</span>' + verifyLine(job, step.step) : "") +
       "</button>";
   }
 
@@ -722,6 +730,44 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(W.chainId && W.chainId !== BASE_CHAIN)
       return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
     return '<div class="actions"><button type="button" class="btn"'+attrs+(mine && P.busy ? " disabled" : "")+'>Pay '+usdc(o.amount_usdc)+' USDC</button>' + status + '</div>';
+  }
+
+  function headerActions(job){
+    var vs = (V.jobId === job.job_id) ? V : null;
+    var note = "";
+    if(vs && vs.busy) note = '<span class="wait"><span class="blip"></span>verifying against Base Sepolia</span>';
+    else if(vs && vs.err) note = '<span class="wait">'+esc(vs.err)+'</span>';
+    else if(vs && vs.summary) note = '<span class="wait">'+esc(vs.summary.checked)+' steps: '+esc(vs.summary.matches)+' match, '+esc(vs.summary.mismatches)+' differ, '+esc(vs.summary.no_commit)+' no commit</span>';
+    return '<div class="actions">' +
+      '<a class="btn" id="downloadReportBtn" href="'+esc(apiUrl("/api/jobs/"+encodeURIComponent(job.job_id)+"/report.md"))+'" target="_blank" rel="noopener">Download report</a>' +
+      '<button type="button" class="btn quiet" id="verifyAllBtn"'+(vs && vs.busy ? " disabled" : "")+'>Verify all</button>' + note + '</div>';
+  }
+  function verifyLine(job, n){
+    if(V.jobId !== job.job_id || !V.shown[n]) return "";
+    if(V.busy && !V.byStep[n]) return '<div class="vres none">verifying…</div>';
+    var r = V.byStep[n];
+    if(!r) return "";
+    if(r.matches === true) return '<div class="vres ok">✓ matches on-chain commit · block '+esc(r.block)+'</div>';
+    if(r.matches === false) return '<div class="vres bad">✗ '+esc(r.reason || "does not match the on-chain commit")+(r.onchain_hash ? ' · on-chain '+esc(trunc(r.onchain_hash))+' vs output '+esc(trunc("0x"+r.output_sha256_recomputed)) : "")+'</div>';
+    return '<div class="vres none">— '+esc(r.reason || "no commit for this step")+'</div>';
+  }
+  function verifyJob(job, onlyStep){
+    if(!job || V.busy) return;
+    if(V.jobId !== job.job_id){ V = { jobId:job.job_id, byStep:{}, shown:{}, busy:false, err:null, summary:null }; }
+    if(onlyStep != null) V.shown[onlyStep] = true;
+    else fourSteps(job).forEach(function(s){ V.shown[s.step] = true; });
+    V.busy = true; V.err = null; render();
+    fetch(apiUrl("/api/jobs/"+encodeURIComponent(job.job_id)+"/verify"), { cache:"no-store", headers:API_HEADERS })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        if(!res.ok){ V.err = "verify failed: " + ((res.body && res.body.detail) || res.status); }
+        else {
+          (res.body.steps || []).forEach(function(r){ V.byStep[r.step] = r; });
+          if(onlyStep == null) V.summary = res.body.summary || null;
+        }
+        V.busy = false; render();
+      })
+      .catch(function(e){ V.err = "verify failed: " + errText(e); V.busy = false; render(); });
   }
 
   function invoicePanel(job){
@@ -824,7 +870,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
       '<div><div class="k">status</div><div class="v">'+statusPill(job.status)+'</div></div>' +
       '<div><div class="k">current step</div><div class="v">'+esc(job.current_step==null?"—":job.current_step)+' of 4</div></div>' +
       (job.archived ? '<div><div class="k">source</div><div class="v muted">archived, read-only</div></div>' : "") +
-      "</div>" + creditNote(job) + "</div>";
+      "</div>" + creditNote(job) + headerActions(job) + "</div>";
 
     var steps = '<div class="card"><h3>metered steps</h3><div class="steps">' +
       fourSteps(job).map(function(s){ return stepCard(s, job); }).join("") +
@@ -1112,6 +1158,10 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
       return;
     }
     if(hit("mineBtn")){ S.mine = !S.mine; S.jobs = null; render(); poll(); return; }
+    if(hit("verifyAllBtn")){ verifyJob(S.job, null); return; }
+    var vb = t.closest && t.closest("[data-verify]");
+    if(vb){ e.stopPropagation(); verifyJob(S.job, Number(vb.getAttribute("data-verify"))); return; }
+    if(t.closest && t.closest("#downloadReportBtn")) return;   // let the link work
     var stepBtn = e.target.closest && e.target.closest(".step");
     var copyEl = e.target.closest && e.target.closest("[data-copy]");
     if(copyEl){

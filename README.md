@@ -82,6 +82,14 @@ default cannot be worked off.
 - The contract holds no custody, it never takes a token balance, and it has no
   owner, no pause and no upgrade path.
 
+Every job page has **Verify**: for each step, the API fetches the commit
+transaction's receipt, decodes `Committed(memo, outputHash)`, recomputes the
+sha256 of the output in memory and compares. A match proves the output the
+buyer received is the one committed at payment time. It needs both sides: the
+chain holds the hash and memory holds the output; either alone proves nothing.
+**Download report** exports the whole audit as Markdown with every hash and
+transaction link, so the check can be repeated by hand on BaseScan.
+
 The memo is `keccak256("<job_id>:<step>")`, a bare string anyone can recompute. A
 payment counts when a `Paid` log carries that memo, a payer matching the invoiced
 buyer, and at least the invoiced amount. The agent trusts the log, not the buyer.

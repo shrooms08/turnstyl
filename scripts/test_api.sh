@@ -104,6 +104,18 @@ simulate_step "$JOB4" 3 || bad "job 4 step 3"; simulate_step "$JOB4" 4 || bad "j
 [ "$(jget "/api/jobs/$JOB4" | jq_ "d['status']")" = "complete" ] && ok "job 4 complete with step 2 owed" || bad "job 4 complete"
 JOB="$JOB4"   # the outstanding checks below settle step 2 of this job
 
+# ---------------------------------------------------------------- report + verify (fake backend)
+RH=$(curl -s -D - -o /tmp/turnstyl-report.md "$BASE/api/jobs/$JOB4/report.md")
+grep -qi "^content-disposition: attachment; filename=\"turnstyl-audit-$JOB4.md\"" <<< "$RH" && ok "report.md is an attachment named turnstyl-audit-$JOB4.md" || bad "report.md attachment header" "$(grep -i disposition <<< "$RH")"
+[ "$(grep -c '^## Step [1-4]: ' /tmp/turnstyl-report.md)" = "4" ] && ok "report.md has all four step sections" || bad "report.md has all four step sections" "$(grep -c '^## Step' /tmp/turnstyl-report.md)"
+grep -q "^## Verification" /tmp/turnstyl-report.md && grep -q "Reentrancy in withdraw()" /tmp/turnstyl-report.md && ok "report.md carries the Verification section and the verbatim findings" || bad "report.md content"
+RJ=$(jget "/api/jobs/$JOB4/report.json")
+[ "$(echo "$RJ" | jq_ "len(d['steps']), d['job_id'], len(d['verification'])")" = "4 $JOB4 4" ] && ok "report.json: 4 steps, 4 verification rows" || bad "report.json shape" "$(echo "$RJ" | head -c 200)"
+VJ=$(jget "/api/jobs/$JOB4/verify")
+[ "$(echo "$VJ" | jq_ "all(x['matches'] is None and 'no commit' in (x['reason'] or '') for x in d['steps']), len(d['steps']), d['summary']['no_commit']")" = "True 4 4" ] && ok "verify on the fake backend: all four steps matches null with a 'no commit' reason" || bad "verify on the fake backend" "$(echo "$VJ" | head -c 300)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/jobs/nope123/report.md")" = "404" ] && ok "report.md for an unknown job -> 404" || bad "report.md unknown job -> 404"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/jobs/nope123/verify")" = "404" ] && ok "verify for an unknown job -> 404" || bad "verify unknown job -> 404"
+
 # ---------------------------------------------------------------- outstanding on a closed job
 B=$(jget "/api/buyers/$BUYER")
 [ "$(echo "$B" | jq_ "len(d['outstanding']), d['outstanding'][0]['job_id'], d['outstanding'][0]['step']")" = "1 $JOB 2" ] && ok "ledger carries the credit step as outstanding" || bad "ledger carries the credit step as outstanding" "$(echo "$B" | jq_ "d['outstanding']")"
@@ -168,6 +180,7 @@ sleep 1
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}")
 [ "$C" = "409" ] && ok "POST against a missing db -> 409" || bad "POST against a missing db -> 409" "got $C"
 [ "$(jget "/api/status" | jq_ "d['memory_missing']")" = "True" ] && ok "GET /api/status reports memory_missing" || bad "GET /api/status reports memory_missing"
+RM=$(curl -s -w '\n%{http_code}' "$BASE/api/jobs/$JOB/report.md"); [ "$(echo "$RM" | tail -1)" = "200" ] && [ "$(echo "$RM" | sed '$d' | grep -c .)" = "1" ] && grep -q "memory missing" <<< "$RM" && ok "report.md with memory missing -> 200, one line" || bad "report.md with memory missing" "$(echo "$RM" | head -c 120)"
 sleep $((INTERVAL * 2 + 1))
 [ ! -f "$DB" ] && ok "worker did not recreate the deleted database" || bad "worker did not recreate the deleted database"
 

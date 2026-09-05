@@ -21,10 +21,12 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -59,6 +61,57 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
+
+# The page is published on GitHub Pages and talks to this API through a
+# tunnel, so it arrives from another origin. Exactly these origins, GET and
+# POST, and the headers the page sends. Nothing wider.
+ALLOWED_ORIGINS = [
+    "https://shrooms08.github.io",
+    "http://127.0.0.1:8787",
+    "http://localhost:8787",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Accept", "ngrok-skip-browser-warning"],
+    max_age=600,
+)
+
+# Daily cap on job creation, on top of the per-minute limit below. In-process,
+# keyed by UTC date, so it resets at UTC midnight (and on restart, which is
+# acceptable for a demo agent; a real deployment would count in the store).
+MAX_JOBS_PER_DAY = int(os.environ.get("MAX_JOBS_PER_DAY") or 150)
+_daily = {"date": "", "count": 0}
+_daily_lock = threading.Lock()
+
+
+def _utc_day() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def daily_remaining() -> int:
+    with _daily_lock:
+        if _daily["date"] != _utc_day():
+            _daily["date"], _daily["count"] = _utc_day(), 0
+        return max(0, MAX_JOBS_PER_DAY - _daily["count"])
+
+
+def daily_take() -> bool:
+    """Reserve one creation for today; False when the cap is spent."""
+    with _daily_lock:
+        if _daily["date"] != _utc_day():
+            _daily["date"], _daily["count"] = _utc_day(), 0
+        if _daily["count"] >= MAX_JOBS_PER_DAY:
+            return False
+        _daily["count"] += 1
+        return True
+
+
+def daily_give_back() -> None:
+    with _daily_lock:
+        if _daily["date"] == _utc_day() and _daily["count"] > 0:
+            _daily["count"] -= 1
 
 
 # ----------------------------------------------------------------------
@@ -157,6 +210,8 @@ def api_status() -> dict[str, Any]:
         "usdc_address": os.environ.get("USDC_ADDRESS"),
         "receipts_abi": PAGE_RECEIPTS_ABI,
         "usdc_abi": PAGE_USDC_ABI,
+        "max_jobs_per_day": MAX_JOBS_PER_DAY,
+        "remaining_today": daily_remaining(),
         "memory_missing": not exists,
     }
 
@@ -426,6 +481,14 @@ def api_create_job(body: NewJobRequest) -> dict[str, Any]:
             status_code=429,
             detail=f"at most {RATE_LIMIT} job creations per minute; try again shortly",
         )
+    if not daily_take():
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"the agent has taken its {MAX_JOBS_PER_DAY} jobs for today "
+                f"(UTC); the cap resets at 00:00 UTC"
+            ),
+        )
     filename = (body.filename or "contract.sol").strip() or "contract.sol"
     filename = os.path.basename(filename)[:80]
 
@@ -434,7 +497,10 @@ def api_create_job(body: NewJobRequest) -> dict[str, Any]:
     try:
         outcome = engine.new_job_from_source(source, buyer, filename=filename)
     except RuntimeError as e:
+        daily_give_back()
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if outcome.resumed:
+        daily_give_back()   # a resume created nothing; only creations count
 
     detail = job_detail(store, outcome.job_id)
     detail["resumed"] = bool(outcome.resumed)
@@ -650,6 +716,16 @@ def index() -> FileResponse:
             detail=f"turnstyl: {page} is missing; the web UI was not installed.",
         )
     return FileResponse(page)
+
+
+@app.get("/config.js", include_in_schema=False)
+def config_js() -> FileResponse:
+    """The API origin the page should talk to. Same-origin here (""), a
+    tunnel URL on GitHub Pages; scripts/tunnel.sh writes it."""
+    cfg = WEB_DIR / "config.js"
+    if not cfg.is_file():
+        raise HTTPException(status_code=404, detail="web/config.js is missing")
+    return FileResponse(cfg, media_type="application/javascript", headers={"Cache-Control": "no-store"})
 
 
 if (WEB_DIR / "static").is_dir():

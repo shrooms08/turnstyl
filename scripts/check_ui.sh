@@ -161,8 +161,8 @@ has "resizes with the window"           "resize"
 # ---------------------------------------------------------------- brand
 echo
 echo "brand"
-has "favicon links the mark"          'rel="icon" type="image/svg+xml" href="/static/brand/mark-light.svg"'
-has "lockup image in the top bar"     'src="/static/brand/lockup-a.svg" alt="turnstyl"'
+has "favicon links the mark"          'rel="icon" type="image/svg+xml" href="static/brand/mark-light.svg"'
+has "lockup image in the top bar"     'src="static/brand/lockup-a.svg" alt="turnstyl"'
 has "hero headline bounded"           ".hero h1{max-width:56vw}"
 BCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/static/brand/lockup-a.svg" 2>/dev/null)
 [ "$BCODE" = "200" ] && ok "GET /static/brand/lockup-a.svg returns 200" \
@@ -210,7 +210,7 @@ has "Base Sepolia chain id 0x14a34"   'BASE_CHAIN = "0x14a34"'
 has "silent reconnect via eth_accounts" 'eth("eth_accounts")'
 has "nothing requested on load"       'sessionStorage.getItem("wasConnected") === "1"'
 has "new audit panel"                 'id="auditPanel"'
-has "POST /api/jobs from the page"    'fetch("/api/jobs", { method:"POST"'
+has "POST /api/jobs from the page"    'fetch(apiUrl("/api/jobs"), { method:"POST"'
 has "pay: allowance first"            ".allowance(W.addr, st.receipts_address)"
 has "pay: approve when short"         ".approve(st.receipts_address"
 has "pay: then pay(memo, units)"      ".pay(memo, units)"
@@ -220,6 +220,18 @@ has "simulate calls POST /api/jobs/{id}/pay" '"/pay"'
 has "your jobs filter"                '"/api/jobs?buyer=" + encodeURIComponent(W.addr)'
 has "this is you pill"                "this is you"
 has "memory-missing disables submit"  "cannot take jobs while memory is missing"
+has "config.js loaded, cache-busted"  "config.js?v="
+has "API origin from config"          "window.TURNSTYL_API"
+has "every API fetch is prefixed"     "function apiUrl("
+has "tunnel header on fetches"        "ngrok-skip-browser-warning"
+has "agent offline banner"            "agent offline: the operator"
+has "offline after two failed polls"  "S.statusFails >= 2"
+has "offline disables submit"         "submissions are held until"
+has "faucet link"                     "https://faucet.circle.com"
+has "receipts contract link"          'id="receiptsLink"'
+has "assets are relative for Pages"   'src="static/brand/lockup-a.svg"'
+CCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/config.js" 2>/dev/null)
+[ "$CCODE" = "200" ] && ok "GET /config.js returns 200" || bad "GET /config.js returns 200" "HTTP ${CCODE:-no response}"
 has "wallet chip element"             'class="chip" id="walletChip"'
 has "chip: green dot on Base Sepolia" '<span class="dot on"></span><span class="addr">'
 has "chip: amber dot on another chain" '<span class="dot warn"></span>'

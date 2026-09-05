@@ -142,6 +142,36 @@ C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-
 sleep $((INTERVAL * 2 + 1))
 [ ! -f "$DB" ] && ok "worker did not recreate the deleted database" || bad "worker did not recreate the deleted database"
 
+# ---------------------------------------------------------------- CORS for the Pages origin
+PAGES_ORIGIN="https://shrooms08.github.io"
+H=$(curl -s -D - -o /dev/null -X OPTIONS "$BASE/api/jobs" -H "Origin: $PAGES_ORIGIN" -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: content-type,ngrok-skip-browser-warning")
+grep -qi "access-control-allow-origin: $PAGES_ORIGIN" <<< "$H" && ok "OPTIONS preflight from the Pages origin is allowed" || bad "OPTIONS preflight from the Pages origin" "$(echo "$H" | head -8)"
+grep -qiE "access-control-allow-methods:.*POST" <<< "$H" && ok "preflight allows POST" || bad "preflight allows POST"
+grep -qi "access-control-allow-headers:.*ngrok-skip-browser-warning" <<< "$H" && ok "preflight allows the tunnel header" || bad "preflight allows the tunnel header" "$(echo "$H" | grep -i allow-headers)"
+H2=$(curl -s -D - -o /dev/null -X POST "$BASE/api/jobs" -H "Origin: $PAGES_ORIGIN" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}")
+grep -qi "access-control-allow-origin: $PAGES_ORIGIN" <<< "$H2" && ok "POST from the Pages origin carries the CORS header" || bad "POST from the Pages origin carries the CORS header"
+H3=$(curl -s -D - -o /dev/null "$BASE/api/status" -H "Origin: https://evil.example")
+grep -qi "access-control-allow-origin" <<< "$H3" && bad "other origins get no CORS header" "$(echo "$H3" | grep -i allow-origin)" || ok "other origins get no CORS header"
+
+# ---------------------------------------------------------------- daily cap
+PORT4=8795; BASE4="http://127.0.0.1:$PORT4"; CAPDB=./data/cap_$$.db
+rm -f "$CAPDB" "$CAPDB-wal" "$CAPDB-shm"
+MAX_JOBS_PER_DAY=2 .venv/bin/turnstyl serve --port $PORT4 --db "$CAPDB" > /tmp/turnstyl-test-cap.log 2>&1 &
+S4=$!; disown $S4 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "$BASE4/api/status" && break; sleep 0.5; done
+[ "$(curl -s "$BASE4/api/status" | jq_ "d['max_jobs_per_day'], d['remaining_today']")" = "2 2" ] && ok "status reports max_jobs_per_day 2, remaining_today 2" || bad "status reports the daily cap" "$(curl -s "$BASE4/api/status" | jq_ "d['max_jobs_per_day'], d['remaining_today']")"
+SRC_B=$($PY -c "import json;print(json.dumps(open('examples/Vault.sol').read()+'// variant B\n'))")
+SRC_C=$($PY -c "import json;print(json.dumps(open('examples/Vault.sol').read()+'// variant C\n'))")
+C1=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE4/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}")
+C2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE4/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC_B}")
+[ "$C1 $C2" = "200 200" ] && ok "two creations within the cap -> 200, 200" || bad "two creations within the cap" "got $C1 $C2"
+[ "$(curl -s "$BASE4/api/status" | jq_ "d['remaining_today']")" = "0" ] && ok "remaining_today is 0 after two creations" || bad "remaining_today is 0 after two creations"
+R3=$(curl -s -w '\n%{http_code}' -X POST "$BASE4/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC_C}"); C3=$(echo "$R3" | tail -1); B3=$(echo "$R3" | sed '$d')
+[ "$C3" = "429" ] && grep -q "jobs for today" <<< "$B3" && ok "third creation -> 429 with the daily-cap detail" || bad "third creation -> 429" "got $C3: $(echo "$B3" | head -c 160)"
+C5=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE4/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}")
+[ "$C5" = "429" ] && ok "a resume is also refused once the cap is spent (nothing created)" || bad "resume under a spent cap" "got $C5"
+kill $S4 2>/dev/null; rm -f "$CAPDB" "$CAPDB-wal" "$CAPDB-shm"
+
 # ---------------------------------------------------------------- fresh memory on startup
 PORT3=8793; BASE3="http://127.0.0.1:$PORT3"; FRESH=./data/fresh_$$.db
 rm -f "$FRESH" "$FRESH-wal" "$FRESH-shm"

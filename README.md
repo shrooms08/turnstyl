@@ -154,6 +154,29 @@ every panel says what was lost rather than showing a stale copy.
 
 ![console: a job with its four step cards and the ledger](docs/screenshots/console.png)
 
+## Live
+
+The page is always up on GitHub Pages at <https://shrooms08.github.io/turnstyl/>.
+The agent behind it is live while the operator's machine is on: the API and the
+worker run on that Mac, reached through a Cloudflare quick tunnel whose URL the
+page reads from `config.js`. When the machine is off, the page still tells the
+story and shows the brand; the console reads `agent offline: the operator's
+machine is not reachable right now`, and submit and pay are held.
+
+Two commands, from the repo on the operator's machine:
+
+```bash
+scripts/tunnel.sh          # go live: caffeinate, serve --with-worker, cloudflared, publish the URL
+scripts/tunnel_check.sh    # from anywhere: is the published page pointing at a reachable agent?
+```
+
+`tunnel.sh` runs with `PAYMENTS=base` and the real model, writes the tunnel
+URL into `web/config.js`, pushes only that file to `gh-pages`, and on Ctrl-C
+stops everything and publishes an empty `config.js` again. The API allows the
+Pages origin and localhost only, and takes at most `MAX_JOBS_PER_DAY` jobs
+(default 150) per UTC day; `/api/status` reports `remaining_today`.
+`scripts/pages.sh` republishes the whole page after a change to `web/`.
+
 ## Buyer side
 
 The page is also where a buyer does business with the agent. Nothing here needs

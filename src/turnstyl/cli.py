@@ -431,6 +431,7 @@ def announce_memory() -> None:
 
 @app.command("serve")
 def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind."),
     port: int = typer.Option(8787, "--port", help="Port to listen on."),
     db: str = typer.Option(
         None, "--db", help="Database to read. Defaults to $TURNSTYL_DB."
@@ -444,7 +445,7 @@ def serve(
 ) -> None:
     """Serve the web view of this agent's memory.
 
-    Binds 127.0.0.1 only. GET endpoints never write; POST /api/jobs hands a
+    Binds 127.0.0.1 unless --host says otherwise. GET endpoints never write; POST /api/jobs hands a
     contract to the engine exactly as `job new` does. With --with-worker the
     worker loop runs in a background thread of the same process, so the demo
     is one command.
@@ -462,11 +463,11 @@ def serve(
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        probe.bind(("127.0.0.1", port))
+        probe.bind((host, port))
     except OSError as e:
         probe.close()
         fail(
-            f"turnstyl: cannot serve on 127.0.0.1:{port}: {e}.\n"
+            f"turnstyl: cannot serve on {host}:{port}: {e}.\n"
             f"  Something is already listening there. Find it with "
             f"'lsof -nP -iTCP:{port} -sTCP:LISTEN', or pass a different --port."
         )
@@ -474,14 +475,14 @@ def serve(
     probe.close()
 
     console.print(
-        Text(f"turnstyl serving http://127.0.0.1:{port}", style="bold"), soft_wrap=True
+        Text(f"turnstyl serving http://{host}:{port}", style="bold"), soft_wrap=True
     )
     announce_memory()
     if with_worker:
         from .worker import start_in_thread
 
         start_in_thread(None, interval)
-    uvicorn.run("turnstyl.api:app", host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run("turnstyl.api:app", host=host, port=port, log_level="warning")
 
 
 @app.command("reset")

@@ -3,7 +3,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>turnstyl — an agent that never forgets who paid</title>
-<link rel="icon" type="image/svg+xml" href="/static/brand/mark-light.svg">
+<link rel="icon" type="image/svg+xml" href="static/brand/mark-light.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&family=Outfit:wght@200;300;400&family=Work+Sans:wght@300;400;500&display=swap" rel="stylesheet">
@@ -84,6 +84,10 @@ a:hover{color:var(--gold);border-bottom-color:var(--gold)}
 #banner{position:fixed;top:0;left:0;right:0;z-index:60;display:none;background:var(--red);color:#0A0000;
   font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;padding:10px 40px;text-align:center;font-weight:500}
 body.memory-missing #banner{display:block}
+body.agent-offline #banner{display:block;background:#2A2A2A;color:var(--dim)}
+body.memory-missing.agent-offline #banner{background:var(--red);color:#0A0000}
+.links{margin-top:10px;display:flex;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+.links a{color:var(--dim);border-bottom-color:var(--line)}
 
 /* ── hero ───────────────────────────────────────────────────────── */
 .hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:150px 0 110px}
@@ -262,7 +266,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 <div id="banner" role="status">memory deleted</div>
 
 <div class="topbar" id="topbar">
-  <a class="mark" href="#top" style="border:0"><img src="/static/brand/lockup-a.svg" alt="turnstyl" height="22" style="height:22px;width:auto;display:block"></a>
+  <a class="mark" href="#top" style="border:0"><img src="static/brand/lockup-a.svg" alt="turnstyl" height="22" style="height:22px;width:auto;display:block"></a>
   <div class="right">
     <div class="wallet" id="walletRow"></div>
     <div class="status" id="statusCluster">
@@ -343,8 +347,16 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
 <script>
+  // config.js names the API origin ("" = same origin). Written by
+  // scripts/tunnel.sh when the agent goes live; a cache-busting query so a
+  // fresh tunnel URL is picked up on the next load. document.write keeps it
+  // a classic, blocking script with no build step.
+  document.write('<script src="config.js?v=' + Date.now() + '"><\/script>');
+</script>
+<script>
 (function(){
   "use strict";
+  window.TURNSTYL_API = window.TURNSTYL_API || "";
 
   /* ── scene state bus (read by the later three.js script) ───────── */
   var TURNSTYL = window.TURNSTYL = { state:"ring", memoryMissing:false };
@@ -418,7 +430,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   var S = {
     status:null, jobs:null, job:null, buyer:null, journal:null,
     missing:false, connected:false, jobId:null,
-    openStep:null, openMem:{}, memTouched:{}, mine:false
+    openStep:null, openMem:{}, memTouched:{}, mine:false,
+    statusFails:0, offline:false
   };
   // wallet: nothing is requested on load except a silent eth_accounts when
   // this tab connected before (sessionStorage "wasConnected")
@@ -437,8 +450,12 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   }
 
   /* ── fetch ─────────────────────────────────────────────────────── */
+  // API origin from config.js ("" = same origin) + the header a tunnel
+  // provider may want (harmless on Cloudflare).
+  function apiUrl(path){ return String(window.TURNSTYL_API || "").replace(/\/+$/, "") + path; }
+  var API_HEADERS = { accept:"application/json", "ngrok-skip-browser-warning":"true" };
   function api(path){
-    return fetch(path,{cache:"no-store",headers:{accept:"application/json"}})
+    return fetch(apiUrl(path),{cache:"no-store",headers:API_HEADERS})
       .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
       .catch(function(){ return null; });
   }
@@ -452,6 +469,9 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     return Promise.all(calls).then(function(r){
       var status = r[0], jobs = r[1], gjournal = r[2], job = r[3], jjournal = r[4];
       S.connected = !!status;
+      // "agent offline" is two consecutive failed status polls; one success clears it
+      S.statusFails = status ? 0 : S.statusFails + 1;
+      S.offline = S.statusFails >= 2;
       if(status) S.status = status;
       if(jobs) S.jobs = jobs;
       if(job) S.job = job; else if(id && jobs) S.job = S.job;
@@ -493,16 +513,19 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   function renderChrome(){
     var st = S.status || {};
     document.body.classList.toggle("memory-missing", !!S.missing);
+    document.body.classList.toggle("agent-offline", !!S.offline && !S.missing);
     TURNSTYL.memoryMissing = !!S.missing;
-    $("#topbar").classList.toggle("shifted", !!S.missing);
+    $("#topbar").classList.toggle("shifted", !!S.missing || !!S.offline);
     if(S.missing){
       $("#banner").textContent = "memory deleted: " + (st.db_path || "unknown path");
       setState("scatter");
+    } else if(S.offline){
+      $("#banner").textContent = "agent offline: the operator's machine is not reachable right now";
     }
 
     var dot = $("#dbDot");
     dot.className = "dot " + (S.missing ? "off" : (st.db_exists ? "on" : (S.connected ? "off" : "")));
-    $("#dbPath").textContent = st.db_path || (S.connected ? "no path reported" : "api unreachable");
+    $("#dbPath").textContent = S.offline ? "agent offline" : (st.db_path || (S.connected ? "no path reported" : "api unreachable"));
 
     var ex = st.explorer || "https://sepolia.basescan.org";
     var chain = '<span>Base Sepolia</span>';
@@ -615,6 +638,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 
   function payControls(job, inv){
     var st = S.status || {};
+    if(S.offline) return '<div class="actions"><span class="wait">agent offline: payments are held until the operator\'s machine is back</span></div>';
     var mineJob = (P.jobId === job.job_id && P.step === inv.step);
     var line = mineJob && P.status ? P.status : "";
     var link = (mineJob && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (mineJob && P.tx ? ' ' + cp(P.tx) : "");
@@ -635,6 +659,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   // same pattern as the invoice panel: Pay on Base, Simulate on the fake backend
   function outstandingControls(b, o){
     var st = S.status || {};
+    if(S.offline) return '<div class="actions"><span class="wait">agent offline: payments are held until the operator\'s machine is back</span></div>';
     var mine = (P.jobId === o.job_id && P.step === Number(o.step));
     var line = mine && P.status ? P.status : "";
     var link = (mine && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (mine && P.tx ? ' ' + cp(P.tx) : "");
@@ -886,6 +911,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     host.innerHTML = '<div class="card"><h3>new audit</h3>' +
       '<textarea class="src" id="srcText" spellcheck="false" placeholder="// paste Solidity source here, or drop a .sol file below"></textarea>' +
       '<div class="drop" id="dropZone">drop a .sol file here, or click to choose</div>' +
+      '<div class="links"><a href="https://faucet.circle.com" target="_blank" rel="noopener">get test USDC on Base Sepolia</a>' +
+      '<a id="receiptsLink" href="https://sepolia.basescan.org" target="_blank" rel="noopener">receipts contract</a></div>' +
       '<input type="file" id="srcFile" accept=".sol,text/plain" style="display:none">' +
       '<div class="actions"><button type="button" class="btn" id="submitBtn" disabled>Submit for scope (free)</button>' +
       '<span class="wait" id="auditMsg"></span></div></div>';
@@ -913,6 +940,11 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     var ta = $("#srcText"), btn = $("#submitBtn"), msg = $("#auditMsg");
     if(!ta || !btn || !msg) return;
     var text = ta.value.trim();
+    var rl = $("#receiptsLink"), stx = S.status || {};
+    if(rl && stx.receipts_address) rl.href = (stx.explorer || "https://sepolia.basescan.org") + "/address/" + stx.receipts_address;
+    if(S.offline){
+      btn.disabled = true; msg.textContent = "agent offline: submissions are held until the operator's machine is back"; msg.className = "wait"; return;
+    }
     if(S.missing){
       btn.disabled = true; msg.textContent = "the agent cannot take jobs while memory is missing"; msg.className = "wait gone-note"; return;
     }
@@ -926,7 +958,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     var ta = $("#srcText"), btn = $("#submitBtn");
     if(!ta || !btn || !W.addr || !ta.value.trim()) return;
     btn.dataset.busy = "1"; auditNote = ""; syncAuditPanel();
-    fetch("/api/jobs", { method:"POST", headers:{ "content-type":"application/json", accept:"application/json" },
+    fetch(apiUrl("/api/jobs"), { method:"POST", headers:{ "content-type":"application/json", accept:"application/json", "ngrok-skip-browser-warning":"true" },
       body: JSON.stringify({ buyer:W.addr, source:ta.value, filename:"pasted.sol" }) })
       .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
       .then(function(res){
@@ -985,8 +1017,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(P.busy) return;
     P = { jobId:jobId, step:Number(step), status:"marking paid", tx:null, busy:true };
     render();
-    fetch("/api/buyers/" + encodeURIComponent(buyer) + "/settle/" + encodeURIComponent(jobId) + "/" + encodeURIComponent(step),
-          { method:"POST", headers:{ accept:"application/json" } })
+    fetch(apiUrl("/api/buyers/" + encodeURIComponent(buyer) + "/settle/" + encodeURIComponent(jobId) + "/" + encodeURIComponent(step)),
+          { method:"POST", headers:API_HEADERS })
       .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
       .then(function(res){
         if(res.ok){ P.tx = (res.body.settled && res.body.settled.tx_hash) || null; P.status = "settled (simulated); reconciled from memory"; }
@@ -1000,7 +1032,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     var inv = job.open_invoice;
     P = { jobId:job.job_id, step:inv ? inv.step : null, status:"marking paid", tx:null, busy:true };
     render();
-    fetch("/api/jobs/" + encodeURIComponent(job.job_id) + "/pay", { method:"POST", headers:{ accept:"application/json" } })
+    fetch(apiUrl("/api/jobs/" + encodeURIComponent(job.job_id) + "/pay"), { method:"POST", headers:API_HEADERS })
       .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
       .then(function(res){
         if(res.ok){ P.tx = res.body.tx_hash || null; P.status = "paid (simulated); the worker will run the step"; }
@@ -2027,7 +2059,8 @@ import * as THREE from 'three';
   async function pollJournal(){
     if (document.hidden) return;
     try {
-      const res = await fetch('/api/journal?limit=1', { cache:'no-store' });
+      const res = await fetch(String(window.TURNSTYL_API || '').replace(/\/+$/, '') + '/api/journal?limit=1',
+                              { cache:'no-store', headers:{ 'ngrok-skip-browser-warning':'true' } });
       if (!res.ok) return;
       const body = await res.json();
       const ev = body && body.events && body.events[0];

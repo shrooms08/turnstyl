@@ -154,6 +154,41 @@ every panel says what was lost rather than showing a stale copy.
 
 ![console: a job with its four step cards and the ledger](docs/screenshots/console.png)
 
+## Buyer side
+
+The page is also where a buyer does business with the agent. Nothing here needs
+a terminal.
+
+- **Connect.** `Connect wallet` in the top bar asks the injected wallet (Rabby,
+  MetaMask) for an account and switches it to Base Sepolia, adding the network
+  if it is missing. Nothing is requested on page load; a reload reconnects
+  silently only if this tab connected before. The bar shows the address and
+  the wallet's USDC balance.
+- **Submit.** The `new audit` panel takes pasted Solidity or a dropped `.sol`
+  file. `Submit for scope (free)` posts it with the connected address; the
+  agent runs scope at once and invoices step 2. Submitting the same contract
+  again resumes the open job instead of starting another.
+- **Pay.** The open invoice shows `Pay <amount> USDC` when the connected
+  address is the job's buyer. It reads the USDC allowance, approves 100 USDC
+  once if needed, then calls `pay(memo, amount)` on the receipts contract and
+  waits for the receipt. The worker in the serving process runs the step the
+  moment the payment lands; no manual `job run`.
+- **Credit.** After two settled steps the buyer is trusted and the next step
+  runs before its invoice clears: the job shows `started on credit, invoice
+  open`, and the amount is carried on the ledger until it is paid.
+- **Your jobs.** With a wallet connected, the list filters to that address,
+  and any job or ledger that belongs to it is marked `this is you`.
+- **Without a wallet.** With `PAYMENTS=fake` the Pay button becomes `Simulate
+  payment`, which calls `POST /api/jobs/{id}/pay` and marks the invoice settled
+  the way `turnstyl pay` does, so the whole flow runs locally.
+
+Serve with the worker so paid steps run themselves:
+
+```bash
+export PAYMENTS=fake MOCK_LLM=1                          # or PAYMENTS=base, MOCK_LLM unset
+.venv/bin/turnstyl serve --with-worker --db ./data/turnstyl.db
+```
+
 ## Sample audit
 
 [docs/sample_audit.md](docs/sample_audit.md): a real four-step run against

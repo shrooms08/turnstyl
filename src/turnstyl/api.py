@@ -33,10 +33,23 @@ from . import policy
 from . import schema as S
 from .engine import Engine
 from .memory import TENANT_ID, TurnstylMemory, TurnstylStore, default_db_path
-from .payments import get_backend
+from .payments import ERC20_ABI, RECEIPTS_ABI, get_backend
 
 CHAIN_ID = 84532
 EXPLORER = "https://sepolia.basescan.org"
+
+# What the page needs to pay from the browser, served rather than hardcoded:
+# the receipts contract's pay() and Paid, and the USDC calls the flow makes.
+PAGE_RECEIPTS_ABI = [e for e in RECEIPTS_ABI if e.get("name") in ("pay", "Paid")]
+PAGE_USDC_ABI = [e for e in ERC20_ABI if e.get("name") in ("approve", "allowance", "balanceOf")] + [
+    {
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
@@ -154,6 +167,9 @@ def api_status() -> dict[str, Any]:
         "chain_id": CHAIN_ID,
         "explorer": EXPLORER,
         "payments_backend": (os.environ.get("PAYMENTS") or "fake").strip().lower(),
+        "usdc_address": os.environ.get("USDC_ADDRESS"),
+        "receipts_abi": PAGE_RECEIPTS_ABI,
+        "usdc_abi": PAGE_USDC_ABI,
         "memory_missing": not exists,
     }
 
@@ -436,6 +452,43 @@ def api_create_job(body: NewJobRequest) -> dict[str, Any]:
     detail = job_detail(store, outcome.job_id)
     detail["resumed"] = bool(outcome.resumed)
     detail["decision"] = outcome.decision
+    return detail
+
+
+@app.post("/api/jobs/{job_id}/pay")
+def api_simulate_pay(job_id: str) -> dict[str, Any]:
+    """Mark the job's open invoice paid. Fake backend only.
+
+    The same thing `turnstyl pay` does, so the browser flow can be exercised
+    end to end without a wallet. On the Base backend a payment is a Paid log on
+    the receipts contract and nothing else counts, so this answers 404 there.
+    """
+    backend = (os.environ.get("PAYMENTS") or "fake").strip().lower()
+    if backend != "fake":
+        raise HTTPException(
+            status_code=404, detail="payments are on chain; use the Pay button"
+        )
+    if not db_path().is_file():
+        raise HTTPException(
+            status_code=409, detail="memory file missing; the agent cannot take payments"
+        )
+    store = TurnstylStore(TurnstylMemory(db_path()))
+    state = store.get_job_state(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    invoice = state.open_invoice
+    if invoice is None or invoice.paid:
+        raise HTTPException(
+            status_code=400,
+            detail="this job has no open invoice to pay"
+            + (" (the current one is already settled)" if invoice else ""),
+        )
+    engine = Engine(store=store, payments=get_backend(store.memory))
+    tx_hash = engine.pay(job_id, invoice.step)
+    detail = job_detail(store, job_id)
+    detail["paid_step"] = invoice.step
+    detail["tx_hash"] = tx_hash
+    detail["simulated"] = True
     return detail
 
 

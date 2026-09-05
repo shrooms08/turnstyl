@@ -201,6 +201,28 @@ if [ -n "$FIRST_JOB" ]; then
 else
   bad "API returns all four steps with prices" "no job in the store to test against"
 fi
+# buyer flow
+has "ethers v6 loaded from cdnjs"     "ethers/6.13.2/ethers.umd.min.js"
+has "connect wallet button"           'id="connectBtn"'
+has "switches to Base Sepolia"        "wallet_switchEthereumChain"
+has "adds Base Sepolia on 4902"       "wallet_addEthereumChain"
+has "Base Sepolia chain id 0x14a34"   'BASE_CHAIN = "0x14a34"'
+has "silent reconnect via eth_accounts" 'eth("eth_accounts")'
+has "nothing requested on load"       'sessionStorage.getItem("wasConnected") === "1"'
+has "new audit panel"                 'id="auditPanel"'
+has "POST /api/jobs from the page"    'fetch("/api/jobs", { method:"POST"'
+has "pay: allowance first"            ".allowance(W.addr, st.receipts_address)"
+has "pay: approve when short"         ".approve(st.receipts_address"
+has "pay: then pay(memo, units)"      ".pay(inv.memo, units)"
+has "user rejection reads cancelled"  'return "cancelled"'
+has "Simulate payment on fake backend" "Simulate payment"
+has "simulate calls POST /api/jobs/{id}/pay" '"/pay"'
+has "your jobs filter"                '"/api/jobs?buyer=" + encodeURIComponent(W.addr)'
+has "this is you pill"                "this is you"
+has "memory-missing disables submit"  "cannot take jobs while memory is missing"
+for k in usdc_address receipts_abi usdc_abi; do
+  if grep -q "\"$k\"" "$STATUS"; then ok "status carries $k"; else bad "status carries $k" "no \"$k\" in /api/status"; fi
+done
 JCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/journal?limit=1" 2>/dev/null)
 [ "$JCODE" = "200" ] && ok "GET /api/journal?limit=1 returns 200 (pulse source)" \
   || bad "GET /api/journal?limit=1 returns 200" "HTTP ${JCODE:-no response}"

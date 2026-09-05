@@ -202,6 +202,21 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   .blip{animation:none}
 }
 
+/* ── buyer flow: same language as the console ───────────────────── */
+.btn{background:none;border:1px solid rgba(226,176,74,.4);color:var(--gold);font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;padding:5px 9px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--gold);color:#000}
+.btn.quiet{border-color:var(--line-2);color:var(--dim)}
+.btn.quiet:hover{background:none;color:var(--gold);border-color:var(--gold)}
+.btn:disabled,.btn:disabled:hover{opacity:.45;cursor:not-allowed;background:none;color:var(--dim);border-color:var(--line-2)}
+.wallet{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.wallet .bal{color:var(--gold);font-variant-numeric:tabular-nums}
+.src{width:100%;display:block;background:#050505;border:1px solid var(--line);color:#CFCAC2;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;padding:14px 16px;resize:vertical;min-height:180px;outline:none}
+.src:focus{border-color:var(--line-2)}
+.drop{margin-top:10px;border:1px dashed var(--line-2);padding:12px 14px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;text-align:center}
+.drop.over{border-color:var(--gold);color:var(--gold)}
+.actions{margin-top:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.actions .wait{margin-top:0}
+
 /* ── part 6: display type ───────────────────────────────────────── */
 .hero h1{font-size:clamp(64px,8.5vw,132px);line-height:1.02}
 .story h2{font-size:clamp(48px,5.5vw,84px)}
@@ -228,6 +243,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   <div class="status" id="statusCluster">
     <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
     <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
+    <div class="row wallet" id="walletRow"></div>
   </div>
 </div>
 
@@ -283,6 +299,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       <h2 id="consoleTitle">Operator console</h2>
       <div class="meta" id="consoleMeta">polling every 3s</div>
     </div>
+    <div id="auditPanel"></div>
     <div id="consoleBody">
       <div class="card"><div class="empty">connecting to memory…</div></div>
     </div>
@@ -299,6 +316,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
 <script>
 (function(){
   "use strict";
@@ -375,8 +393,18 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   var S = {
     status:null, jobs:null, job:null, buyer:null, journal:null,
     missing:false, connected:false, jobId:null,
-    openStep:null, openMem:{}, memTouched:{}
+    openStep:null, openMem:{}, memTouched:{}, mine:false
   };
+  // wallet: nothing is requested on load except a silent eth_accounts when
+  // this tab connected before (sessionStorage "wasConnected")
+  var W = { available:false, addr:null, chainId:null, balance:null, busy:false, err:null };
+  // the in-flight payment, rendered from state so the 3s re-render never
+  // wipes a status line mid-transaction
+  var P = { jobId:null, step:null, status:null, tx:null, busy:false };
+  var BASE_CHAIN = "0x14a34";
+  var BASE_SEPOLIA = { chainId:BASE_CHAIN, chainName:"Base Sepolia", rpcUrls:["https://sepolia.base.org"],
+                       nativeCurrency:{ name:"Ether", symbol:"ETH", decimals:18 },
+                       blockExplorerUrls:["https://sepolia.basescan.org"] };
 
   function jobParam(){
     var m = /[?&]job=([^&#]+)/.exec(location.search);
@@ -392,7 +420,8 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
   function poll(){
     var id = S.jobId;
-    var calls = [ api("/api/status"), api("/api/jobs"), api("/api/journal?limit=50") ];
+    var jobsUrl = (S.mine && W.addr) ? "/api/jobs?buyer=" + encodeURIComponent(W.addr) : "/api/jobs";
+    var calls = [ api("/api/status"), api(jobsUrl), api("/api/journal?limit=50") ];
     calls.push(id ? api("/api/jobs/"+encodeURIComponent(id)) : Promise.resolve(null));
     calls.push(id ? api("/api/journal?job="+encodeURIComponent(id)+"&limit=50") : Promise.resolve(null));
     return Promise.all(calls).then(function(r){
@@ -421,7 +450,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       }
       if(!id || missing) S.buyer = null;
       render();
-    });
+    }).then(function(){ if(W.addr) refreshBalance(); });
   }
 
   /* ── record count ──────────────────────────────────────────────── */
@@ -547,6 +576,37 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       "<pre>"+esc(step.output || "no output recorded for this step")+"</pre></div>";
   }
 
+  function isYou(addr){ return !!(W.addr && addr && W.addr.toLowerCase() === String(addr).toLowerCase()); }
+  function youPill(addr){ return isYou(addr) ? ' <span class="pill gold">this is you</span>' : ""; }
+
+  // a step that ran before its invoice cleared: the buyer had credit
+  function creditNote(job){
+    var open = fourSteps(job).filter(function(s){ return s.status === "done" && !s.paid && Number(s.price_usdc) > 0; });
+    if(!open.length) return "";
+    return open.map(function(s){
+      return '<div class="wait"><span class="blip"></span>step '+esc(s.step)+' started on credit, invoice open ('+usdc(s.price_usdc)+' USDC)</div>';
+    }).join("");
+  }
+
+  function payControls(job, inv){
+    var st = S.status || {};
+    var mineJob = (P.jobId === job.job_id && P.step === inv.step);
+    var line = mineJob && P.status ? P.status : "";
+    var link = (mineJob && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (mineJob && P.tx ? ' ' + cp(P.tx) : "");
+    var status = line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "";
+    if(st.payments_backend === "fake"){
+      return '<div class="actions"><button type="button" class="btn" id="simPayBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Simulate payment</button>' +
+        '<span class="wait">fake backend: no wallet involved</span>' + status + '</div>';
+    }
+    if(!W.addr)
+      return '<div class="actions"><span class="wait">connect as '+esc(trunc(job.buyer))+' to pay</span></div>';
+    if(!isYou(job.buyer))
+      return '<div class="actions"><span class="wait">connect as '+esc(trunc(job.buyer))+' to pay (you are '+esc(trunc(W.addr))+')</span></div>';
+    if(W.chainId && W.chainId !== BASE_CHAIN)
+      return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
+    return '<div class="actions"><button type="button" class="btn" id="payBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Pay '+usdc(inv.amount_usdc)+' USDC</button>' + status + '</div>';
+  }
+
   function invoicePanel(job){
     var inv = job.open_invoice;
     if(!inv || inv.paid) return "";
@@ -557,6 +617,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
         '<div><div class="k">memo</div><div class="v">'+cp(inv.memo)+'</div></div>' +
         '<div><div class="k">invoice block</div><div class="v">'+esc(inv.invoice_block==null?"—":inv.invoice_block)+'</div></div>' +
       '</div>' +
+      payControls(job, inv) +
       '<div class="cmd"><code>'+esc(cmd)+'</code><button type="button" data-copy="'+esc(cmd)+'">copy</button></div>' +
       '<div class="wait"><span class="blip"></span>waiting for payment on Base</div></div>';
   }
@@ -606,6 +667,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
     }).join("");
     return '<div class="card"><h3>buyer ledger</h3>' +
       '<div class="kv">' +
+        cell("buyer", cp(b.buyer) + youPill(b.buyer)) +
         cell("trust tier", trustPill(L.trust_tier || T.trust_tier)) +
         cell("paid steps", esc(L.paid_steps==null?"—":L.paid_steps)) +
         cell("usdc paid", usdc(L.paid_usdc)) +
@@ -631,12 +693,12 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
     var head = '<div class="card"><div class="kv">' +
       '<div><div class="k">job id</div><div class="v big">'+cp(job.job_id)+'</div></div>' +
-      '<div><div class="k">buyer</div><div class="v">'+cp(job.buyer)+'</div></div>' +
+      '<div><div class="k">buyer</div><div class="v">'+cp(job.buyer)+youPill(job.buyer)+'</div></div>' +
       '<div><div class="k">contract hash</div><div class="v">'+cp(job.contract_hash)+'</div></div>' +
       '<div><div class="k">status</div><div class="v">'+statusPill(job.status)+'</div></div>' +
       '<div><div class="k">current step</div><div class="v">'+esc(job.current_step==null?"—":job.current_step)+' of 4</div></div>' +
       (job.archived ? '<div><div class="k">source</div><div class="v muted">archived, read-only</div></div>' : "") +
-      "</div></div>";
+      "</div>" + creditNote(job) + "</div>";
 
     var steps = '<div class="card"><h3>metered steps</h3><div class="steps">' +
       fourSteps(job).map(function(s){ return stepCard(s, job); }).join("") +
@@ -651,7 +713,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
     var d = S.jobs;
     if(!d) return '<div class="card"><div class="empty">connecting to memory…</div></div>';
     var jobs = d.jobs || [];
-    if(!jobs.length) return '<div class="card"><h3>jobs</h3><div class="empty">no jobs in memory</div></div>';
+    if(!jobs.length) return '<div class="card"><h3>'+(S.mine ? "your jobs" : "jobs")+'</h3>' + mineToggle() + '<div class="empty">'+(S.mine ? "no jobs for this wallet yet" : "no jobs in memory")+'</div></div>';
     var rows = jobs.map(function(j){
       return "<tr>" +
         '<td><a href="?job='+encodeURIComponent(j.job_id)+'#console">'+esc(j.job_id)+"</a></td>" +
@@ -662,13 +724,20 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
         '<td class="muted">'+(j.archived?"archived":"live")+"</td>" +
         "</tr>";
     }).join("");
-    return '<div class="card"><h3>jobs in memory</h3><table class="jobs">' +
+    return '<div class="card"><h3>'+(S.mine ? "your jobs" : "jobs in memory")+'</h3>' + mineToggle() + '<table class="jobs">' +
       "<thead><tr><th>job id</th><th>buyer</th><th>status</th><th>step</th><th>updated</th><th>source</th></tr></thead>" +
       "<tbody>"+rows+"</tbody></table></div>";
+  }
+  function mineToggle(){
+    if(!W.addr) return "";
+    return '<div class="actions" style="margin:0 0 16px"><button type="button" class="btn quiet" id="mineBtn">'+(S.mine ? "All jobs" : "Your jobs")+'</button>' +
+      '<span class="wait">'+(S.mine ? "filtered to " + esc(trunc(W.addr)) : "every job in memory")+'</span></div>';
   }
 
   function render(){
     renderChrome();
+    renderWallet();
+    syncAuditPanel();
     var title = $("#consoleTitle"), meta = $("#consoleMeta"), body = $("#consoleBody");
     if(S.jobId){
       title.innerHTML = 'Job <span class="mono" style="font-size:26px">'+esc(S.jobId)+"</span>";
@@ -682,8 +751,203 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
     }
   }
 
+  /* ── wallet ────────────────────────────────────────────────────── */
+  W.available = !!(window.ethereum && typeof window.ethereum.request === "function") && typeof window.ethers !== "undefined";
+  function eth(method, params){ return window.ethereum.request({ method:method, params:params || [] }); }
+  function isRejected(e){
+    if(!e) return false;
+    if(e.code === 4001 || e.code === "ACTION_REJECTED") return true;
+    var inner = e.info && e.info.error;
+    return !!(inner && inner.code === 4001);
+  }
+  function errText(e){
+    if(isRejected(e)) return "cancelled";
+    var m = (e && (e.shortMessage || e.reason || e.message)) || String(e || "failed");
+    return String(m).split("\n")[0].slice(0, 140);
+  }
+  function ensureChain(){
+    return eth("eth_chainId").then(function(id){
+      if(String(id).toLowerCase() === BASE_CHAIN) return;
+      return eth("wallet_switchEthereumChain", [{ chainId:BASE_CHAIN }]).catch(function(e){
+        var code = e && (e.code === 4902 ? 4902 : (e.data && e.data.originalError && e.data.originalError.code));
+        if(code === 4902) return eth("wallet_addEthereumChain", [BASE_SEPOLIA]);
+        throw e;
+      });
+    });
+  }
+  function provider(){ return new ethers.BrowserProvider(window.ethereum); }
+  function refreshBalance(){
+    var st = S.status;
+    if(!W.addr || !st || !st.usdc_address || !st.usdc_abi || W.chainId !== BASE_CHAIN) return Promise.resolve();
+    var c = new ethers.Contract(st.usdc_address, st.usdc_abi, provider());
+    return Promise.all([c.balanceOf(W.addr), c.decimals().catch(function(){ return 6; })]).then(function(r){
+      var dec = Number(r[1]) || 6;
+      W.balance = Number(r[0]) / Math.pow(10, dec);
+      renderWallet();
+    }).catch(function(){ W.balance = null; renderWallet(); });
+  }
+  function readWallet(silent){
+    // accounts already granted (no prompt) + current chain
+    return Promise.all([eth("eth_accounts"), eth("eth_chainId")]).then(function(r){
+      W.addr = (r[0] && r[0][0]) ? String(r[0][0]) : null;
+      W.chainId = r[1] ? String(r[1]).toLowerCase() : null;
+      W.err = null;
+      renderWallet();
+      return refreshBalance();
+    }).catch(function(e){ if(!silent) W.err = errText(e); renderWallet(); });
+  }
+  function connectWallet(){
+    if(!W.available || W.busy) return;
+    W.busy = true; W.err = null; renderWallet();
+    eth("eth_requestAccounts").then(function(){ return ensureChain(); })
+      .then(function(){ try{ sessionStorage.setItem("wasConnected","1"); }catch(_){} return readWallet(false); })
+      .catch(function(e){ W.err = errText(e); })
+      .then(function(){ W.busy = false; renderWallet(); render(); });
+  }
+  function renderWallet(){
+    var row = $("#walletRow");
+    if(!row) return;
+    if(!W.available){
+      var why = typeof window.ethers === "undefined" ? "the ethers library did not load" : "no injected wallet (window.ethereum) was found; install Rabby or MetaMask and reload";
+      row.innerHTML = '<button type="button" class="btn quiet" disabled title="'+esc(why)+'">No wallet found</button>';
+      return;
+    }
+    if(!W.addr){
+      row.innerHTML = '<button type="button" class="btn" id="connectBtn"'+(W.busy ? " disabled" : "")+'>'+(W.busy ? "Connecting…" : "Connect wallet")+'</button>' +
+        (W.err ? '<span class="muted">'+esc(W.err)+'</span>' : "");
+      return;
+    }
+    var wrong = W.chainId && W.chainId !== BASE_CHAIN;
+    row.innerHTML = cp(W.addr) +
+      (wrong ? '<button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>'
+             : '<span class="bal">'+(W.balance == null ? "—" : usdc(W.balance))+' USDC</span>') +
+      (W.err ? '<span class="muted">'+esc(W.err)+'</span>' : "");
+  }
+  if(W.available && typeof window.ethereum.on === "function"){
+    window.ethereum.on("accountsChanged", function(){ P = { jobId:null, step:null, status:null, tx:null, busy:false }; readWallet(true).then(render); });
+    window.ethereum.on("chainChanged", function(){ readWallet(true).then(render); });
+  }
+
+  /* ── new audit: built once, synced on every render ──────────────── */
+  function buildAuditPanel(){
+    var host = $("#auditPanel");
+    if(!host || host.firstChild) return;
+    host.innerHTML = '<div class="card"><h3>new audit</h3>' +
+      '<textarea class="src" id="srcText" spellcheck="false" placeholder="// paste Solidity source here, or drop a .sol file below"></textarea>' +
+      '<div class="drop" id="dropZone">drop a .sol file here, or click to choose</div>' +
+      '<input type="file" id="srcFile" accept=".sol,text/plain" style="display:none">' +
+      '<div class="actions"><button type="button" class="btn" id="submitBtn" disabled>Submit for scope (free)</button>' +
+      '<span class="wait" id="auditMsg"></span></div></div>';
+    var ta = $("#srcText"), dz = $("#dropZone"), fi = $("#srcFile");
+    function fill(file){
+      if(!file) return;
+      var rd = new FileReader();
+      rd.onload = function(){ ta.value = String(rd.result || ""); syncAuditPanel(); };
+      rd.readAsText(file);
+    }
+    ta.addEventListener("input", syncAuditPanel);
+    dz.addEventListener("click", function(){ fi.click(); });
+    fi.addEventListener("change", function(){ fill(fi.files && fi.files[0]); fi.value = ""; });
+    ["dragenter","dragover"].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.add("over"); }); });
+    ["dragleave","drop"].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.remove("over"); }); });
+    dz.addEventListener("drop", function(e){ var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; fill(f); });
+  }
+  var auditNote = "";
+  function syncAuditPanel(){
+    var host = $("#auditPanel");
+    if(!host) return;
+    if(S.jobId){ host.style.display = "none"; return; }
+    host.style.display = "";
+    buildAuditPanel();
+    var ta = $("#srcText"), btn = $("#submitBtn"), msg = $("#auditMsg");
+    if(!ta || !btn || !msg) return;
+    var text = ta.value.trim();
+    if(S.missing){
+      btn.disabled = true; msg.textContent = "the agent cannot take jobs while memory is missing"; msg.className = "wait gone-note"; return;
+    }
+    msg.className = "wait";
+    if(btn.dataset.busy === "1"){ btn.disabled = true; msg.textContent = "submitting… scope runs now, free"; return; }
+    if(!W.addr){ btn.disabled = true; msg.textContent = W.available ? "connect a wallet to submit" : "no wallet found"; return; }
+    btn.disabled = !text;
+    msg.textContent = auditNote || (text ? "scope is free; step 2 is invoiced at " + usdc(BASE_PRICES[2]) + " USDC" : "paste or drop a contract");
+  }
+  function submitAudit(){
+    var ta = $("#srcText"), btn = $("#submitBtn");
+    if(!ta || !btn || !W.addr || !ta.value.trim()) return;
+    btn.dataset.busy = "1"; auditNote = ""; syncAuditPanel();
+    fetch("/api/jobs", { method:"POST", headers:{ "content-type":"application/json", accept:"application/json" },
+      body: JSON.stringify({ buyer:W.addr, source:ta.value, filename:"pasted.sol" }) })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        btn.dataset.busy = "";
+        if(res.ok && res.body && res.body.job_id){
+          if(res.body.resumed){ try{ sessionStorage.setItem("turnstylNote", "resumed the open job for this contract; nothing was re-run"); }catch(_){} }
+          location.href = "?job=" + encodeURIComponent(res.body.job_id) + "#console";
+          return;
+        }
+        auditNote = "error " + res.status + ": " + ((res.body && res.body.detail) ? (typeof res.body.detail === "string" ? res.body.detail : JSON.stringify(res.body.detail)) : "request failed");
+        syncAuditPanel();
+      })
+      .catch(function(e){ btn.dataset.busy = ""; auditNote = "error: " + errText(e); syncAuditPanel(); });
+  }
+
+  /* ── pay: allowance, approve if short, pay, wait ─────────────────── */
+  function payInvoice(job){
+    var inv = job && job.open_invoice, st = S.status;
+    if(!inv || !st || !W.addr || P.busy) return;
+    P = { jobId:job.job_id, step:inv.step, status:"checking allowance", tx:null, busy:true };
+    render();
+    var units = BigInt(Math.round(Number(inv.amount_usdc) * 1e6));
+    if(!/^0x[0-9a-fA-F]{64}$/.test(String(inv.memo || ""))){
+      P.status = "this invoice has no on-chain memo (fake backend?)"; P.busy = false; render(); return;
+    }
+    if(!st.usdc_address || !st.receipts_address){
+      P.status = "server did not report the USDC or receipts address"; P.busy = false; render(); return;
+    }
+    provider().getSigner().then(function(signer){
+      var usdcC = new ethers.Contract(st.usdc_address, st.usdc_abi, signer);
+      var rc = new ethers.Contract(st.receipts_address, st.receipts_abi, signer);
+      return usdcC.allowance(W.addr, st.receipts_address).then(function(al){
+        if(BigInt(al) >= units) return;
+        P.status = "approving 100 USDC once"; render();
+        return usdcC.approve(st.receipts_address, BigInt(100) * BigInt(1000000)).then(function(tx){ return tx.wait(); });
+      }).then(function(){
+        P.status = "paying"; render();
+        return rc.pay(inv.memo, units);
+      }).then(function(tx){
+        P.tx = tx.hash; P.status = "confirming"; render();
+        return tx.wait();
+      }).then(function(){
+        P.status = "confirmed; the agent will run the step"; P.busy = false; render();
+        refreshBalance();
+      });
+    }).catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+  function simulatePay(job){
+    if(!job || P.busy) return;
+    var inv = job.open_invoice;
+    P = { jobId:job.job_id, step:inv ? inv.step : null, status:"marking paid", tx:null, busy:true };
+    render();
+    fetch("/api/jobs/" + encodeURIComponent(job.job_id) + "/pay", { method:"POST", headers:{ accept:"application/json" } })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        if(res.ok){ P.tx = res.body.tx_hash || null; P.status = "paid (simulated); the worker will run the step"; }
+        else P.status = "error " + res.status + ": " + ((res.body && res.body.detail) || "request failed");
+        P.busy = false; render();
+      })
+      .catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+
   /* ── interactions ──────────────────────────────────────────────── */
   document.addEventListener("click", function(e){
+    var t = e.target;
+    var hit = function(id){ return t.closest && t.closest("#" + id); };
+    if(hit("connectBtn")){ connectWallet(); return; }
+    if(hit("switchChainBtn")){ ensureChain().then(function(){ return readWallet(true); }).then(render).catch(function(err){ W.err = errText(err); renderWallet(); }); return; }
+    if(hit("submitBtn")){ submitAudit(); return; }
+    if(hit("payBtn")){ payInvoice(S.job); return; }
+    if(hit("simPayBtn")){ simulatePay(S.job); return; }
+    if(hit("mineBtn")){ S.mine = !S.mine; S.jobs = null; render(); poll(); return; }
     var stepBtn = e.target.closest && e.target.closest(".step");
     var copyEl = e.target.closest && e.target.closest("[data-copy]");
     if(copyEl){
@@ -788,7 +1052,15 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   setTimeout(hideLoader, 5200);
 
   S.jobId = jobParam();
+  try{
+    var note = sessionStorage.getItem("turnstylNote");
+    if(note && S.jobId){ sessionStorage.removeItem("turnstylNote"); auditNote = note; }
+  }catch(_){}
   render();
+  // reconnect without a prompt only if this tab connected before
+  try{
+    if(W.available && sessionStorage.getItem("wasConnected") === "1") readWallet(true).then(render);
+  }catch(_){}
   setInterval(poll, 3000);
   pickState();
 })();

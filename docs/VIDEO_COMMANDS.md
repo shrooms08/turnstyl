@@ -1,7 +1,9 @@
 # turnstyl demo — command script
 
-Two terminals, side by side. **LEFT is the agent**, **RIGHT is the buyer**. The
-agent never holds the buyer's key and the buyer never touches the agent's store.
+Two ways to play the buyer. **The browser is the primary path**: the buyer
+connects a wallet on the turnstyl page, submits the contract, and pays each
+invoice with a signature. The terminal scripts below are the fallback for a take
+without a wallet extension, and they produce the same on-chain receipts.
 
 Run once, before recording:
 
@@ -9,7 +11,73 @@ Run once, before recording:
 scripts/video_prep.sh
 ```
 
-Then in **both** terminals:
+The agent side is one process, with the worker in it:
+
+```bash
+cd ~/Projects/turnstyl
+export PAYMENTS=base TURNSTYL_DB=./data/video.db LLM_MODEL=claude-haiku-4-5
+unset MOCK_LLM
+.venv/bin/turnstyl serve --with-worker --db ./data/video.db
+```
+
+Open http://127.0.0.1:8787 in a browser with Rabby (or MetaMask) holding the
+buyer key, on Base Sepolia. The worker runs every step the moment its invoice
+clears, so nothing on the agent side is typed during the take.
+
+Every transaction hash shown is a real one on Base Sepolia. The explorer link
+pattern is `https://sepolia.basescan.org/tx/<hash>`, and for the contract itself
+`https://sepolia.basescan.org/address/0xD2Bb3c9741D7c26A8B161895bb91471706B17477`.
+
+---
+
+## Browser flow (primary)
+
+1. **Connect.** Top right, `Connect wallet`. Rabby asks for the account, then
+   to switch to Base Sepolia (or add it). The bar shows the truncated address and
+   the USDC balance.
+2. **Submit.** In the console, drop `examples/Vault.sol` on the `new audit`
+   panel and press `Submit for scope (free)`. The page opens the job: step 1 is
+   done and free, step 2 shows `awaiting payment` at `0.50 USDC`.
+3. **Pay step 2.** `Pay 0.50 USDC`. First time: `approving 100 USDC once`, then
+   `paying`, `confirming`, `confirmed`. Within a few seconds the worker runs
+   step 2: the findings card fills in, a `commit` link appears, and the invoice
+   panel now asks for step 3 at `0.75 USDC`.
+4. **Pay step 3.** Same button. The ledger card flips to `trusted`.
+5. **Credit.** Do nothing. Step 4 is invoiced at `0.25 USDC`, the buyer is
+   trusted, so the worker runs it unpaid: `step 4 started on credit, invoice
+   open`, and the job goes `complete`.
+6. **Repeat contract.** Back to `all jobs`, submit `Vault.sol` again. Step 1
+   is served from memory; step 2 is invoiced at `0.25 USDC` (findings cached).
+7. **Refusal.** The timeline shows `REFUSE`: the first job closed with step 4
+   unpaid. The ledger shows `defaults 1`.
+8. **Settle the debt.** Open the first job; its outstanding step 4 is listed
+   on the ledger. Pay it from the terminal fallback below (`buyer_pay.py $JOB1
+   4`), or pay any later invoice: reconciliation clears it from chain either
+   way. The second job's invoice becomes payable: `WAIT_FOR_PAYMENT` with
+   `credit returns after 4 consecutive paid steps`.
+9. **Pay the discounted step.** `Pay 0.25 USDC`. The step is served from
+   memory: `served from memory`, `0 tokens`, and still committed on chain.
+10. **Delete the memory.** In the agent terminal: `.venv/bin/turnstyl reset
+    --db ./data/video.db`. The page goes red: `memory deleted`, every panel
+    says what was lost, the `new audit` panel reads `the agent cannot take
+    jobs while memory is missing`.
+11. **The double charge.** Restart the store (`turnstyl status` creates an
+    empty one), submit `Vault.sol` again: step 2 is invoiced at `0.50 USDC`,
+    full price, to a buyer the agent now calls `new`. Pay it. Two `Paid` logs
+    from the same buyer for the same work sit on the contract; only the
+    agent's memory of the first is gone.
+
+Use `Your jobs` in the list to filter to the connected wallet, and `this is
+you` marks the buyer on any job that is yours.
+
+---
+
+## Terminal fallback
+
+Two terminals, side by side. **LEFT is the agent**, **RIGHT is the buyer**. The
+agent never holds the buyer's key and the buyer never touches the agent's store.
+
+In **both** terminals:
 
 ```bash
 cd ~/Projects/turnstyl
@@ -18,10 +86,6 @@ export TURNSTYL_WIDTH=100
 unset MOCK_LLM
 export BUYER=0x0964Dc1E37aCa77c6Df395DB7c0EeC848B1CefF8
 ```
-
-Every transaction hash printed is a real one on Base Sepolia. The explorer link
-pattern is `https://sepolia.basescan.org/tx/<hash>`, and for the contract itself
-`https://sepolia.basescan.org/address/0xD2Bb3c9741D7c26A8B161895bb91471706B17477`.
 
 Set `JOB1`, `JOB2`, `JOB3` from the job ids as they are printed —
 `.venv/bin/turnstyl job new` prints `job <id>  buyer <addr>` on its first line.

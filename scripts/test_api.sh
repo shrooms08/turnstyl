@@ -64,8 +64,9 @@ RESP2=$(curl -s -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d 
 wait_step "$JOB" 2 done && ok "worker ran step 2 after payment, no manual job run" || bad "worker ran step 2 after payment"
 [ "$(jget "/api/jobs/$JOB" | jq_ "d['open_invoice']['step']")" = "3" ] && ok "worker issued the step 3 invoice" || bad "worker issued the step 3 invoice"
 
-.venv/bin/turnstyl pay "$JOB" 3 >/dev/null 2>&1
-wait_step "$JOB" 3 done && ok "worker ran step 3 after payment" || bad "worker ran step 3 after payment"
+PR=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/jobs/$JOB/pay"); PC=$(echo "$PR" | tail -1); PB=$(echo "$PR" | sed '$d')
+[ "$PC" = "200" ] && [ "$(echo "$PB" | jq_ "d['paid_step'], d['simulated']")" = "3 True" ] && ok "POST /api/jobs/{id}/pay simulates step 3 on the fake backend" || bad "POST /api/jobs/{id}/pay simulates step 3" "got $PC: $(echo "$PB" | head -c 160)"
+wait_step "$JOB" 3 done && ok "worker ran step 3 after the simulated payment" || bad "worker ran step 3 after the simulated payment"
 [ "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']['trust_tier']")" = "trusted" ] && ok "buyer trusted after two paid steps" || bad "buyer trusted after two paid steps"
 
 # step 4: invoiced, unpaid, buyer trusted -> the worker runs it on credit
@@ -84,6 +85,22 @@ N1=$(jget "/api/journal?limit=500" | jq_ "d['count']")
 sleep 10
 N2=$(jget "/api/journal?limit=500" | jq_ "d['count']")
 [ "$N1" = "$N2" ] && ok "journal did not grow while nothing changed ($N1 -> $N2 over 10s)" || bad "journal did not grow while nothing changed" "$N1 -> $N2"
+
+# ---------------------------------------------------------------- status for the page
+[ "$(jget "/api/status" | jq_ "sorted(e['name'] for e in d['receipts_abi'])")" = "['Paid', 'pay']" ] && ok "status carries the receipts ABI (pay, Paid)" || bad "status carries the receipts ABI"
+[ "$(jget "/api/status" | jq_ "sorted(e['name'] for e in d['usdc_abi'])")" = "['allowance', 'approve', 'balanceOf', 'decimals']" ] && ok "status carries the USDC ABI" || bad "status carries the USDC ABI"
+[ "$(jget "/api/status" | jq_ "'usdc_address' in d")" = "True" ] && ok "status carries usdc_address" || bad "status carries usdc_address"
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs/$JOB/pay")
+[ "$C" = "400" ] && ok "simulate on a job with no open invoice -> 400" || bad "simulate on a job with no open invoice -> 400" "got $C"
+
+# ---------------------------------------------------------------- simulate is fake-only
+PORT2=8792
+PAYMENTS=base .venv/bin/turnstyl serve --port $PORT2 --db "$DB" > /tmp/turnstyl-test-serve-base.log 2>&1 &
+SERVER2=$!; disown $SERVER2 2>/dev/null   # so the shell does not report the kill below
+for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$PORT2/api/status" && break; sleep 0.5; done
+R2=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/jobs/$JOB2/pay"); C2=$(echo "$R2" | tail -1); B2=$(echo "$R2" | sed '$d')
+kill $SERVER2 2>/dev/null
+[ "$C2" = "404" ] && grep -q "payments are on chain; use the Pay button" <<< "$B2" && ok "PAYMENTS=base: simulate -> 404 with the on-chain detail" || bad "PAYMENTS=base: simulate -> 404" "got $C2: $(echo "$B2" | head -c 120)"
 
 # ---------------------------------------------------------------- validation
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"0xnotanaddress\",\"source\":$SRC}")

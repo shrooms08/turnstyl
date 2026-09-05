@@ -118,6 +118,37 @@ def only_job_id() -> str:
 # ----------------------------------------------------------------------
 # Beats
 # ----------------------------------------------------------------------
+def price_str(step: int, cached: bool) -> str:
+    """The invoice amount the CLI prints for a step, from the pricing rules."""
+    amount = round(S.BASE_PRICES[step] * (S.CACHED_MULTIPLIER if cached else 1.0), 2)
+    return f"amount {amount:.2f} USDC"
+
+
+def pay_and_run(job_id: str, step: int, beat: str, r: list[bool], cached: bool | None = None) -> str:
+    """Settle one step on the fake backend and run it; assert RUN_PAID."""
+    cli("pay", job_id, str(step))
+    raw, flat = cli("job", "run", job_id)
+    r.append(check(beat, f"step {step} ran as paid work", "DECISION: RUN_PAID" in flat, flat[:300]))
+    if cached is True:
+        r.append(check(beat, f"step {step} was served from memory", "from memory (cached)" in flat, flat[:300]))
+    return raw
+
+
+def complete_paid_job(beat: str, r: list[bool], expect_cached: bool) -> str:
+    """One whole job, every paid step settled: what credit is earned on."""
+    _, flat = cli("job", "new", str(CONTRACT), "--buyer", BUYER)
+    job_id = only_job_id()
+    r.append(check(beat, f"job {job_id}: step 2 invoiced at {price_str(2, expect_cached)[7:]}",
+                   price_str(2, expect_cached) in flat, flat[:500]))
+    if expect_cached:
+        r.append(check(beat, f"job {job_id}: step 1 served from memory", "from memory (cached)" in flat, flat[:400]))
+    for step in (2, 3, 4):
+        pay_and_run(job_id, step, beat, r, cached=expect_cached if step > 1 else None)
+    state = store().get_job_state(job_id)
+    r.append(check(beat, f"job {job_id} complete", state is not None and state.status == S.STATUS_COMPLETE))
+    return job_id
+
+
 def beat_a() -> str:
     print("BEAT a: new job, free step 1, invoice for step 2, then WAIT_FOR_PAYMENT")
     _, flat = cli("job", "new", str(CONTRACT), "--buyer", BUYER)
@@ -132,9 +163,13 @@ def beat_a() -> str:
                    state is not None and state.status == S.STATUS_AWAITING_PAYMENT and state.current_step == 2,
                    f"state={state}"))
     raw2, flat2 = cli("job", "run", job_id)
+    line = decision_line(raw2)
     r.append(check("a", "a following run waits for payment", "DECISION: WAIT_FOR_PAYMENT" in flat2, flat2[:300]))
+    r.append(check("a", "the reason says credit comes after 3 fully paid jobs, currently 0",
+                   "credit after 3 fully paid jobs, currently 0" in line, line))
     r.append(check("a", "nothing was executed for step 2", "STEP 2: findings" not in flat2))
     beat_result("a", "free step 1, invoiced, then blocked on payment", r)
+    notes.append(f"beat a WAIT_FOR_PAYMENT line:\n    {line}")
     return job_id
 
 
@@ -154,7 +189,7 @@ def beat_b(job_id: str) -> None:
 
 
 def beat_c(job_id: str) -> None:
-    print("BEAT c: pay step 3, run, buyer reaches paid_steps=2 and trust_tier trusted")
+    print("BEAT c: pay step 3, run; two paid steps do NOT earn credit any more")
     cli("pay", job_id, "3")
     _, flat = cli("job", "run", job_id)
     ledger = store().get_buyer(BUYER)
@@ -162,142 +197,133 @@ def beat_c(job_id: str) -> None:
         check("c", "decision is RUN_PAID", "DECISION: RUN_PAID" in flat, flat[:300]),
         check("c", "step 3 executed", "STEP 3: patch" in flat),
         check("c", "buyer has paid_steps == 2", ledger.paid_steps == 2, f"paid_steps={ledger.paid_steps}"),
-        check("c", "buyer trust_tier == trusted", ledger.trust_tier == S.TRUST_TRUSTED,
-              f"trust_tier={ledger.trust_tier}, open_invoices={ledger.open_invoices}"),
+        check("c", "buyer is still 'new' (no completed paid job yet)", ledger.trust_tier == S.TRUST_NEW,
+              f"trust_tier={ledger.trust_tier}, completed_paid_jobs={ledger.completed_paid_jobs}"),
         check("c", "paid 1.25 USDC so far", ledger.paid_usdc == 1.25, f"paid_usdc={ledger.paid_usdc}"),
     ]
-    beat_result("c", "two paid steps, buyer now trusted", r)
+    _, flat4 = cli("job", "run", job_id)
+    r.append(check("c", "step 4 waits for payment (no credit from step counts)",
+                   "DECISION: WAIT_FOR_PAYMENT" in flat4, flat4[:300]))
+    beat_result("c", "two paid steps, still no credit", r)
 
 
-def beat_d(job_id: str) -> tuple[str, dict[int, str]]:
-    print("BEAT d: RESUME. Fresh process runs step 4 on credit, steps 1-3 untouched")
+def beat_d(job_id: str) -> None:
+    print("BEAT d: RESUME. Pay step 4; a fresh process finishes the job, steps 1-3 untouched")
     before = store().get_job_entity(job_id)
     if before is None:
         raise SystemExit(f"turnstyl demo: job entity for {job_id} vanished before beat d")
     prior_sha = {int(k): v.output_sha256 for k, v in before.steps.items()}
     if sorted(prior_sha) != [1, 2, 3]:
         raise SystemExit(f"turnstyl demo: expected steps 1-3 recorded, found {sorted(prior_sha)}")
-
-    raw, flat = cli("job", "run", job_id)
-    line = decision_line(raw)
+    cli("pay", job_id, "4")
+    _, flat = cli("job", "run", job_id)
     r = [
-        check("d", "decision is RUN_ON_CREDIT", "DECISION: RUN_ON_CREDIT" in flat, flat[:300]),
-        check("d", "reason names paid_steps=2", "paid_steps=2" in line, line),
-        check("d", "step 4 executed immediately", "STEP 4: verify" in flat),
+        check("d", "step 4 ran as paid work in a fresh process", "DECISION: RUN_PAID" in flat, flat[:300]),
+        check("d", "step 4 executed", "STEP 4: verify" in flat),
         check("d", "steps 1-3 were not re-run", not any(f"STEP {n}:" in flat for n in (1, 2, 3)), flat[:300]),
     ]
-    # The job entity is archived on completion, so verify the preserved outputs
-    # through the findings entity the completion wrote.
-    state = store().get_job_state(job_id)
-    findings = store().get_findings(state.contract_hash)
-    same = {
-        step: S.sha256_text(findings.slot(step)) == prior_sha[step]
-        for step in (1, 2, 3)
-    }
-    r.append(check("d", "steps 1-3 sha256 unchanged", all(same.values()), f"{same}"))
-    beat_result("d", "resumed on credit without redoing paid work", r)
-    notes.append(f"beat d DECISION line:\n    {line}")
-    return line, prior_sha
-
-
-def beat_e(job_id: str) -> None:
-    print("BEAT e: COMPLETE. findings cached, job entity archived, ledger settled")
     st = store()
     state = st.get_job_state(job_id)
     findings = st.get_findings(state.contract_hash)
+    same = {step: S.sha256_text(findings.slot(step)) == prior_sha[step] for step in (1, 2, 3)}
     ledger = st.get_buyer(BUYER)
-    outstanding = [o for o in ledger.outstanding if o.job_id == job_id]
-    r = [
-        check("e", "job status is complete", state.status == S.STATUS_COMPLETE, f"status={state.status}"),
-        check("e", "findings entity exists for the contract hash", st.findings_exist(state.contract_hash)),
-        check("e", "findings holds all four outputs",
-              all(findings.slot(n) for n in S.ALL_STEPS),
-              f"{[n for n in S.ALL_STEPS if not findings.slot(n)]} missing"),
-        check("e", "job entity archived", st.get_job_entity(job_id) is None),
-        check("e", "job removed from active_jobs", job_id not in st.get_active_jobs()),
-        # Defined: the buyer has 2 PAID steps plus 1 OPEN invoice for step 4,
-        # because step 4 was delivered on credit and never settled.
-        check("e", "ledger shows 2 paid steps", ledger.paid_steps == 2, f"paid_steps={ledger.paid_steps}"),
-        check("e", "ledger shows exactly 1 outstanding invoice, for step 4 at 0.25 USDC",
-              len(outstanding) == 1 and outstanding[0].step == 4 and outstanding[0].amount_usdc == 0.25,
-              f"outstanding={[o.model_dump() for o in outstanding]}"),
-        check("e", "the unpaid step 4 is carried as prior-job debt",
-              ledger.unpaid_from_prior_jobs == 1, f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}"),
-    ]
-    beat_result("e", "job complete, findings cached, one invoice outstanding", r)
+    r.append(check("d", "steps 1-3 sha256 unchanged", all(same.values()), f"{same}"))
+    r.append(check("d", "job complete, entity archived, findings cached",
+                   state.status == S.STATUS_COMPLETE and st.get_job_entity(job_id) is None
+                   and all(findings.slot(n) for n in S.ALL_STEPS)))
+    r.append(check("d", "first fully paid job counted: completed_paid_jobs == 1",
+                   ledger.completed_paid_jobs == 1, f"completed_paid_jobs={ledger.completed_paid_jobs}"))
+    r.append(check("d", "nothing outstanding, trust still new",
+                   not ledger.outstanding and ledger.trust_tier == S.TRUST_NEW,
+                   f"outstanding={len(ledger.outstanding)}, trust_tier={ledger.trust_tier}"))
+    beat_result("d", "resumed and finished as paid work, one job on the record", r)
 
 
-def beat_f(first_job: str) -> None:
-    print("BEAT f: REPEAT CONTRACT. Same contract, same buyer, step 2 priced from memory")
+def beat_e() -> list[str]:
+    print("BEAT e: HISTORY. Two more fully paid jobs, served from memory at half price")
+    r: list[bool] = []
+    jobs = []
+    for n in (2, 3):
+        jobs.append(complete_paid_job("e", r, expect_cached=True))
+        ledger = store().get_buyer(BUYER)
+        r.append(check("e", f"after job {n}: completed_paid_jobs == {n}", ledger.completed_paid_jobs == n,
+                       f"completed_paid_jobs={ledger.completed_paid_jobs}"))
+        want = S.TRUST_TRUSTED if n >= 3 else S.TRUST_NEW
+        r.append(check("e", f"after job {n}: trust_tier {want}", ledger.trust_tier == want,
+                       f"trust_tier={ledger.trust_tier}"))
+    beat_result("e", "three fully paid jobs, buyer now trusted", r)
+    return jobs
+
+
+def beat_f() -> tuple[str, str]:
+    print("BEAT f: CREDIT. Fourth job: step 2 runs before its invoice clears")
     _, flat = cli("job", "new", str(CONTRACT), "--buyer", BUYER)
-    new_job = only_job_id()
-    r = [
-        check("f", "a new job was created", new_job != first_job, f"new={new_job} first={first_job}"),
-        check("f", "step 2 is priced at 0.25 USDC (50% of 0.50)",
-              "step 2 (findings)" in flat and "amount 0.25 USDC" in flat, flat[:500]),
-        check("f", "the price reason says the findings are cached",
-              "findings cached for this contract hash" in flat, flat[:600]),
-        check("f", "step 1 was served from memory", "from memory (cached)" in flat, flat[:400]),
-    ]
-    beat_result("f", "repeat contract served from memory at half price", r)
-
-
-def beat_g(first_job: str, second_job: str) -> str:
-    """A buyer with a default pays its way back to credit."""
-    print("BEAT g: EARN-BACK. One default, four clean paid steps, credit returns")
-    before = store().get_buyer(BUYER)
-    r = [
-        check("g", "buyer starts this beat with a default on record",
-              before.defaults == 1, f"defaults={before.defaults}"),
-        check("g", "the earn-back clock starts at 0",
-              before.consecutive_paid_since_default == 0,
-              f"consecutive={before.consecutive_paid_since_default}"),
-    ]
-
-    # 1 of 4: settle the debt from the closed job; reconcile picks it up.
-    cli("pay", first_job, "4")
-    _, flat = cli("job", "run", second_job)
-    ledger = store().get_buyer(BUYER)
-    r.append(check("g", "settling the old debt clears unpaid_from_prior_jobs",
-                   ledger.unpaid_from_prior_jobs == 0,
-                   f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}"))
-    r.append(check("g", "the debt payment counts as clean paid step 1 of 4",
-                   ledger.consecutive_paid_since_default == 1,
-                   f"consecutive={ledger.consecutive_paid_since_default}"))
-    r.append(check("g", "credit has not returned yet",
-                   "DECISION: WAIT_FOR_PAYMENT" in flat, flat[:300]))
-    r.append(check("g", "the reason says how many clean steps are still needed",
-                   "credit returns after 4 consecutive paid steps, currently 1" in flat,
-                   flat[:700]))
-
-    # 2, 3 and 4 of 4: pay every remaining step of the second job.
-    for step in (2, 3, 4):
-        cli("pay", second_job, str(step))
-        _, flat = cli("job", "run", second_job)
-        r.append(check("g", f"step {step} of the second job ran as paid work",
-                       "DECISION: RUN_PAID" in flat, flat[:300]))
-    ledger = store().get_buyer(BUYER)
-    r.append(check("g", "four consecutive paid steps are on record",
-                   ledger.consecutive_paid_since_default == 4,
-                   f"consecutive={ledger.consecutive_paid_since_default}"))
-    r.append(check("g", "the buyer is trusted again despite the default",
-                   ledger.trust_tier == S.TRUST_TRUSTED,
-                   f"trust_tier={ledger.trust_tier}, defaults={ledger.defaults}"))
-    r.append(check("g", "the default itself is still on the record",
-                   ledger.defaults == 1, f"defaults={ledger.defaults}"))
-
-    # The next unpaid step should now run on credit.
-    cli("job", "new", str(CONTRACT), "--buyer", BUYER)
-    third_job = only_job_id()
-    raw, flat = cli("job", "run", third_job)
+    job_id = only_job_id()
+    raw, flat2 = cli("job", "run", job_id)
     line = decision_line(raw)
-    r.append(check("g", "the next unpaid step runs on credit",
-                   "DECISION: RUN_ON_CREDIT" in flat, flat[:400]))
-    r.append(check("g", "the reason names consecutive_paid_since_default=4",
-                   "consecutive_paid_since_default=4" in line, line))
-    beat_result("g", "one default worked off, credit restored", r)
-    notes.append(f"beat g DECISION line:\n    {line}")
-    return third_job
+    r = [
+        check("f", "step 1 served from memory", "from memory (cached)" in flat, flat[:400]),
+        check("f", "step 2 runs on credit", "DECISION: RUN_ON_CREDIT" in flat2, flat2[:400]),
+        check("f", "the reason names completed_paid_jobs=3 >= 3", "completed_paid_jobs=3 >= 3" in line, line),
+        check("f", "step 2 executed", "STEP 2: findings" in flat2),
+    ]
+    ledger = store().get_buyer(BUYER)
+    r.append(check("f", "the credit step is carried as open_invoices == 1", ledger.open_invoices == 1,
+                   f"open_invoices={ledger.open_invoices}"))
+    _, flat3 = cli("job", "run", job_id)
+    r.append(check("f", "step 3 waits: nothing more on credit while one step is owed",
+                   "DECISION: WAIT_FOR_PAYMENT" in flat3, flat3[:300]))
+    for step in (3, 4):
+        pay_and_run(job_id, step, "f", r)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("f", "job closed with step 2 unpaid: defaults == 1, unpaid_from_prior_jobs == 1",
+                   ledger.defaults == 1 and ledger.unpaid_from_prior_jobs == 1,
+                   f"defaults={ledger.defaults}, unpaid={ledger.unpaid_from_prior_jobs}"))
+    r.append(check("f", "a job closed with a debt is not a completed paid job (still 3)",
+                   ledger.completed_paid_jobs == 3, f"completed_paid_jobs={ledger.completed_paid_jobs}"))
+    beat_result("f", "credit extended on three paid jobs, then one default", r)
+    notes.append(f"beat f RUN_ON_CREDIT line:\n    {line}")
+    return job_id, line
+
+
+def beat_g(credit_job: str) -> str:
+    """Refuse, then a buyer with a default pays its way back to credit."""
+    print("BEAT g: REFUSE and EARN-BACK. Debt refused, settled, four clean paid steps, credit returns")
+    r: list[bool] = []
+    cli("job", "new", str(CONTRACT), "--buyer", BUYER)
+    fifth = only_job_id()
+    _, flat = cli("job", "run", fifth)
+    r.append(check("g", "step 2 of the next job is refused", "DECISION: REFUSE" in flat, flat[:300]))
+    r.append(check("g", "the reason names the unpaid prior step", "unpaid on a completed job" in flat, flat[:400]))
+
+    cli("pay", credit_job, "2")                       # settle the debt on the closed job
+    raw, flat = cli("job", "run", fifth)
+    line_wait = decision_line(raw)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("g", "settling the old debt clears unpaid_from_prior_jobs", ledger.unpaid_from_prior_jobs == 0,
+                   f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}"))
+    r.append(check("g", "the debt payment counts as clean paid step 1 of 4", ledger.consecutive_paid_since_default == 1,
+                   f"consecutive={ledger.consecutive_paid_since_default}"))
+    r.append(check("g", "credit has not returned yet", "DECISION: WAIT_FOR_PAYMENT" in flat, flat[:300]))
+    r.append(check("g", "the reason says how many clean steps are still needed",
+                   "credit returns after 4 consecutive paid steps, currently 1" in line_wait, line_wait))
+    for step in (2, 3, 4):
+        pay_and_run(fifth, step, "g", r, cached=True if step == 2 else None)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("g", "four consecutive paid steps on record", ledger.consecutive_paid_since_default == 4,
+                   f"consecutive={ledger.consecutive_paid_since_default}"))
+    r.append(check("g", "trusted again despite the default", ledger.trust_tier == S.TRUST_TRUSTED,
+                   f"trust_tier={ledger.trust_tier}, defaults={ledger.defaults}, completed_paid_jobs={ledger.completed_paid_jobs}"))
+    cli("job", "new", str(CONTRACT), "--buyer", BUYER)
+    sixth = only_job_id()
+    raw, flat = cli("job", "run", sixth)
+    line = decision_line(raw)
+    r.append(check("g", "the next unpaid step runs on credit", "DECISION: RUN_ON_CREDIT" in flat, flat[:400]))
+    r.append(check("g", "the reason names consecutive_paid_since_default=4", "consecutive_paid_since_default=4" in line, line))
+    beat_result("g", "refused, settled, earned back", r)
+    notes.append(f"beat g WAIT_FOR_PAYMENT (after default) line:\n    {line_wait}")
+    notes.append(f"beat g RUN_ON_CREDIT (earned back) line:\n    {line}")
+    return sixth
 
 
 def beat_h(prior_jobs: set[str]) -> str:
@@ -321,8 +347,8 @@ def beat_h(prior_jobs: set[str]) -> str:
               "step 2 (findings)" in flat and "amount 0.50 USDC" in flat, flat[:500]),
         check("h", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
               f"trust_tier={ledger.trust_tier}"),
-        check("h", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.paid_usdc == 0.0,
-              f"paid_steps={ledger.paid_steps}, paid_usdc={ledger.paid_usdc}"),
+        check("h", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
+              f"paid_steps={ledger.paid_steps}, completed_paid_jobs={ledger.completed_paid_jobs}"),
     ]
     beat_result("h", "memory deleted, buyer treated as a stranger", r)
     if all(r):
@@ -341,12 +367,11 @@ def main() -> int:
     beat_b(job_a)
     beat_c(job_a)
     beat_d(job_a)
-    beat_e(job_a)
     seen = {job_a}
-    beat_f(job_a)
-    second_job = only_job_id()
-    seen.add(second_job)
-    seen.add(beat_g(job_a, second_job))
+    seen.update(beat_e())
+    credit_job, _ = beat_f()
+    seen.add(credit_job)
+    seen.add(beat_g(credit_job))
     seen.update(store().get_active_jobs())
     beat_h(seen)
 

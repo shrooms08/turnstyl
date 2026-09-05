@@ -578,7 +578,10 @@ def api_buyer(address: str) -> dict[str, Any]:
             "trust_tier": ledger.trust_tier,
             "would_decide": decision,
             "explanation": reason,
-            "steps_until_credit": policy.steps_until_credit(ledger),
+            "jobs_until_credit": policy.jobs_until_credit(ledger),
+            # same value under the old name, for any consumer still reading it
+            "steps_until_credit": policy.jobs_until_credit(ledger),
+            "completed_paid_jobs": ledger.completed_paid_jobs,
             "earned_back": policy.earned_back(ledger),
         },
         "outstanding": outstanding_view(ledger),

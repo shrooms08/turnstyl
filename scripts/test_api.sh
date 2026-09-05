@@ -59,6 +59,21 @@ RESP2=$(curl -s -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d 
 [ "$(echo "$RESP2" | jq_ "d['resumed'], d['job_id']")" = "True $JOB" ] && ok "same buyer + contract resumes the open job" || bad "same buyer + contract resumes the open job" "$(echo "$RESP2" | head -c 200)"
 
 # ---------------------------------------------------------------- worker runs paid steps
+wait_invoice(){ # wait_invoice <job> <step> : until the open invoice is for <step> and unpaid
+  local job="$1" step="$2" i
+  for i in $(seq 1 12); do
+    got=$(jget "/api/jobs/$job" | jq_ "(d.get('open_invoice') or {}).get('step'), (d.get('open_invoice') or {}).get('paid')")
+    [ "$got" = "$step False" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+simulate_step(){ # simulate_step <job> <step> : pay the open invoice through the endpoint, wait for the worker
+  wait_invoice "$1" "$2" || { bad "invoice for step $2 of $1 open"; return 1; }
+  curl -s -o /dev/null -X POST "$BASE/api/jobs/$1/pay"
+  wait_step "$1" "$2" done
+}
+
 .venv/bin/turnstyl pay "$JOB" 2 >/dev/null 2>&1
 wait_step "$JOB" 2 done && ok "worker ran step 2 after payment, no manual job run" || bad "worker ran step 2 after payment"
 [ "$(jget "/api/jobs/$JOB" | jq_ "d['open_invoice']['step']")" = "3" ] && ok "worker issued the step 3 invoice" || bad "worker issued the step 3 invoice"
@@ -66,27 +81,41 @@ wait_step "$JOB" 2 done && ok "worker ran step 2 after payment, no manual job ru
 PR=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/jobs/$JOB/pay"); PC=$(echo "$PR" | tail -1); PB=$(echo "$PR" | sed '$d')
 [ "$PC" = "200" ] && [ "$(echo "$PB" | jq_ "d['paid_step'], d['simulated']")" = "3 True" ] && ok "POST /api/jobs/{id}/pay simulates step 3 on the fake backend" || bad "POST /api/jobs/{id}/pay simulates step 3" "got $PC: $(echo "$PB" | head -c 160)"
 wait_step "$JOB" 3 done && ok "worker ran step 3 after the simulated payment" || bad "worker ran step 3 after the simulated payment"
-[ "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']['trust_tier']")" = "trusted" ] && ok "buyer trusted after two paid steps" || bad "buyer trusted after two paid steps"
+[ "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']['trust_tier'], d['trust']['completed_paid_jobs'], d['trust']['jobs_until_credit'], d['trust']['steps_until_credit']")" = "new 0 3 3" ] && ok "two paid steps: still new; jobs_until_credit 3 (old key carries the same value)" || bad "trust after two paid steps" "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']")"
+simulate_step "$JOB" 4 && ok "step 4 paid and run; first job complete" || bad "step 4 paid and run"
+[ "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']['completed_paid_jobs'], d['trust']['trust_tier']")" = "1 new" ] && ok "completed_paid_jobs 1, still new" || bad "completed_paid_jobs 1, still new" "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']")"
 
-# step 4: invoiced, unpaid, buyer trusted -> the worker runs it on credit
-wait_step "$JOB" 4 done && ok "worker ran step 4 on credit without payment" || bad "worker ran step 4 on credit without payment"
-D=$(jget "/api/jobs/$JOB")
-[ "$(echo "$D" | jq_ "d['status']")" = "complete" ] && ok "job complete" || bad "job complete"
-[ "$(echo "$D" | jq_ "[s['pay_tx'] for s in d['steps'] if s['step']==4][0]")" = "None" ] && ok "step 4 has no pay tx (credit)" || bad "step 4 has no pay tx (credit)"
-[ "$(jget "/api/journal?job=$JOB&limit=50" | jq_ "any(e['decision']=='RUN_ON_CREDIT' and e['step']==4 for e in d['events'])")" = "True" ] && ok "journal records RUN_ON_CREDIT for step 4" || bad "journal records RUN_ON_CREDIT for step 4"
+# two more fully paid jobs, from memory: three completed paid jobs earns credit
+for n in 2 3; do
+  J=$(curl -s -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}" | jq_ "d['job_id']")
+  [ -n "$J" ] && [ "$J" != "$JOB" ] || bad "job $n created"
+  for st in 2 3 4; do simulate_step "$J" "$st" || bad "job $n step $st"; done
+  [ "$(jget "/api/jobs/$J" | jq_ "d['status']")" = "complete" ] && ok "job $n ($J) fully paid and complete" || bad "job $n complete"
+done
+[ "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']['completed_paid_jobs'], d['trust']['trust_tier'], d['trust']['jobs_until_credit']")" = "3 trusted 0" ] && ok "three completed paid jobs: trusted, jobs_until_credit 0" || bad "trusted after three paid jobs" "$(jget "/api/buyers/$BUYER" | jq_ "d['trust']")"
+
+# fourth job: the worker runs step 2 on credit without payment, steps 3 and 4 are paid, the job closes with step 2 owed
+JOB4=$(curl -s -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC}" | jq_ "d['job_id']")
+wait_step "$JOB4" 2 done && ok "worker ran step 2 of job 4 on credit without payment" || bad "worker ran step 2 on credit"
+D=$(jget "/api/jobs/$JOB4")
+[ "$(echo "$D" | jq_ "[s['pay_tx'] for s in d['steps'] if s['step']==2][0]")" = "None" ] && ok "step 2 has no pay tx (credit)" || bad "step 2 has no pay tx (credit)"
+[ "$(jget "/api/journal?job=$JOB4&limit=50" | jq_ "any(e['decision']=='RUN_ON_CREDIT' and e['step']==2 for e in d['events'])")" = "True" ] && ok "journal records RUN_ON_CREDIT for step 2" || bad "journal records RUN_ON_CREDIT for step 2"
+simulate_step "$JOB4" 3 || bad "job 4 step 3"; simulate_step "$JOB4" 4 || bad "job 4 step 4"
+[ "$(jget "/api/jobs/$JOB4" | jq_ "d['status']")" = "complete" ] && ok "job 4 complete with step 2 owed" || bad "job 4 complete"
+JOB="$JOB4"   # the outstanding checks below settle step 2 of this job
 
 # ---------------------------------------------------------------- outstanding on a closed job
 B=$(jget "/api/buyers/$BUYER")
-[ "$(echo "$B" | jq_ "len(d['outstanding']), d['outstanding'][0]['job_id'], d['outstanding'][0]['step']")" = "1 $JOB 4" ] && ok "ledger carries the credit step as outstanding" || bad "ledger carries the credit step as outstanding" "$(echo "$B" | jq_ "d['outstanding']")"
+[ "$(echo "$B" | jq_ "len(d['outstanding']), d['outstanding'][0]['job_id'], d['outstanding'][0]['step']")" = "1 $JOB 2" ] && ok "ledger carries the credit step as outstanding" || bad "ledger carries the credit step as outstanding" "$(echo "$B" | jq_ "d['outstanding']")"
 API_MEMO=$(echo "$B" | jq_ "d['outstanding'][0]['memo']")
-PY_MEMO=$($PY -c "import sys;sys.path.insert(0,'src');from turnstyl.payments import memo_bytes32,hex0x;print(hex0x(memo_bytes32('$JOB',4)))")
-[ -n "$API_MEMO" ] && [ "$API_MEMO" = "$PY_MEMO" ] && ok "outstanding memo equals payments.memo_bytes32($JOB, 4): $API_MEMO" || bad "outstanding memo equals payments.memo_bytes32" "api=$API_MEMO py=$PY_MEMO"
-[ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs']")" = "1" ] && ok "unpaid_from_prior_jobs is 1 before settling" || bad "unpaid_from_prior_jobs is 1 before settling"
-SR=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/4"); SC=$(echo "$SR" | tail -1); SB=$(echo "$SR" | sed '$d')
-[ "$SC" = "200" ] && [ "$(echo "$SB" | jq_ "d['settled']['step'], d['settled']['simulated']")" = "4 True" ] && ok "POST /api/buyers/{addr}/settle/{job}/{step} settles it (fake backend; reconciled by $(echo "$SB" | jq_ "d['reconciled_by']"))" || bad "settle endpoint" "got $SC: $(echo "$SB" | head -c 200)"
+PY_MEMO=$($PY -c "import sys;sys.path.insert(0,'src');from turnstyl.payments import memo_bytes32,hex0x;print(hex0x(memo_bytes32('$JOB',2)))")
+[ -n "$API_MEMO" ] && [ "$API_MEMO" = "$PY_MEMO" ] && ok "outstanding memo equals payments.memo_bytes32($JOB, 2): $API_MEMO" || bad "outstanding memo equals payments.memo_bytes32" "api=$API_MEMO py=$PY_MEMO"
+[ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], d['ledger']['defaults'], d['trust']['completed_paid_jobs']")" = "1 1 3" ] && ok "unpaid_from_prior_jobs 1, defaults 1, completed_paid_jobs still 3" || bad "ledger after the default" "$(echo "$B" | jq_ "d['ledger']")"
+SR=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/2"); SC=$(echo "$SR" | tail -1); SB=$(echo "$SR" | sed '$d')
+[ "$SC" = "200" ] && [ "$(echo "$SB" | jq_ "d['settled']['step'], d['settled']['simulated']")" = "2 True" ] && ok "POST /api/buyers/{addr}/settle/{job}/{step} settles it (fake backend; reconciled by $(echo "$SB" | jq_ "d['reconciled_by']"))" || bad "settle endpoint" "got $SC: $(echo "$SB" | head -c 200)"
 B=$(jget "/api/buyers/$BUYER")
 [ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], len(d['outstanding'])")" = "0 0" ] && ok "after settling: unpaid_from_prior_jobs 0, outstanding empty" || bad "after settling: unpaid_from_prior_jobs 0, outstanding empty" "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], d['outstanding']")"
-C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/4")
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/2")
 [ "$C" = "404" ] && ok "settling it again -> 404 (nothing outstanding)" || bad "settling it again -> 404" "got $C"
 
 # ---------------------------------------------------------------- quiet when idle
@@ -128,10 +157,10 @@ C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-
 
 # ---------------------------------------------------------------- buyer filter
 OTHER=0x000000000000000000000000000000000000dead
-[ "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")" = "2" ] && ok "GET /api/jobs?buyer= lists this buyer's 2 jobs" || bad "GET /api/jobs?buyer= lists this buyer's 2 jobs" "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")"
-[ "$(jget "/api/jobs?buyer=$(echo $BUYER | tr a-f A-F)" | jq_ "len(d['jobs'])")" = "2" ] && ok "buyer filter is case-insensitive" || bad "buyer filter is case-insensitive"
+[ "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs?buyer= lists this buyer's 5 jobs" || bad "GET /api/jobs?buyer= lists this buyer's 5 jobs" "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")"
+[ "$(jget "/api/jobs?buyer=$(echo $BUYER | tr a-f A-F)" | jq_ "len(d['jobs'])")" = "5" ] && ok "buyer filter is case-insensitive" || bad "buyer filter is case-insensitive"
 [ "$(jget "/api/jobs?buyer=$OTHER" | jq_ "len(d['jobs'])")" = "0" ] && ok "buyer filter excludes other buyers" || bad "buyer filter excludes other buyers"
-[ "$(jget "/api/jobs" | jq_ "len(d['jobs'])")" = "2" ] && ok "GET /api/jobs without the param lists all" || bad "GET /api/jobs without the param lists all"
+[ "$(jget "/api/jobs" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs without the param lists all" || bad "GET /api/jobs without the param lists all"
 
 # ---------------------------------------------------------------- missing memory
 rm -f "$DB" "$DB-wal" "$DB-shm"

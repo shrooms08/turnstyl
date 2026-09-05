@@ -22,7 +22,7 @@ payments are on chain; only the agent's memory of the first is gone.
 | --- | --- | --- |
 | resume | `job:<id>` state and `job/<id>` entity | picks up at the recorded step; a step with output is never re-run or re-charged |
 | price | `findings/<hash>` and `step_cost/<n>` | 0.50 becomes 0.25 when the output is already stored; 1.5x when recorded avg_tokens > 6000 |
-| credit | `buyer/<addr>` paid_steps, open_invoices, defaults | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT for a buyer who has paid before |
+| credit | `buyer/<addr>` completed_paid_jobs, open_invoices, defaults | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT for a buyer with three fully paid jobs |
 | refuse | `buyer/<addr>` unpaid_from_prior_jobs | REFUSE paid work from a buyer who left a closed job unpaid |
 | cache | `findings/<hash>` | a repeat contract is served from the store with no model call at all |
 
@@ -55,8 +55,12 @@ Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
 - **WAIT_FOR_PAYMENT**: unpaid and credit not earned
 - **REFUSE**: the buyer left work unpaid when a previous job closed
 
-Trust tiers: **trusted** needs paid_steps >= 2, nothing outstanding, and either no
-default or an earned-back one. **blocked** at two defaults. Otherwise **new**.
+Trust tiers: **trusted** needs three completed jobs with every paid step settled
+(`completed_paid_jobs >= 3`), nothing outstanding, and either no default or an
+earned-back one. **blocked** at two defaults. Otherwise **new**. Step counts do
+not earn credit: a buyer who pays two steps and walks away from the third has
+paid for nothing the agent can extend credit on. Repeat contracts are served
+from memory at half price, so a history of three paid jobs is cheap to build.
 
 A default is one delivered-but-unpaid step at the moment a job closes. It stays
 on the record permanently. Paying the debt clears `unpaid_from_prior_jobs` and
@@ -196,7 +200,7 @@ a terminal.
   once if needed, then calls `pay(memo, amount)` on the receipts contract and
   waits for the receipt. The worker in the serving process runs the step the
   moment the payment lands; no manual `job run`.
-- **Credit.** After two settled steps the buyer is trusted and the next step
+- **Credit.** After three fully paid jobs the buyer is trusted and the next step
   runs before its invoice clears: the job shows `started on credit, invoice
   open`, and the amount is carried on the ledger until it is paid.
 - **Your jobs.** With a wallet connected, the list filters to that address,

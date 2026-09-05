@@ -571,7 +571,8 @@ class Engine:
     ) -> Outcome:
         job_id = state.job_id
         evaluated = [
-            f"entity buyer/{state.buyer} -> paid_steps={ledger.paid_steps}, "
+            f"entity buyer/{state.buyer} -> completed_paid_jobs={ledger.completed_paid_jobs}, "
+            f"paid_steps={ledger.paid_steps}, "
             f"paid_usdc={ledger.paid_usdc:.2f}, open_invoices={ledger.open_invoices}, "
             f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}, "
             f"trust_tier={ledger.trust_tier}",
@@ -873,6 +874,13 @@ class Engine:
                 f"unpaid at close; unpaid_from_prior_jobs="
                 f"{ledger.unpaid_from_prior_jobs}, defaults={ledger.defaults}, "
                 f"consecutive_paid_since_default reset to 0"
+            )
+        else:
+            # Every paid step settled: this is what credit is extended on.
+            ledger.completed_paid_jobs += 1
+            acted.append(
+                f"entity buyer/{state.buyer} -> job closed fully paid; "
+                f"completed_paid_jobs={ledger.completed_paid_jobs}"
             )
 
         if self.store.archive_job_entity(

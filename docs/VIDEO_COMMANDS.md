@@ -30,42 +30,52 @@ pattern is `https://sepolia.basescan.org/tx/<hash>`, and for the contract itself
 
 ---
 
+## Before the take: build the history
+
+Credit is extended on three fully paid jobs, so the buyer arrives at the take
+with a record. With the agent live, submit `examples/Vault.sol` three times and
+pay every invoice of each job (the second and third are served from memory at
+0.25 / 0.38 / 0.12 USDC, about a minute each). The ledger card then reads
+`completed paid jobs 3`, `trust tier trusted`. Leave that page open. The take
+opens with job 4.
+
 ## Browser flow (primary)
 
 1. **Connect.** Top right, `Connect wallet`. Rabby asks for the account, then
    to switch to Base Sepolia (or add it). The bar shows the truncated address and
    the USDC balance.
-2. **Submit.** In the console, drop `examples/Vault.sol` on the `new audit`
-   panel and press `Submit for scope (free)`. The page opens the job: step 1 is
-   done and free, step 2 shows `awaiting payment` at `0.50 USDC`.
-3. **Pay step 2.** `Pay 0.50 USDC`. First time: `approving 100 USDC once`, then
-   `paying`, `confirming`, `confirmed`. Within a few seconds the worker runs
-   step 2: the findings card fills in, a `commit` link appears, and the invoice
-   panel now asks for step 3 at `0.75 USDC`.
-4. **Pay step 3.** Same button. The ledger card flips to `trusted`.
-5. **Credit.** Do nothing. Step 4 is invoiced at `0.25 USDC`, the buyer is
-   trusted, so the worker runs it unpaid: `step 4 started on credit, invoice
-   open`, and the job goes `complete`.
-6. **Repeat contract.** Back to `all jobs`, submit `Vault.sol` again. Step 1
-   is served from memory; step 2 is invoiced at `0.25 USDC` (findings cached).
-7. **Refusal.** The timeline shows `REFUSE`: the first job closed with step 4
-   unpaid. The ledger shows `defaults 1`.
-8. **Settle the debt.** Open the first job; its outstanding step 4 is listed
-   on the ledger. Pay it from the terminal fallback below (`buyer_pay.py $JOB1
-   4`), or pay any later invoice: reconciliation clears it from chain either
-   way. The second job's invoice becomes payable: `WAIT_FOR_PAYMENT` with
-   `credit returns after 4 consecutive paid steps`.
-9. **Pay the discounted step.** `Pay 0.25 USDC`. The step is served from
-   memory: `served from memory`, `0 tokens`, and still committed on chain.
+2. **Submit job 4.** Drop `examples/Vault.sol` on the `new audit` panel and
+   press `Submit for scope (free)`. Step 1 comes from memory; step 2 is invoiced
+   at `0.25 USDC` (findings cached).
+3. **Credit.** Do nothing. The buyer has three fully paid jobs, so the worker
+   runs step 2 before the invoice clears: the findings card fills in with a
+   `commit` link, the header reads `step 2 started on credit, invoice open`,
+   and the timeline shows `RUN_ON_CREDIT … completed_paid_jobs=3 >= 3`.
+4. **Pay step 3.** `Pay 0.38 USDC`. First time in this wallet:
+   `approving 100 USDC once`, then `paying`, `confirming`, `confirmed`. The
+   worker runs step 3; the invoice panel asks for step 4 at `0.12 USDC`.
+5. **Pay step 4.** Same button. The job goes `complete` with step 2 still owed:
+   the ledger shows it under `outstanding` and `defaults 1`.
+6. **Refusal.** Submit `Vault.sol` again (job 5). Step 1 is free; the
+   timeline then shows `REFUSE`: job 4 closed with step 2 unpaid.
+7. **Settle the debt.** On the ledger card, the outstanding step 2 of job 4
+   has its own `Pay 0.25 USDC` button. Pay it. Reconciliation clears it from the
+   chain on the next pass; job 5's invoice becomes payable with
+   `WAIT_FOR_PAYMENT … credit returns after 4 consecutive paid steps, currently 1`.
+   The refusal is lifted; the credit is not.
+8. **Earn it back.** Pay job 5's steps 2, 3 and 4 (`0.25`, `0.38`, `0.12`,
+   all served from memory, all committed). The ledger reads `paid since default
+   4`, `trust tier trusted`. Submit job 6: step 2 runs on credit again,
+   `consecutive_paid_since_default=4` in the reason.
 10. **Delete the memory.** In the agent terminal: `.venv/bin/turnstyl reset
     --db ./data/video.db`. The page goes red: `memory deleted`, every panel
     says what was lost, the `new audit` panel reads `the agent cannot take
     jobs while memory is missing`.
-11. **The double charge.** Restart the store (`turnstyl status` creates an
-    empty one), submit `Vault.sol` again: step 2 is invoiced at `0.50 USDC`,
-    full price, to a buyer the agent now calls `new`. Pay it. Two `Paid` logs
-    from the same buyer for the same work sit on the contract; only the
-    agent's memory of the first is gone.
+11. **The double charge.** Restart the agent (`scripts/tunnel.sh` again;
+    serve creates an empty store), submit `Vault.sol` again: step 2 is invoiced
+    at `0.50 USDC`, full price, to a buyer the agent now calls `new` with
+    `completed paid jobs 0`. Pay it. `Paid` logs from the same buyer for the
+    same work sit on the contract; only the agent's memory of them is gone.
 
 Use `Your jobs` in the list to filter to the connected wallet, and `this is
 you` marks the buyer on any job that is yours.
@@ -87,8 +97,15 @@ unset MOCK_LLM
 export BUYER=0x0964Dc1E37aCa77c6Df395DB7c0EeC848B1CefF8
 ```
 
-Set `JOB1`, `JOB2`, `JOB3` from the job ids as they are printed —
-`.venv/bin/turnstyl job new` prints `job <id>  buyer <addr>` on its first line.
+Build the same history first: run steps 1-5 below three times over, paying
+every invoice (`buyer_pay.py $JOB 2`, `3`, `4` and `job run` after each), then
+begin the take at step 6 with a fourth job. Set `JOB1`... from the job ids as
+they are printed: `.venv/bin/turnstyl job new` prints `job <id>  buyer <addr>`
+on its first line. Under the current rule the credit beat (7) reads
+`DECISION: RUN_ON_CREDIT, because step 2 is unpaid but buyer is trusted:
+completed_paid_jobs=3 >= 3, open_invoices=0, unpaid_from_prior_jobs=0` and the
+refusal names step 2, not step 4; the amounts on repeat jobs are 0.25 / 0.38 /
+0.12 USDC.
 
 ---
 

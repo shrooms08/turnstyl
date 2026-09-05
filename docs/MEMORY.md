@@ -2,8 +2,8 @@
 
 Persist: every job's state, per-step outputs and their sha256, step token and
 time costs, pricing rules, contract source, and a per-buyer ledger of paid
-steps, outstanding invoices, defaults and trust tier are written to Sibyl Memory
-as they happen, one journal event per decision.
+steps, completed paid jobs, outstanding invoices, defaults and trust tier are
+written to Sibyl Memory as they happen, one journal event per decision.
 
 Recall (fresh session): a new process opens the same store, reads `active_jobs`
 and `job:<job_id>` to find where the work stopped, reads `job/<job_id>` to see
@@ -14,8 +14,8 @@ Changes the agent's decision by: the price it quotes (half when
 `findings/<contract_hash>` already holds that step, 1.5x when
 `step_cost/<n>.avg_tokens` exceeds 6000), whether it runs at all (RUN_PAID,
 RUN_ON_CREDIT, WAIT_FOR_PAYMENT or REFUSE, chosen from the buyer entity's
-paid_steps, open_invoices, defaults and consecutive_paid_since_default), and
-whether it calls a model or serves the answer it already has.
+completed_paid_jobs, open_invoices, defaults and consecutive_paid_since_default),
+and whether it calls a model or serves the answer it already has.
 
 ## What breaks when memory is deleted
 

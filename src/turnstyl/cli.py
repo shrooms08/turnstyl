@@ -343,6 +343,7 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
     grid.add_row("open invoices", str(book.open_invoices))
     grid.add_row("unpaid from prior jobs", str(book.unpaid_from_prior_jobs))
     grid.add_row("defaults on record", str(book.defaults))
+    grid.add_row("completed paid jobs", str(book.completed_paid_jobs))
     if book.defaults:
         grid.add_row(
             "clean paid steps since",

@@ -293,7 +293,7 @@ ERC20_ABI = [
 
 CHAIN_ID = 84532
 LOG_CHUNK_BLOCKS = 5_000
-RPC_ATTEMPTS = 5
+RPC_ATTEMPTS = 6            # 1.5+3+6+12+24 = 46.5s of backoff before giving up
 RPC_BACKOFF_SECONDS = 1.5
 
 

@@ -300,7 +300,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     <div class="inner reveal">
       <p class="kicker">02 — memory</p>
       <h2>Restart it. It remembers.</h2>
-      <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer who has paid before gets credit — the next step runs before the invoice clears.</p>
+      <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer with three fully paid jobs behind them gets credit — the next step runs before the invoice clears.</p>
       <div class="livelink" id="latestDecision">
         <span class="d">—</span><span class="e">waiting for the journal…</span>
       </div>
@@ -748,7 +748,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
         cell("unpaid, prior jobs", esc(L.unpaid_from_prior_jobs==null?"—":L.unpaid_from_prior_jobs)) +
         cell("defaults", esc(L.defaults==null?"—":L.defaults)) +
         cell("paid since default", esc(L.consecutive_paid_since_default==null?"—":L.consecutive_paid_since_default)) +
-        cell("steps until credit", esc(T.steps_until_credit==null?"—":T.steps_until_credit)) +
+        cell("completed paid jobs", esc(L.completed_paid_jobs==null?"0":L.completed_paid_jobs)) +
+        cell("jobs until credit", esc((T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit)==null?"—":(T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit))) +
         (T.would_decide ? cell("would decide", decisionPill(T.would_decide)) : "") +
       "</div>" +
       (T.explanation ? '<div class="expl">'+esc(T.explanation)+"</div>" : "") +

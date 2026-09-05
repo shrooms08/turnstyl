@@ -150,16 +150,50 @@ echo "database : $DB"
 echo "buyer    : $BUYER_ADDRESS"
 echo
 
+# ----------------------------------------------------------------- helpers
+topup(){  # bring the buyer to at least 2.50 USDC (1 USDC per call, idempotent)
+  echo "--- topup_buyer"
+  for _ in 1 2 3 4 5; do
+    run_quiet $PY scripts/topup_buyer.py
+    flatten "$OUT" | grep -qF "TOPUP SKIPPED" && break
+  done
+}
+pay_run(){  # pay_run <beat> <job> <step> <amount> [cached]
+  local beat="$1" job="$2" step="$3" amount="$4" cached="${5:-}" attempt
+  # The public RPC drops out for half a minute now and then. A payment that did
+  # not land is retried, never treated as a failed beat on the first miss.
+  for attempt in 1 2 3; do
+    run "buyer_pay $job $step (attempt $attempt)" $PY scripts/buyer_pay.py "$job" "$step"
+    flatten "$OUT" | grep -qF "PAID $amount USDC tx" && break
+    echo "    payment did not land (RPC?); retrying in 20s"; sleep 20
+  done
+  check "$beat" "step $step paid on chain ($amount USDC)" "PAID $amount USDC tx"
+  sleep 4
+  run_until_paid "$job"
+  check "$beat" "step $step ran as paid work" "DECISION: RUN_PAID"
+  check "$beat" "step $step committed on chain" "COMMITTED"
+  [ -n "$cached" ] && check "$beat" "step $step served from memory" "from memory (cached)"
+}
+complete_paid_job(){  # complete_paid_job <beat> -> sets NEWJOB; repeat contract, cached prices
+  local beat="$1"
+  run "job new" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
+  NEWJOB=$(job_id_from_output)
+  [ -n "$NEWJOB" ] || { echo "turnstyl demo_live: no job id from 'job new'" >&2; exit 1; }
+  echo "    job = $NEWJOB"
+  check "$beat" "step 1 served from memory" "from memory (cached)"
+  check "$beat" "step 2 invoiced at 0.25 USDC (cached)" "amount 0.25 USDC"
+  pay_run "$beat" "$NEWJOB" 2 0.25 cached
+  check "$beat" "step 3 invoiced at 0.38 USDC (cached)" "amount 0.38 USDC"
+  pay_run "$beat" "$NEWJOB" 3 0.38 cached
+  check "$beat" "step 4 invoiced at 0.12 USDC (cached)" "amount 0.12 USDC"
+  pay_run "$beat" "$NEWJOB" 4 0.12 cached
+  check "$beat" "job complete" "COMPLETE"
+}
+
 # ----------------------------------------------------------------- beat 1
 before=$FAILURES
 echo "BEAT 1: top the buyer up so it can pay its invoices"
-# topup_buyer sends a fixed 1 USDC per call when the buyer is under 2.50. A full
-# run costs the buyer 2.25 USDC, so call it until it reports nothing left to do.
-echo "--- topup_buyer"
-for _ in 1 2 3 4; do
-  run_quiet $PY scripts/topup_buyer.py
-  flatten "$OUT" | grep -qF "TOPUP SKIPPED" && break
-done
+topup
 if flatten "$OUT" | grep -qE "TOPUP SENT|TOPUP SKIPPED"; then
   echo "  ok   buyer funding checked"
   flatten "$OUT" | grep -oE "TOPUP (SENT|SKIPPED)[^|]*" | head -1 | sed 's/^/       /'
@@ -171,80 +205,83 @@ beat_result 1 "buyer funded" $before
 
 # ----------------------------------------------------------------- beat 2
 before=$FAILURES
-echo "BEAT 2: new job — free scope, then an invoice for step 2"
+echo "BEAT 2: new job — free scope, then an invoice for step 2, then WAIT"
 run "job new" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
 JOB1=$(job_id_from_output)
-if [ -z "$JOB1" ]; then
-  echo "turnstyl demo_live: could not read a job id out of 'job new' output." >&2
-  sed 's/^/  /' "$OUT" | head -20 >&2
-  exit 1
-fi
+[ -n "$JOB1" ] || { echo "turnstyl demo_live: could not read a job id out of 'job new' output." >&2; sed 's/^/  /' "$OUT" | head -20 >&2; exit 1; }
 echo "    job 1 = $JOB1"
 check 2 "step 1 ran free" "STEP 1: scope"
 check 2 "decision is RUN_FREE" "DECISION: RUN_FREE"
 check 2 "invoice for step 2 at 0.50 USDC" "amount 0.50 USDC"
 check 2 "invoice names the receipts contract" "$RECEIPTS_ADDRESS"
-check 2 "invoice tells the buyer exactly what to run" "scripts/buyer_pay.py $JOB1 2"
-beat_result 2 "job opened, step 2 invoiced at 0.50 USDC" $before
+run "job run $JOB1 (unpaid)" $CLI job run "$JOB1"
+check 2 "a new buyer waits for payment" "DECISION: WAIT_FOR_PAYMENT"
+check 2 "the reason says credit comes after 3 fully paid jobs, currently 0" "credit after 3 fully paid jobs, currently 0"
+DECISION_2=$(decision_line "$OUT")
+beat_result 2 "job opened, step 2 invoiced, no credit for a stranger" $before
 
 # ----------------------------------------------------------------- beat 3
 before=$FAILURES
-echo "BEAT 3: buyer pays step 2 on chain; agent runs it and commits the output"
-run "buyer_pay $JOB1 2" $PY scripts/buyer_pay.py "$JOB1" 2
-check 3 "payment landed on chain" "PAID 0.50 USDC tx"
-sleep 4
-run_until_paid "$JOB1"
-check 3 "decision is RUN_PAID" "DECISION: RUN_PAID"
-check 3 "step 2 executed" "STEP 2: findings"
+echo "BEAT 3: first job, every step paid on chain and committed"
+pay_run 3 "$JOB1" 2 0.50
 check 3 "reentrancy finding delivered" "Reentrancy in withdraw()"
-check 3 "output committed on chain" "COMMITTED"
 check 3 "invoice for step 3 at 0.75 USDC" "amount 0.75 USDC"
-beat_result 3 "paid step executed and committed" $before
+pay_run 3 "$JOB1" 3 0.75
+check 3 "invoice for step 4 at 0.25 USDC" "amount 0.25 USDC"
+run "job run $JOB1 (step 4 unpaid)" $CLI job run "$JOB1"
+check 3 "two paid steps still do not earn credit" "DECISION: WAIT_FOR_PAYMENT"
+pay_run 3 "$JOB1" 4 0.25
+check 3 "job complete" "COMPLETE"
+run "ledger" $CLI ledger "$BUYER_ADDRESS"
+check 3 "one completed paid job on the ledger" "completed paid jobs 1"
+check 3 "buyer trust tier still new" "trust tier new"
+beat_result 3 "first job fully paid, still no credit" $before
 
 # ----------------------------------------------------------------- beat 4
 before=$FAILURES
-echo "BEAT 4: buyer pays step 3; two paid steps earn the trusted tier"
-run "buyer_pay $JOB1 3" $PY scripts/buyer_pay.py "$JOB1" 3
-check 4 "payment landed on chain" "PAID 0.75 USDC tx"
-sleep 4
-run_until_paid "$JOB1"
-check 4 "decision is RUN_PAID" "DECISION: RUN_PAID"
-check 4 "step 3 executed" "STEP 3: patch"
-check 4 "output committed on chain" "COMMITTED"
+echo "BEAT 4: two more fully paid jobs, served from memory at half price"
+topup
+complete_paid_job 4; JOB2=$NEWJOB
 run "ledger" $CLI ledger "$BUYER_ADDRESS"
-check 4 "buyer has 2 paid steps" "paid steps 2"
+check 4 "two completed paid jobs" "completed paid jobs 2"
+check 4 "still new after two" "trust tier new"
+topup
+complete_paid_job 4; JOB3=$NEWJOB
+run "ledger" $CLI ledger "$BUYER_ADDRESS"
+check 4 "three completed paid jobs" "completed paid jobs 3"
 check 4 "buyer trust tier is trusted" "trust tier trusted"
-beat_result 4 "two paid steps, buyer now trusted" $before
+beat_result 4 "three fully paid jobs, buyer now trusted" $before
 
 # ----------------------------------------------------------------- beat 5
 before=$FAILURES
-echo "BEAT 5: fresh process runs step 4 on credit and closes the job"
-run "job run $JOB1 (credit)" $CLI job run "$JOB1"
+echo "BEAT 5: CREDIT. Fourth job: step 2 runs before its invoice clears"
+topup
+run "job new (fourth job)" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
+JOB4=$(job_id_from_output); echo "    job 4 = $JOB4"
+run "job run $JOB4 (credit)" $CLI job run "$JOB4"
 check 5 "decision is RUN_ON_CREDIT" "DECISION: RUN_ON_CREDIT"
-check 5 "reason names paid_steps=2" "paid_steps=2"
-check 5 "step 4 executed" "STEP 4: verify"
+check 5 "reason names completed_paid_jobs=3 >= 3" "completed_paid_jobs=3 >= 3"
+check 5 "step 2 executed from memory" "from memory (cached)"
 check 5 "output committed on chain" "COMMITTED"
-check 5 "job is complete" "COMPLETE"
 DECISION_5=$(decision_line "$OUT")
+run "job run $JOB4 (step 3, one step owed)" $CLI job run "$JOB4"
+check 5 "step 3 waits while a step is owed" "DECISION: WAIT_FOR_PAYMENT"
+pay_run 5 "$JOB4" 3 0.38 cached
+pay_run 5 "$JOB4" 4 0.12 cached
+check 5 "job complete" "COMPLETE"
 run "ledger" $CLI ledger "$BUYER_ADDRESS"
-check 5 "step 4 is carried as an outstanding invoice" "4 (verify)"
+check 5 "step 2 is carried as an outstanding invoice" "2 (findings)"
 check 5 "the debt is recorded against the buyer" "unpaid from prior jobs 1"
-beat_result 5 "job complete with one unpaid step on credit" $before
+check 5 "a job closed with a debt does not count as paid" "completed paid jobs 3"
+beat_result 5 "credit extended, then one default at close" $before
 
 # ----------------------------------------------------------------- beat 6
 before=$FAILURES
 echo "BEAT 6: same buyer, same contract — the agent refuses paid work"
-run "job new (second job)" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
-JOB2=$(job_id_from_output)
-if [ -z "$JOB2" ] || [ "$JOB2" = "$JOB1" ]; then
-  echo "  FAIL a second job id was not created (got '${JOB2:-empty}')"
-  FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("6: second job id")
-else
-  echo "  ok   second job created: $JOB2"
-fi
+run "job new (fifth job)" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
+JOB5=$(job_id_from_output); echo "    job 5 = $JOB5"
 check 6 "step 1 is still free" "STEP 1: scope"
-check 6 "decision is RUN_FREE" "DECISION: RUN_FREE"
-run "job run $JOB2" $CLI job run "$JOB2"
+run "job run $JOB5" $CLI job run "$JOB5"
 check 6 "decision is REFUSE" "DECISION: REFUSE"
 check 6 "reason names the unpaid prior step" "unpaid on a completed job"
 check_not 6 "no paid step was executed" "STEP 2: findings"
@@ -253,29 +290,39 @@ beat_result 6 "refused: the buyer owes for a closed job" $before
 
 # ----------------------------------------------------------------- beat 7
 before=$FAILURES
-echo "BEAT 7: buyer settles the old debt; reconcile restores its standing"
-run "buyer_pay $JOB1 4" $PY scripts/buyer_pay.py "$JOB1" 4
-check 7 "the old step-4 invoice was paid on chain" "PAID 0.25 USDC tx"
+echo "BEAT 7: buyer settles the old debt; refusal lifts, credit must be earned back"
+topup
+for attempt in 1 2 3; do
+  run "buyer_pay $JOB4 2 (attempt $attempt)" $PY scripts/buyer_pay.py "$JOB4" 2
+  flatten "$OUT" | grep -qF "PAID 0.25 USDC tx" && break
+  echo "    payment did not land (RPC?); retrying in 20s"; sleep 20
+done
+check 7 "the old step-2 invoice was paid on chain" "PAID 0.25 USDC tx"
 sleep 4
-run "job run $JOB2" $CLI job run "$JOB2"
+run "job run $JOB5" $CLI job run "$JOB5"
 check 7 "the debt was reconciled from chain" "RECONCILED"
 check 7 "decision is WAIT_FOR_PAYMENT" "DECISION: WAIT_FOR_PAYMENT"
+check 7 "credit returns after 4 consecutive paid steps, currently 1" "credit returns after 4 consecutive paid steps, currently 1"
 check 7 "step 2 is priced at 0.25 USDC" "amount 0.25 USDC"
-check 7 "the price reason names the cached findings" "findings cached for this contract hash"
 DECISION_7=$(decision_line "$OUT")
-beat_result 7 "debt cleared from chain, repeat work half price" $before
+beat_result 7 "debt cleared from chain, credit not yet" $before
 
 # ----------------------------------------------------------------- beat 8
 before=$FAILURES
-echo "BEAT 8: buyer pays the discounted step; it is served from memory"
-run "buyer_pay $JOB2 2" $PY scripts/buyer_pay.py "$JOB2" 2
-check 8 "payment landed on chain" "PAID 0.25 USDC tx"
-sleep 4
-run_until_paid "$JOB2"
-check 8 "decision is RUN_PAID" "DECISION: RUN_PAID"
-check 8 "step 2 was served from memory, not the model" "from memory (cached)"
-check 8 "output committed on chain" "COMMITTED"
-beat_result 8 "cached step sold at half price, no model call" $before
+echo "BEAT 8: EARN-BACK. Three more paid steps (served from memory), then credit again"
+pay_run 8 "$JOB5" 2 0.25 cached
+pay_run 8 "$JOB5" 3 0.38 cached
+pay_run 8 "$JOB5" 4 0.12 cached
+run "ledger" $CLI ledger "$BUYER_ADDRESS"
+check 8 "four consecutive paid steps since the default" "clean paid steps since 4"
+check 8 "trusted again" "trust tier trusted"
+run "job new (sixth job)" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
+JOB6=$(job_id_from_output); echo "    job 6 = $JOB6"
+run "job run $JOB6 (credit again)" $CLI job run "$JOB6"
+check 8 "the next unpaid step runs on credit" "DECISION: RUN_ON_CREDIT"
+check 8 "reason names consecutive_paid_since_default=4" "consecutive_paid_since_default=4"
+DECISION_8=$(decision_line "$OUT")
+beat_result 8 "one default worked off, credit restored" $before
 
 # ----------------------------------------------------------------- beat 9
 before=$FAILURES
@@ -285,12 +332,13 @@ if [ -f "$DB" ]; then
   echo "  FAIL could not delete $DB"
   FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("9: delete db")
 fi
+topup
 run "job new (after delete)" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
-JOB3=$(job_id_from_output)
-if [ -n "$JOB3" ] && [ "$JOB3" != "$JOB1" ] && [ "$JOB3" != "$JOB2" ]; then
-  echo "  ok   a brand new job id was issued: $JOB3"
+JOB7=$(job_id_from_output)
+if [ -n "$JOB7" ] && [ "$JOB7" != "$JOB1" ] && [ "$JOB7" != "$JOB6" ]; then
+  echo "  ok   a brand new job id was issued: $JOB7"
 else
-  echo "  FAIL expected a new job id, got '${JOB3:-empty}'"
+  echo "  FAIL expected a new job id, got '${JOB7:-empty}'"
   FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("9: new job id")
 fi
 check 9 "step 1 ran again from scratch" "STEP 1: scope"
@@ -298,17 +346,18 @@ check_not 9 "the cached findings are gone" "from memory (cached)"
 check 9 "step 2 is invoiced at 0.50 USDC again" "amount 0.50 USDC"
 run "ledger (after delete)" $CLI ledger "$BUYER_ADDRESS"
 check 9 "buyer trust tier is back to new" "trust tier new"
-check 9 "the buyer's paid history is gone" "paid steps 0"
-# An invoice is only an offer. Pay it, and the double charge stops being a
-# claim about what would happen and becomes a second Paid log on the same
-# contract, for work this buyer already bought.
-run "buyer_pay $JOB3 2 (the double charge)" $PY scripts/buyer_pay.py "$JOB3" 2
+check 9 "the three paid jobs are gone" "completed paid jobs 0"
+for attempt in 1 2 3; do
+  run "buyer_pay $JOB7 2 (the double charge, attempt $attempt)" $PY scripts/buyer_pay.py "$JOB7" 2
+  flatten "$OUT" | grep -qF "PAID 0.50 USDC tx" && break
+  echo "    payment did not land (RPC?); retrying in 20s"; sleep 20
+done
 check 9 "the buyer is charged a second time for work already paid for" "PAID 0.50 USDC tx"
 DOUBLE_TX=$(grep -oE '0x[0-9a-fA-F]{64}' "$OUT" | tail -1)
 if [ "$FAILURES" -eq "$before" ]; then
   echo
   echo "DOUBLE CHARGE REPRODUCED"
-  echo "  memory deleted; this buyer paid 1.75 USDC on chain across two jobs, and"
+  echo "  memory deleted; this buyer paid for three whole audits on chain, and"
   echo "  the agent re-invoiced 0.50 USDC for work it had already delivered."
   echo "  The buyer just paid it: $DOUBLE_TX"
   echo "  $EXPLORER/tx/$DOUBLE_TX"
@@ -321,9 +370,11 @@ beat_result 9 "memory deleted, buyer charged twice for the same work" $before
 sort -u "$TXFILE" -o "$TXFILE"
 echo "========================================================================"
 echo "DECISION lines"
-echo "  beat 5: $DECISION_5"
-echo "  beat 6: $DECISION_6"
-echo "  beat 7: $DECISION_7"
+echo "  beat 2 (new buyer waits): $DECISION_2"
+echo "  beat 5 (credit):          $DECISION_5"
+echo "  beat 6 (refuse):          $DECISION_6"
+echo "  beat 7 (after default):   $DECISION_7"
+echo "  beat 8 (earned back):     $DECISION_8"
 echo
 echo "double-charge transaction: ${DOUBLE_TX:-none}"
 echo

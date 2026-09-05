@@ -219,6 +219,9 @@ has "Simulate payment on fake backend" "Simulate payment"
 has "simulate calls POST /api/jobs/{id}/pay" '"/pay"'
 has "your jobs filter"                '"/api/jobs?buyer=" + encodeURIComponent(W.addr)'
 has "this is you pill"                "this is you"
+has "story: credit after three paid jobs" "three fully paid jobs"
+has "ledger: jobs until credit"       '"jobs until credit"'
+has "ledger: completed paid jobs"     '"completed paid jobs"'
 has "memory-missing disables submit"  "cannot take jobs while memory is missing"
 has "config.js loaded, cache-busted"  "config.js?v="
 has "API origin from config"          "window.TURNSTYL_API"

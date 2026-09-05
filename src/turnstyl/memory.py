@@ -13,6 +13,7 @@ Tier map (from the SDK source, see docs/SIBYL_API.md):
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,41 @@ def default_db_path() -> Path:
     if override and override.strip():
         return Path(override).expanduser()
     return DB_PATH
+
+
+def count_records(path: str | Path) -> int:
+    """State keys + entities + journal events in the store, over a read-only
+    connection. The SDK's list methods clamp their limits and cannot report a
+    true total. Archived entities are not counted: this is what the agent is
+    actively carrying. 0 for a missing or unreadable file."""
+    try:
+        conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+        total = 0
+        for table in ("state_documents", "entities", "journal_events"):
+            total += conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        conn.close()
+    except sqlite3.Error:
+        return 0
+    return total
+
+
+def bootstrap_memory(path: str | Path | None = None) -> tuple[Path, bool, int]:
+    """Create the memory file if it is absent, by opening the store once.
+
+    This is the ONE place turnstyl creates a database on purpose. ``serve`` and
+    ``worker`` call it at startup so a fresh checkout has a store to read; the
+    API and the worker loop still refuse to recreate a file that goes missing
+    while they run, which is what keeps the delete beat honest.
+
+    Returns (path, created, records).
+    """
+    target = Path(path) if path is not None else default_db_path()
+    created = not target.is_file()
+    memory = TurnstylMemory(target)          # Storage bootstraps the schema
+    storage = getattr(getattr(memory, "client", None), "storage", None)
+    if storage is not None and hasattr(storage, "close"):
+        storage.close()
+    return target, created, (0 if created else count_records(target))
 
 
 class TurnstylMemory:

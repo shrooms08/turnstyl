@@ -220,6 +220,14 @@ has "simulate calls POST /api/jobs/{id}/pay" '"/pay"'
 has "your jobs filter"                '"/api/jobs?buyer=" + encodeURIComponent(W.addr)'
 has "this is you pill"                "this is you"
 has "memory-missing disables submit"  "cannot take jobs while memory is missing"
+has "wallet chip element"             'class="chip" id="walletChip"'
+has "chip: green dot on Base Sepolia" '<span class="dot on"></span><span class="addr">'
+has "chip: amber dot on another chain" '<span class="dot warn"></span>'
+has "chip: gray dot disconnected"     '<span class="dot"></span><span class="addr">'
+has "chip: switch label on wrong chain" "switch to Base Sepolia"
+has "chip: copy flash"                'addr.textContent = "copied"'
+has "chip: own row under 900px"       "@media (max-width:900px)"
+has "top gradient over the scene"     'id="topfade"'
 has "outstanding item pay button"     'data-settle="1"'
 has "ledger memo comes from the API"  "o.memo"
 has "one pay sequence for both"       "function payMemo("

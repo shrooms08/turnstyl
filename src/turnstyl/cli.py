@@ -403,7 +403,30 @@ def worker(
 
     if db:
         os.environ[DB_PATH_ENV_VAR_MEMORY] = db
+    announce_memory()
     raise typer.Exit(code=worker_main(None, interval, once))
+
+
+def announce_memory() -> None:
+    """Create the store if it is absent and say which one is in use.
+
+    Startup is the only moment turnstyl creates a database on purpose. The
+    API and the worker loop refuse to recreate one that disappears while they
+    run, so the delete beat stays a real loss.
+    """
+    from .memory import bootstrap_memory
+
+    try:
+        path, created, records = bootstrap_memory()
+    except Exception as e:  # surfaced with the path so an operator can act
+        fail(f"turnstyl: could not open or create the memory file: {type(e).__name__}: {e}")
+        raise
+    # soft_wrap: these lines are grepped from logs, and Rich would otherwise
+    # fold a long path onto a second line when stdout is not a terminal.
+    if created:
+        console.print(Text(f"memory: created {path}", style="dim"), soft_wrap=True)
+    else:
+        console.print(Text(f"memory: using {path} ({records} records)", style="dim"), soft_wrap=True)
 
 
 @app.command("serve")
@@ -432,8 +455,6 @@ def serve(
         # api.py resolves the path per request, so setting it here is enough.
         os.environ[DB_PATH_ENV_VAR_MEMORY] = db
 
-    from .api import db_path
-
     # Bind-check first: uvicorn reports "address already in use" only after we
     # would have printed a URL that serves someone else's process.
     import socket
@@ -452,17 +473,10 @@ def serve(
         raise
     probe.close()
 
-    target = db_path()
     console.print(
-        Text(f"turnstyl serving http://127.0.0.1:{port}", style="bold")
+        Text(f"turnstyl serving http://127.0.0.1:{port}", style="bold"), soft_wrap=True
     )
-    console.print(
-        Text(
-            f"reading {target}"
-            f"{'' if target.is_file() else ' (does not exist yet)'}",
-            style="dim",
-        )
-    )
+    announce_memory()
     if with_worker:
         from .worker import start_in_thread
 

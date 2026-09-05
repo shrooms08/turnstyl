@@ -32,8 +32,6 @@ wait_step(){ # wait_step <job> <step> <status> : poll up to 2 intervals + slack
 
 PID=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null | head -1); [ -n "$PID" ] && kill "$PID" && sleep 1
 rm -f "$DB" "$DB-wal" "$DB-shm"
-# the worker never creates a database; give it one to watch
-.venv/bin/turnstyl status >/dev/null 2>&1
 
 .venv/bin/turnstyl serve --with-worker --port $PORT --interval $INTERVAL --db "$DB" > /tmp/turnstyl-test-serve.log 2>&1 &
 SERVER=$!
@@ -41,6 +39,7 @@ trap 'kill $SERVER 2>/dev/null' EXIT
 for i in $(seq 1 20); do curl -s -o /dev/null "$BASE/api/status" && break; sleep 0.5; done
 
 echo "turnstyl API + worker test against $BASE (db $DB, interval ${INTERVAL}s)"
+grep -q "memory: created ${DB#./}" /tmp/turnstyl-test-serve.log && ok "serve created the missing store: $(grep -o 'memory: created.*' /tmp/turnstyl-test-serve.log | head -1)" || bad "serve created the missing store" "$(head -3 /tmp/turnstyl-test-serve.log)"
 
 # ---------------------------------------------------------------- POST
 SRC=$($PY -c "import json;print(json.dumps(open('examples/Vault.sol').read()))")
@@ -142,6 +141,24 @@ C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-
 [ "$(jget "/api/status" | jq_ "d['memory_missing']")" = "True" ] && ok "GET /api/status reports memory_missing" || bad "GET /api/status reports memory_missing"
 sleep $((INTERVAL * 2 + 1))
 [ ! -f "$DB" ] && ok "worker did not recreate the deleted database" || bad "worker did not recreate the deleted database"
+
+# ---------------------------------------------------------------- fresh memory on startup
+PORT3=8793; BASE3="http://127.0.0.1:$PORT3"; FRESH=./data/fresh_$$.db
+rm -f "$FRESH" "$FRESH-wal" "$FRESH-shm"
+.venv/bin/turnstyl serve --with-worker --port $PORT3 --interval 1 --db "$FRESH" > /tmp/turnstyl-test-fresh.log 2>&1 &
+S3=$!; disown $S3 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "$BASE3/api/status" && break; sleep 0.5; done
+grep -q "memory: created ${FRESH#./}" /tmp/turnstyl-test-fresh.log && ok "missing path: startup logs '$(grep -o 'memory: created.*' /tmp/turnstyl-test-fresh.log | head -1)'" || bad "missing path: startup log line" "$(head -3 /tmp/turnstyl-test-fresh.log)"
+[ "$(curl -s "$BASE3/api/status" | jq_ "d['db_exists'], d['records'], d['memory_missing']")" = "True 0 False" ] && ok "fresh store: db_exists true, records 0, memory_missing false" || bad "fresh store status" "$(curl -s "$BASE3/api/status" | jq_ "d['db_exists'], d['records'], d['memory_missing']")"
+kill $S3 2>/dev/null; sleep 1
+.venv/bin/turnstyl serve --with-worker --port $PORT3 --interval 1 --db "$FRESH" > /tmp/turnstyl-test-fresh2.log 2>&1 &
+S3=$!; disown $S3 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "$BASE3/api/status" && break; sleep 0.5; done
+grep -q "memory: using ${FRESH#./} (0 records)" /tmp/turnstyl-test-fresh2.log && ok "existing path: startup logs '$(grep -o 'memory: using.*' /tmp/turnstyl-test-fresh2.log | head -1)'" || bad "existing path: startup log line" "$(head -3 /tmp/turnstyl-test-fresh2.log)"
+rm -f "$FRESH" "$FRESH-wal" "$FRESH-shm"; sleep 3
+[ "$(curl -s "$BASE3/api/status" | jq_ "d['memory_missing']")" = "True" ] && ok "deleted while running: memory_missing true" || bad "deleted while running: memory_missing true"
+[ ! -f "$FRESH" ] && ok "neither the API nor the worker recreated it (2+ passes later)" || bad "file was recreated while running"
+kill $S3 2>/dev/null
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "RESULT: PASS - API and worker behave"; exit 0; fi

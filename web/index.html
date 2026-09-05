@@ -68,11 +68,15 @@ a:hover{color:var(--gold);border-bottom-color:var(--gold)}
 .topbar.shifted{padding-top:54px}
 .mark{font-family:var(--disp);font-weight:300;font-size:15px;letter-spacing:.02em}
 .mark b{font-weight:400}
-.status{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim)}
+.right{display:flex;align-items:flex-start;gap:22px}
+.status{display:flex;flex-direction:column;align-items:flex-end;gap:14px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim)}
 .status .row{display:flex;align-items:center;gap:8px}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--mute);flex:none}
 .dot.on{background:#4FB56E;box-shadow:0 0 0 3px rgba(79,181,110,.14)}
 .dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(229,72,77,.14)}
+.dot.warn{background:var(--gold);box-shadow:0 0 0 3px rgba(226,176,74,.16)}
+/* the top of the scene fades to black so the bar is always legible */
+#topfade{position:fixed;top:0;left:0;right:0;height:80px;z-index:1;pointer-events:none;background:linear-gradient(to bottom,#000 0%,rgba(0,0,0,.85) 40%,rgba(0,0,0,0) 100%)}
 .chain{color:var(--mute)}
 .chain a{color:var(--dim);border-bottom-color:var(--line)}
 
@@ -208,8 +212,26 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 .btn.quiet{border-color:var(--line-2);color:var(--dim)}
 .btn.quiet:hover{background:none;color:var(--gold);border-color:var(--gold)}
 .btn:disabled,.btn:disabled:hover{opacity:.45;cursor:not-allowed;background:none;color:var(--dim);border-color:var(--line-2)}
-.wallet{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
-.wallet .bal{color:var(--gold);font-variant-numeric:tabular-nums}
+/* wallet chip: a bordered pill on the card surface, readable over anything */
+.chip{display:inline-flex;align-items:center;gap:10px;min-height:32px;padding:6px 12px;background:var(--card);border:1px solid var(--line-2);color:var(--ink);font-family:var(--mono);font-weight:300;font-size:13px;letter-spacing:.01em;line-height:1;cursor:copy;white-space:nowrap;text-decoration:none;border-radius:0}
+button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;font-weight:300}
+.chip:hover{border-color:var(--gold)}
+.chip:disabled,.chip:disabled:hover{opacity:.5;cursor:not-allowed;border-color:var(--line-2)}
+.chip .addr{color:var(--ink)}
+.chip .lbl{color:var(--gold)}
+.chip .sep{width:1px;height:14px;background:var(--line-2);flex:none}
+.chip .bal{color:var(--gold);font-variant-numeric:tabular-nums}
+.chip.copied{border-color:var(--gold)}
+.chip.copied .addr{color:var(--gold)}
+.wallet{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.wallet .err{font-family:var(--mono);font-size:11px;color:var(--mute);max-width:32ch;text-align:right}
+@media (max-width:900px){
+  .topbar{flex-wrap:wrap}
+  .right{width:100%;flex-direction:column;align-items:flex-start;gap:12px}
+  .wallet{align-items:flex-start}
+  .wallet .err{text-align:left}
+  .status{align-items:flex-start}
+}
 .src{width:100%;display:block;background:#050505;border:1px solid var(--line);color:#CFCAC2;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;padding:14px 16px;resize:vertical;min-height:180px;outline:none}
 .src:focus{border-color:var(--line-2)}
 .drop{margin-top:10px;border:1px dashed var(--line-2);padding:12px 14px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;text-align:center}
@@ -228,6 +250,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
 
 <canvas id="scene" aria-hidden="true"></canvas>
+<div id="topfade" aria-hidden="true"></div>
 
 <div id="loader">
   <div class="load-label">loading memory</div>
@@ -240,10 +263,12 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 
 <div class="topbar" id="topbar">
   <a class="mark" href="#top" style="border:0"><img src="/static/brand/lockup-a.svg" alt="turnstyl" height="22" style="height:22px;width:auto;display:block"></a>
-  <div class="status" id="statusCluster">
-    <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
-    <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
-    <div class="row wallet" id="walletRow"></div>
+  <div class="right">
+    <div class="wallet" id="walletRow"></div>
+    <div class="status" id="statusCluster">
+      <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
+      <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
+    </div>
   </div>
 </div>
 
@@ -827,24 +852,27 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       .catch(function(e){ W.err = errText(e); })
       .then(function(){ W.busy = false; renderWallet(); render(); });
   }
+  // One chip, four states: gray dot disconnected, green on Base Sepolia,
+  // amber on any other chain (the chip's label becomes the switch action).
   function renderWallet(){
     var row = $("#walletRow");
     if(!row) return;
+    var err = W.err ? '<span class="err">'+esc(W.err)+'</span>' : "";
     if(!W.available){
       var why = typeof window.ethers === "undefined" ? "the ethers library did not load" : "no injected wallet (window.ethereum) was found; install Rabby or MetaMask and reload";
-      row.innerHTML = '<button type="button" class="btn quiet" disabled title="'+esc(why)+'">No wallet found</button>';
+      row.innerHTML = '<button type="button" class="chip" id="walletChip" disabled title="'+esc(why)+'"><span class="dot"></span><span class="addr">No wallet found</span></button>';
       return;
     }
     if(!W.addr){
-      row.innerHTML = '<button type="button" class="btn" id="connectBtn"'+(W.busy ? " disabled" : "")+'>'+(W.busy ? "Connecting…" : "Connect wallet")+'</button>' +
-        (W.err ? '<span class="muted">'+esc(W.err)+'</span>' : "");
+      row.innerHTML = '<button type="button" class="chip" id="connectBtn"'+(W.busy ? " disabled" : "")+'><span class="dot"></span><span class="addr">'+(W.busy ? "Connecting…" : "Connect wallet")+'</span></button>' + err;
       return;
     }
     var wrong = W.chainId && W.chainId !== BASE_CHAIN;
-    row.innerHTML = cp(W.addr) +
-      (wrong ? '<button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>'
-             : '<span class="bal">'+(W.balance == null ? "—" : usdc(W.balance))+' USDC</span>') +
-      (W.err ? '<span class="muted">'+esc(W.err)+'</span>' : "");
+    if(wrong){
+      row.innerHTML = '<button type="button" class="chip" id="switchChainBtn" title="'+esc(W.addr)+' is on another chain; click to switch"><span class="dot warn"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="lbl">switch to Base Sepolia</span></button>' + err;
+      return;
+    }
+    row.innerHTML = '<span class="chip" id="walletChip" data-copy="'+esc(W.addr)+'" title="'+esc(W.addr)+' (click to copy)"><span class="dot on"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="bal">'+(W.balance == null ? "—" : usdc(W.balance))+' USDC</span></span>' + err;
   }
   if(W.available && typeof window.ethereum.on === "function"){
     window.ethereum.on("accountsChanged", function(){ P = { jobId:null, step:null, status:null, tx:null, busy:false }; readWallet(true).then(render); });
@@ -1007,7 +1035,9 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
       var done = function(){
         var was = copyEl.textContent;
         copyEl.classList.add("copied");
-        if(copyEl.tagName === "BUTTON"){ copyEl.textContent = "copied"; setTimeout(function(){ copyEl.textContent = was; copyEl.classList.remove("copied"); },1200); }
+        var addr = copyEl.classList.contains("chip") ? copyEl.querySelector(".addr") : null;
+        if(addr){ var wasAddr = addr.textContent; addr.textContent = "copied"; setTimeout(function(){ addr.textContent = wasAddr; copyEl.classList.remove("copied"); },1200); }
+        else if(copyEl.tagName === "BUTTON"){ copyEl.textContent = "copied"; setTimeout(function(){ copyEl.textContent = was; copyEl.classList.remove("copied"); },1200); }
         else setTimeout(function(){ copyEl.classList.remove("copied"); },1200);
       };
       if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(val).then(done, done);

@@ -10,6 +10,8 @@
 <style></style>
 <style>
 :root{
+  --header-h:64px;          /* 56px under 700px */
+  --banner-h:0px;           /* set by the script while a banner shows */
   --bg:#000;
   --ink:#EFECE6;
   --dim:#9C968C;
@@ -62,21 +64,21 @@ a:hover{color:var(--gold);border-bottom-color:var(--gold)}
 .load-rule i{position:absolute;inset:0;background:var(--gold);transform-origin:left;transform:scaleX(0);transition:transform .4s linear}
 
 /* ── shell ──────────────────────────────────────────────────────── */
-.shell{position:relative;z-index:2}
+.shell{position:relative;z-index:2;padding-top:calc(var(--header-h) + var(--banner-h))}
 .wrap{width:100%;max-width:1160px;margin:0 auto;padding:0 40px}
-.topbar{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:26px 40px;pointer-events:auto}
-.topbar.shifted{padding-top:54px}
-.mark{font-family:var(--disp);font-weight:300;font-size:15px;letter-spacing:.02em}
+/* fixed, solid header: wordmark left, wallet chip right, one row at every width.
+   It sits below the banner (top = banner height) and above the shell and scene. */
+.topbar{position:fixed;top:var(--banner-h);left:0;right:0;height:var(--header-h);z-index:30;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 40px;background:#000;border-bottom:1px solid rgba(255,255,255,.08);pointer-events:auto}
+.mark{font-family:var(--disp);font-weight:300;font-size:15px;letter-spacing:.02em;flex:none}
 .mark b{font-weight:400}
-.right{display:flex;align-items:flex-start;gap:22px}
-.status{display:flex;flex-direction:column;align-items:flex-end;gap:14px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim)}
-.status .row{display:flex;align-items:center;gap:8px}
+/* the memory path and chain lines live in the console now, as its first row */
+.statusrow{display:flex;flex-wrap:wrap;align-items:center;gap:10px 24px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim);padding:0 0 16px;margin-bottom:22px;border-bottom:1px solid var(--line)}
+.statusrow .row{display:flex;align-items:center;gap:8px;min-width:0}
+.statusrow .row .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--mute);flex:none}
 .dot.on{background:#4FB56E;box-shadow:0 0 0 3px rgba(79,181,110,.14)}
 .dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(229,72,77,.14)}
 .dot.warn{background:var(--gold);box-shadow:0 0 0 3px rgba(226,176,74,.16)}
-/* the top of the scene fades to black so the bar is always legible */
-#topfade{position:fixed;top:0;left:0;right:0;height:80px;z-index:1;pointer-events:none;background:linear-gradient(to bottom,#000 0%,rgba(0,0,0,.85) 40%,rgba(0,0,0,0) 100%)}
 .chain{color:var(--mute)}
 .chain a{color:var(--dim);border-bottom-color:var(--line)}
 
@@ -90,7 +92,7 @@ body.memory-missing.agent-offline #banner{background:var(--red);color:#0A0000}
 .links a{color:var(--dim);border-bottom-color:var(--line)}
 
 /* ── hero ───────────────────────────────────────────────────────── */
-.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:150px 0 110px}
+.hero{min-height:calc(100vh - var(--header-h));display:flex;flex-direction:column;justify-content:center;padding:90px 0 110px}
 h1{font-family:var(--disp);font-weight:200;font-size:clamp(42px,6.6vw,88px);line-height:1.02;letter-spacing:-.025em;margin:0;max-width:19ch;text-wrap:balance}
 .hero .sub{margin:34px 0 0;font-size:19px;line-height:1.55;color:var(--dim);max-width:44ch;text-wrap:pretty}
 .hero .live{margin-top:46px;display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
@@ -198,13 +200,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
   .steps{grid-template-columns:repeat(2,1fr)}
   .grid2{grid-template-columns:1fr}
 }
-@media (max-width:720px){
-  .wrap{padding:0 22px}
-  .topbar{padding:20px 22px;flex-direction:column;align-items:flex-start;gap:10px}
-  .status{align-items:flex-start}
-  .hero{padding:190px 0 90px}
-  .steps{grid-template-columns:1fr}
-}
+
 @media (prefers-reduced-motion:reduce){
   .reveal{transition:none;opacity:1;transform:none}
   .blip{animation:none}
@@ -227,15 +223,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 .chip .bal{color:var(--gold);font-variant-numeric:tabular-nums}
 .chip.copied{border-color:var(--gold)}
 .chip.copied .addr{color:var(--gold)}
-.wallet{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
-.wallet .err{font-family:var(--mono);font-size:11px;color:var(--mute);max-width:32ch;text-align:right}
-@media (max-width:900px){
-  .topbar{flex-wrap:wrap}
-  .right{width:100%;flex-direction:column;align-items:flex-start;gap:12px}
-  .wallet{align-items:flex-start}
-  .wallet .err{text-align:left}
-  .status{align-items:flex-start}
-}
+.wallet{display:flex;align-items:center;gap:10px;min-width:0}
+.wallet .err{font-family:var(--mono);font-size:11px;color:var(--mute);max-width:28ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .src{width:100%;display:block;background:#050505;border:1px solid var(--line);color:#CFCAC2;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;padding:14px 16px;resize:vertical;min-height:180px;outline:none}
 .src:focus{border-color:var(--line-2)}
 .drop{margin-top:10px;border:1px dashed var(--line-2);padding:12px 14px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;text-align:center}
@@ -247,6 +236,60 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 .hero h1{font-size:clamp(64px,8.5vw,132px);line-height:1.02}
 .story h2{font-size:clamp(48px,5.5vw,84px)}
 .hero h1{max-width:56vw}
+
+/* ── mobile ─────────────────────────────────────────────────────── */
+@media (max-width:700px){
+  :root{--header-h:56px}
+  .wrap{padding:0 18px}
+  .topbar{padding:0 16px;gap:10px}
+  .mark img{height:18px !important}
+  /* chip: dot, address, balance; 11px; never wider than 60% of the viewport */
+  .chip{font-size:11px;padding:5px 10px;gap:8px;min-height:30px;max-width:60vw;overflow:hidden;text-overflow:ellipsis}
+  button.chip{font-size:11px}
+  .chip .addr,.chip .bal,.chip .lbl{overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .wallet .err{display:none}
+  /* type scale */
+  body{font-size:16px;line-height:1.5}
+  .hero h1{font-size:clamp(38px,11vw,56px);line-height:1.05;max-width:none}
+  .hero .sub{font-size:16px;line-height:1.5;margin-top:22px}
+  .hero{padding:48px 0 64px}
+  .hero .live{margin-top:30px;font-size:11px}
+  .scrollcue{margin-top:48px}
+  .story h2{font-size:clamp(30px,8.5vw,42px);margin-bottom:20px}
+  .story p{font-size:16px;line-height:1.5}
+  .story .kicker{font-size:10px;margin-bottom:18px}
+  .livelink{font-size:11.5px}
+  /* loader and counter scale down with the type */
+  .load-count{font-size:56px}
+  .load-label,.load-unit{font-size:10px}
+  .load-rule{width:120px}
+  #loader{gap:18px}
+  /* story: 40% less vertical padding, copy readable over the particles */
+  .story{min-height:auto;padding:48px 0}
+  .story .inner{position:relative;padding:14px 18px 14px 0;background:linear-gradient(to right,rgba(0,0,0,.7) 0%,rgba(0,0,0,0) 100%)}
+  /* console */
+  .console{padding:44px 0 30px}
+  .chead{flex-direction:column;align-items:flex-start;gap:8px}
+  .chead h2{font-size:26px}
+  .chead .meta{text-align:left}
+  .card{padding:16px 16px}
+  .kv{grid-template-columns:1fr 1fr;gap:12px 14px}
+  .steps{grid-template-columns:1fr}
+  .grid2{grid-template-columns:1fr}
+  .src{min-height:160px}
+  .out pre{max-height:300px}
+  /* tables become label / value lists */
+  table.jobs,table.jobs tbody,table.jobs tr,table.jobs td{display:block;width:100%}
+  table.jobs thead{display:none}
+  table.jobs tr{border-bottom:1px solid var(--line);padding:10px 0}
+  table.jobs tr:last-child{border-bottom:0}
+  table.jobs td{display:grid;grid-template-columns:92px 1fr;gap:10px;padding:4px 0;border:0;font-size:13px;align-items:center}
+  table.jobs td:before{content:attr(data-label);font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
+  /* the memory-read block is collapsed by default on mobile (the script leaves
+     it closed); the summary is the tap target */
+  .mem summary{padding:12px 14px}
+  footer{margin-top:50px;padding:26px 0 40px}
+}
 </style>
 </head>
 <body>
@@ -254,7 +297,6 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 
 
 <canvas id="scene" aria-hidden="true"></canvas>
-<div id="topfade" aria-hidden="true"></div>
 
 <div id="loader">
   <div class="load-label">loading memory</div>
@@ -267,13 +309,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 
 <div class="topbar" id="topbar">
   <a class="mark" href="#top" style="border:0"><img src="static/brand/lockup-a.svg" alt="turnstyl" height="22" style="height:22px;width:auto;display:block"></a>
-  <div class="right">
-    <div class="wallet" id="walletRow"></div>
-    <div class="status" id="statusCluster">
-      <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
-      <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
-    </div>
-  </div>
+  <div class="wallet" id="walletRow"></div>
 </div>
 
 <div class="shell" id="top">
@@ -300,7 +336,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     <div class="inner reveal">
       <p class="kicker">02 — memory</p>
       <h2>Restart it. It remembers.</h2>
-      <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer who has paid before gets credit — the next step runs before the invoice clears.</p>
+      <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer with three fully paid jobs behind them gets credit — the next step runs before the invoice clears.</p>
       <div class="livelink" id="latestDecision">
         <span class="d">—</span><span class="e">waiting for the journal…</span>
       </div>
@@ -324,6 +360,10 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   </section>
 
   <section class="console wrap" id="console" data-state="ring">
+    <div class="statusrow" id="statusCluster">
+      <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
+      <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
+    </div>
     <div class="chead">
       <h2 id="consoleTitle">Operator console</h2>
       <div class="meta" id="consoleMeta">polling every 3s</div>
@@ -515,13 +555,16 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     document.body.classList.toggle("memory-missing", !!S.missing);
     document.body.classList.toggle("agent-offline", !!S.offline && !S.missing);
     TURNSTYL.memoryMissing = !!S.missing;
-    $("#topbar").classList.toggle("shifted", !!S.missing || !!S.offline);
+    var banner = $("#banner");
     if(S.missing){
-      $("#banner").textContent = "memory deleted: " + (st.db_path || "unknown path");
+      banner.textContent = "memory deleted: " + (st.db_path || "unknown path");
       setState("scatter");
     } else if(S.offline){
-      $("#banner").textContent = "agent offline: the operator's machine is not reachable right now";
+      banner.textContent = "agent offline: the operator's machine is not reachable right now";
     }
+    // the fixed header sits under the banner and the page pads for both
+    var bannerH = (S.missing || S.offline) ? banner.offsetHeight : 0;
+    document.documentElement.style.setProperty("--banner-h", bannerH + "px");
 
     var dot = $("#dbDot");
     dot.className = "dot " + (S.missing ? "off" : (st.db_exists ? "on" : (S.connected ? "off" : "")));
@@ -699,7 +742,9 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 
     var rows = events.map(function(e, i){
       var key = (e.ts||"") + ":" + (e.step||"") + ":" + (e.decision||"");
-      var isOpen = S.memTouched[key] != null ? S.memTouched[key] : (i === 0);
+      // newest event open by default on desktop; closed on mobile, tap to expand
+      var mobile = window.matchMedia && window.matchMedia("(max-width:700px)").matches;
+      var isOpen = S.memTouched[key] != null ? S.memTouched[key] : (i === 0 && !mobile);
       var acted = (e.acted||[]).map(function(a){ return "<li>"+esc(a)+"</li>"; }).join("");
       var evaluated = (e.evaluated||[]);
       return '<div class="ev">' +
@@ -748,7 +793,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
         cell("unpaid, prior jobs", esc(L.unpaid_from_prior_jobs==null?"—":L.unpaid_from_prior_jobs)) +
         cell("defaults", esc(L.defaults==null?"—":L.defaults)) +
         cell("paid since default", esc(L.consecutive_paid_since_default==null?"—":L.consecutive_paid_since_default)) +
-        cell("steps until credit", esc(T.steps_until_credit==null?"—":T.steps_until_credit)) +
+        cell("completed paid jobs", esc(L.completed_paid_jobs==null?"0":L.completed_paid_jobs)) +
+        cell("jobs until credit", esc((T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit)==null?"—":(T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit))) +
         (T.would_decide ? cell("would decide", decisionPill(T.would_decide)) : "") +
       "</div>" +
       (T.explanation ? '<div class="expl">'+esc(T.explanation)+"</div>" : "") +
@@ -789,12 +835,12 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(!jobs.length) return '<div class="card"><h3>'+(S.mine ? "your jobs" : "jobs")+'</h3>' + mineToggle() + '<div class="empty">'+(S.mine ? "no jobs for this wallet yet" : "no jobs in memory")+'</div></div>';
     var rows = jobs.map(function(j){
       return "<tr>" +
-        '<td><a href="?job='+encodeURIComponent(j.job_id)+'#console">'+esc(j.job_id)+"</a></td>" +
-        "<td>"+cp(j.buyer)+"</td>" +
-        "<td>"+statusPill(j.status)+"</td>" +
-        "<td>"+esc(j.current_step==null?"—":j.current_step)+"</td>" +
-        '<td class="muted">'+esc(rel(j.updated_at))+"</td>" +
-        '<td class="muted">'+(j.archived?"archived":"live")+"</td>" +
+        '<td data-label="job id"><a href="?job='+encodeURIComponent(j.job_id)+'#console">'+esc(j.job_id)+"</a></td>" +
+        '<td data-label="buyer">'+cp(j.buyer)+"</td>" +
+        '<td data-label="status">'+statusPill(j.status)+"</td>" +
+        '<td data-label="step">'+esc(j.current_step==null?"—":j.current_step)+"</td>" +
+        '<td data-label="updated" class="muted">'+esc(rel(j.updated_at))+"</td>" +
+        '<td data-label="source" class="muted">'+(j.archived?"archived":"live")+"</td>" +
         "</tr>";
     }).join("");
     return '<div class="card"><h3>'+(S.mine ? "your jobs" : "jobs in memory")+'</h3>' + mineToggle() + '<table class="jobs">' +

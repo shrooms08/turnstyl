@@ -1,0 +1,2305 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>turnstyl — an agent that never forgets who paid</title>
+<link rel="icon" type="image/svg+xml" href="static/brand/mark-light.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&family=Outfit:wght@200;300;400&family=Work+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style></style>
+<style>
+:root{
+  --bg:#000;
+  --ink:#EFECE6;
+  --dim:#9C968C;
+  --mute:#615C55;
+  --line:rgba(255,255,255,.09);
+  --line-2:rgba(255,255,255,.16);
+  --card:#070707;
+  --card-2:#0B0B0B;
+  --gold:#E2B04A;
+  --violet:#7F77DD;
+  --red:#E5484D;
+  --sans:"Work Sans",system-ui,sans-serif;
+  --disp:"Outfit",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--sans);font-weight:300;font-size:17px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+}
+a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line-2)}
+a:hover{color:var(--gold);border-bottom-color:var(--gold)}
+::selection{background:var(--gold);color:#000}
+
+/* ── fixed WebGL stage ─────────────────────────────────────────────
+   THREE.JS MOUNT POINT.
+   A later, separate script attaches to #scene and renders the particle
+   form. It should read the active story state from:
+     document.body.dataset.state        // "ring" | "pulse" | "reform" | "scatter"
+     window.TURNSTYL.state              // same value
+     window.addEventListener('scenestate', e => e.detail.state)
+   and must honour document.body.classList.contains('memory-missing'),
+   which locks the state to "scatter".
+   The scene now lives at the end of this file (import map + module
+   script); nothing above this line was changed to accommodate it.
+   ─────────────────────────────────────────────────────────────────── */
+#scene{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;display:block;background:transparent}
+
+/* ── loader ─────────────────────────────────────────────────────── */
+#loader{position:fixed;inset:0;z-index:100;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;transition:opacity .9s ease}
+#loader.gone{opacity:0;pointer-events:none}
+#loader.off{display:none}
+.load-label{font-size:11px;letter-spacing:.34em;text-transform:uppercase;color:var(--mute)}
+.load-count{font-family:var(--disp);font-weight:200;font-size:88px;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.load-unit{font-family:var(--mono);font-weight:300;font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--mute)}
+.load-rule{width:180px;height:1px;background:var(--line);position:relative;overflow:hidden}
+.load-rule i{position:absolute;inset:0;background:var(--gold);transform-origin:left;transform:scaleX(0);transition:transform .4s linear}
+
+/* ── shell ──────────────────────────────────────────────────────── */
+.shell{position:relative;z-index:2}
+.wrap{width:100%;max-width:1160px;margin:0 auto;padding:0 40px}
+.topbar{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:26px 40px;pointer-events:auto}
+.topbar.shifted{padding-top:54px}
+.mark{font-family:var(--disp);font-weight:300;font-size:15px;letter-spacing:.02em}
+.mark b{font-weight:400}
+.right{display:flex;align-items:flex-start;gap:22px}
+.status{display:flex;flex-direction:column;align-items:flex-end;gap:14px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim)}
+.status .row{display:flex;align-items:center;gap:8px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--mute);flex:none}
+.dot.on{background:#4FB56E;box-shadow:0 0 0 3px rgba(79,181,110,.14)}
+.dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(229,72,77,.14)}
+.dot.warn{background:var(--gold);box-shadow:0 0 0 3px rgba(226,176,74,.16)}
+/* the top of the scene fades to black so the bar is always legible */
+#topfade{position:fixed;top:0;left:0;right:0;height:80px;z-index:1;pointer-events:none;background:linear-gradient(to bottom,#000 0%,rgba(0,0,0,.85) 40%,rgba(0,0,0,0) 100%)}
+.chain{color:var(--mute)}
+.chain a{color:var(--dim);border-bottom-color:var(--line)}
+
+/* ── memory banner ──────────────────────────────────────────────── */
+#banner{position:fixed;top:0;left:0;right:0;z-index:60;display:none;background:var(--red);color:#0A0000;
+  font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;padding:10px 40px;text-align:center;font-weight:500}
+body.memory-missing #banner{display:block}
+body.agent-offline #banner{display:block;background:#2A2A2A;color:var(--dim)}
+body.memory-missing.agent-offline #banner{background:var(--red);color:#0A0000}
+.links{margin-top:10px;display:flex;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+.links a{color:var(--dim);border-bottom-color:var(--line)}
+
+/* ── hero ───────────────────────────────────────────────────────── */
+.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:150px 0 110px}
+h1{font-family:var(--disp);font-weight:200;font-size:clamp(42px,6.6vw,88px);line-height:1.02;letter-spacing:-.025em;margin:0;max-width:19ch;text-wrap:balance}
+.hero .sub{margin:34px 0 0;font-size:19px;line-height:1.55;color:var(--dim);max-width:44ch;text-wrap:pretty}
+.hero .live{margin-top:46px;display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+.hero .live b{color:var(--gold);font-weight:400;font-variant-numeric:tabular-nums}
+.scrollcue{margin-top:82px;font-family:var(--mono);font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:#3A3733}
+
+/* ── story ──────────────────────────────────────────────────────── */
+.story{min-height:86vh;display:flex;align-items:center;padding:80px 0}
+.story .inner{max-width:760px}
+.story h2{font-family:var(--disp);font-weight:200;font-size:clamp(32px,4.4vw,58px);line-height:1.08;letter-spacing:-.02em;margin:0 0 30px;max-width:22ch;text-wrap:balance}
+.story p{margin:0 0 20px;font-size:18px;line-height:1.65;color:var(--dim);max-width:60ch;text-wrap:pretty}
+.story .kicker{font-family:var(--mono);font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:var(--mute);margin:0 0 26px}
+.story.danger h2{color:var(--red)}
+.livelink{margin-top:34px;padding-top:22px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.8;color:var(--dim);display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}
+.livelink .d{color:var(--gold);letter-spacing:.08em}
+.livelink .e{color:var(--mute);word-break:break-word;max-width:64ch}
+.reveal{opacity:0;transform:translateY(26px);transition:opacity 1s cubic-bezier(.2,.7,.2,1),transform 1s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1;transform:none}
+
+/* ── console ────────────────────────────────────────────────────── */
+.console{padding:70px 0 40px}
+.chead{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:28px}
+.chead h2{font-family:var(--disp);font-weight:200;font-size:34px;letter-spacing:-.01em;margin:0}
+.chead .meta{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);text-align:right}
+.card{background:var(--card);border:1px solid var(--line);padding:22px 24px;margin-bottom:14px}
+.card.tight{padding:18px 20px}
+.card h3{font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0 0 18px}
+.mono{font-family:var(--mono);font-weight:300;letter-spacing:.01em}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px 22px}
+.kv .k{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:5px}
+.kv .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-word}
+.kv .v.big{font-size:16px}
+.pill{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:400;letter-spacing:.16em;text-transform:uppercase;padding:4px 9px;border:1px solid var(--line-2);color:var(--dim);white-space:nowrap}
+.pill.gold{color:var(--gold);border-color:rgba(226,176,74,.5)}
+.pill.violet{color:var(--violet);border-color:rgba(127,119,221,.5)}
+.pill.red{color:var(--red);border-color:rgba(229,72,77,.5)}
+.pill.solid{background:var(--gold);color:#000;border-color:var(--gold)}
+.muted{color:var(--mute)}
+.cp{cursor:copy;border-bottom:1px dotted rgba(255,255,255,.2)}
+.cp:hover{color:var(--gold);border-bottom-color:var(--gold)}
+.cp.copied{color:var(--gold);border-bottom-color:var(--gold)}
+
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.step{background:var(--card-2);border:1px solid var(--line);padding:16px 16px 18px;display:flex;flex-direction:column;gap:12px;cursor:pointer;text-align:left;color:inherit;font:inherit;transition:border-color .25s ease,background .25s ease}
+.step:hover{border-color:var(--line-2)}
+.step.current{border-color:rgba(226,176,74,.55);background:#0C0A05}
+.step.open{border-color:var(--line-2);background:#101010}
+.step .no{display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute)}
+.step .nm{font-family:var(--disp);font-weight:300;font-size:19px;letter-spacing:.01em}
+.step .price{font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
+.step .price small{color:var(--mute);font-size:10px;letter-spacing:.16em;margin-left:5px}
+.step .facts{display:flex;flex-direction:column;gap:5px;font-family:var(--mono);font-size:11px;color:var(--mute);line-height:1.5}
+.step .txs{display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:11px}
+.step .txs a,.step .txs span{color:var(--dim);border-bottom-color:var(--line)}
+.tag{display:inline-block;font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--violet);border:1px solid rgba(127,119,221,.4);padding:2px 6px;align-self:flex-start}
+.out{margin-top:12px;background:#050505;border:1px solid var(--line);padding:18px 20px}
+.out .oh{display:flex;justify-content:space-between;gap:16px;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:14px}
+.out pre{margin:0;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;color:#CFCAC2;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
+
+.invoice{border-color:rgba(226,176,74,.4);background:#0B0904}
+.invoice .cmd{margin-top:16px;display:flex;align-items:center;gap:12px;background:#050505;border:1px solid var(--line);padding:12px 14px;font-family:var(--mono);font-size:12.5px;color:var(--gold);overflow-x:auto}
+.invoice .cmd button{flex:none;background:none;border:1px solid rgba(226,176,74,.4);color:var(--gold);font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;padding:5px 9px;cursor:pointer}
+.invoice .cmd button:hover{background:var(--gold);color:#000}
+.wait{margin-top:12px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:9px}
+.blip{width:5px;height:5px;border-radius:50%;background:var(--gold);animation:blip 1.8s ease-in-out infinite}
+@keyframes blip{0%,100%{opacity:.25}50%{opacity:1}}
+
+.ev{border-top:1px solid var(--line);padding:20px 0}
+.ev:first-of-type{border-top:0;padding-top:0}
+.ev .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+.ev .ts{font-family:var(--mono);font-size:11px;color:var(--mute);letter-spacing:.06em}
+.ev .stp{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase}
+.ev ul.acted{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
+.ev ul.acted li{font-size:15px;color:var(--ink);padding-left:16px;position:relative;line-height:1.5}
+.ev ul.acted li:before{content:"";position:absolute;left:0;top:.62em;width:6px;height:1px;background:var(--gold)}
+.mem{margin-top:16px;border:1px solid var(--line);background:#040404}
+.mem summary{cursor:pointer;list-style:none;padding:11px 14px;font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--violet);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.mem summary::-webkit-details-marker{display:none}
+.mem summary .n{color:var(--mute)}
+.mem[open] summary{border-bottom:1px solid var(--line)}
+.mem .lines{padding:14px;display:flex;flex-direction:column;gap:8px}
+.mem .lines code{font-family:var(--mono);font-weight:300;font-size:12.5px;line-height:1.7;color:#C8C3BA;white-space:pre-wrap;word-break:break-word;display:block;padding-left:18px;position:relative}
+.mem .lines code:before{content:"›";position:absolute;left:0;color:var(--violet)}
+
+table.jobs{width:100%;border-collapse:collapse}
+table.jobs th{text-align:left;font-family:var(--mono);font-weight:400;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);padding:0 14px 12px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+table.jobs td{padding:15px 14px 15px 0;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13.5px;color:var(--dim);vertical-align:middle}
+table.jobs tr:last-child td{border-bottom:0}
+table.jobs td a{color:var(--ink)}
+.empty{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);padding:26px 0}
+.gone-note{color:var(--red)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+.expl{margin-top:18px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.8;color:#C8C3BA;word-break:break-word}
+.outs{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.outs .o{display:flex;gap:14px;font-family:var(--mono);font-size:12px;color:var(--dim)}
+.back{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);border-bottom:0}
+.back:hover{color:var(--gold)}
+
+footer{border-top:1px solid var(--line);margin-top:90px;padding:34px 0 54px;display:flex;flex-wrap:wrap;gap:18px 40px;align-items:baseline;justify-content:space-between}
+footer .fmark{font-family:var(--disp);font-weight:300;font-size:15px}
+footer .fl{font-family:var(--mono);font-size:11.5px;color:var(--mute);display:flex;flex-wrap:wrap;gap:8px 22px;align-items:baseline}
+footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
+
+@media (max-width:1080px){
+  .steps{grid-template-columns:repeat(2,1fr)}
+  .grid2{grid-template-columns:1fr}
+}
+@media (max-width:720px){
+  .wrap{padding:0 22px}
+  .topbar{padding:20px 22px;flex-direction:column;align-items:flex-start;gap:10px}
+  .status{align-items:flex-start}
+  .hero{padding:190px 0 90px}
+  .steps{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){
+  .reveal{transition:none;opacity:1;transform:none}
+  .blip{animation:none}
+}
+
+/* ── buyer flow: same language as the console ───────────────────── */
+.btn{background:none;border:1px solid rgba(226,176,74,.4);color:var(--gold);font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;padding:5px 9px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--gold);color:#000}
+.btn.quiet{border-color:var(--line-2);color:var(--dim)}
+.btn.quiet:hover{background:none;color:var(--gold);border-color:var(--gold)}
+.btn:disabled,.btn:disabled:hover{opacity:.45;cursor:not-allowed;background:none;color:var(--dim);border-color:var(--line-2)}
+/* wallet chip: a bordered pill on the card surface, readable over anything */
+.chip{display:inline-flex;align-items:center;gap:10px;min-height:32px;padding:6px 12px;background:var(--card);border:1px solid var(--line-2);color:var(--ink);font-family:var(--mono);font-weight:300;font-size:13px;letter-spacing:.01em;line-height:1;cursor:copy;white-space:nowrap;text-decoration:none;border-radius:0}
+button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;font-weight:300}
+.chip:hover{border-color:var(--gold)}
+.chip:disabled,.chip:disabled:hover{opacity:.5;cursor:not-allowed;border-color:var(--line-2)}
+.chip .addr{color:var(--ink)}
+.chip .lbl{color:var(--gold)}
+.chip .sep{width:1px;height:14px;background:var(--line-2);flex:none}
+.chip .bal{color:var(--gold);font-variant-numeric:tabular-nums}
+.chip.copied{border-color:var(--gold)}
+.chip.copied .addr{color:var(--gold)}
+.wallet{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.wallet .err{font-family:var(--mono);font-size:11px;color:var(--mute);max-width:32ch;text-align:right}
+@media (max-width:900px){
+  .topbar{flex-wrap:wrap}
+  .right{width:100%;flex-direction:column;align-items:flex-start;gap:12px}
+  .wallet{align-items:flex-start}
+  .wallet .err{text-align:left}
+  .status{align-items:flex-start}
+}
+.src{width:100%;display:block;background:#050505;border:1px solid var(--line);color:#CFCAC2;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;padding:14px 16px;resize:vertical;min-height:180px;outline:none}
+.src:focus{border-color:var(--line-2)}
+.drop{margin-top:10px;border:1px dashed var(--line-2);padding:12px 14px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;text-align:center}
+.drop.over{border-color:var(--gold);color:var(--gold)}
+.actions{margin-top:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.actions .wait{margin-top:0}
+
+/* ── part 6: display type ───────────────────────────────────────── */
+.hero h1{font-size:clamp(64px,8.5vw,132px);line-height:1.02}
+.story h2{font-size:clamp(48px,5.5vw,84px)}
+.hero h1{max-width:56vw}
+</style>
+</head>
+<body>
+
+
+
+<canvas id="scene" aria-hidden="true"></canvas>
+<div id="topfade" aria-hidden="true"></div>
+
+<div id="loader">
+  <div class="load-label">loading memory</div>
+  <div class="load-count" id="loadCount">0</div>
+  <div class="load-unit" id="loadUnit">records</div>
+  <div class="load-rule"><i id="loadRule"></i></div>
+</div>
+
+<div id="banner" role="status">memory deleted</div>
+
+<div class="topbar" id="topbar">
+  <a class="mark" href="#top" style="border:0"><img src="static/brand/lockup-a.svg" alt="turnstyl" height="22" style="height:22px;width:auto;display:block"></a>
+  <div class="right">
+    <div class="wallet" id="walletRow"></div>
+    <div class="status" id="statusCluster">
+      <div class="row"><span class="dot" id="dbDot"></span><span class="mono" id="dbPath">connecting…</span></div>
+      <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="shell" id="top">
+
+  <section class="hero wrap" data-state="ring">
+    <div class="reveal in">
+      <h1>An agent that never forgets who paid.</h1>
+      <p class="sub">Paid per step in USDC on Base. Everything it knows lives in one memory file.</p>
+      <div class="live"><span class="dot on" id="liveDot"></span><span><b id="recCount">—</b> <span id="recLabel">records in memory</span></span></div>
+      <div class="scrollcue">scroll</div>
+    </div>
+  </section>
+
+  <section class="story wrap" data-state="pulse">
+    <div class="inner reveal">
+      <p class="kicker">01 — metering</p>
+      <h2>Every step is paid.</h2>
+      <p>Scope is free. It reads the contract, states what it will look at, and stops. Findings, patch and verify are sold one at a time — each with its own price, its own invoice, its own receipt.</p>
+      <p>The buyer pays on Base, and the agent commits a hash of its answer next to the payment. Money and output are recorded in the same place, in the same order they happened.</p>
+    </div>
+  </section>
+
+  <section class="story wrap" data-state="reform">
+    <div class="inner reveal">
+      <p class="kicker">02 — memory</p>
+      <h2>Restart it. It remembers.</h2>
+      <p>Kill the process and start a new one. It reads the memory file, resumes at the recorded step, and never redoes work that was already paid for. A buyer who has paid before gets credit — the next step runs before the invoice clears.</p>
+      <div class="livelink" id="latestDecision">
+        <span class="d">—</span><span class="e">waiting for the journal…</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="story wrap danger" data-state="scatter">
+    <div class="inner reveal">
+      <p class="kicker">03 — failure</p>
+      <h2>Delete the memory.</h2>
+      <p>Nothing on chain tells the agent it has met this buyer. It invoices the same address again for work already paid, and the second payment lands next to the first — two receipts, one answer, no way to tell from the ledger which one was owed.</p>
+    </div>
+  </section>
+
+  <section class="story wrap" data-state="reform">
+    <div class="inner reveal">
+      <p class="kicker">04 — the split</p>
+      <h2>The chain remembers the money. Not the reason.</h2>
+      <p>Base holds payments and output hashes. It does not hold findings, prices, cost history, or trust. A memo is opaque without the memory that wrote it: the same bytes mean "paid step 3 for a trusted buyer" or nothing at all.</p>
+    </div>
+  </section>
+
+  <section class="console wrap" id="console" data-state="ring">
+    <div class="chead">
+      <h2 id="consoleTitle">Operator console</h2>
+      <div class="meta" id="consoleMeta">polling every 3s</div>
+    </div>
+    <div id="auditPanel"></div>
+    <div id="consoleBody">
+      <div class="card"><div class="empty">connecting to memory…</div></div>
+    </div>
+  </section>
+
+  <footer class="wrap">
+    <div class="fmark">turnstyl</div>
+    <div class="fl">
+      <a href="https://github.com/shrooms08/turnstyl" target="_blank" rel="noopener">github.com/shrooms08/turnstyl</a>
+      <span id="footReceipts" class="muted">receipts —</span>
+      <span>memory by Sibyl Memory, payments on Base</span>
+    </div>
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+<script>
+  // config.js names the API origin ("" = same origin). Written by
+  // scripts/tunnel.sh when the agent goes live; a cache-busting query so a
+  // fresh tunnel URL is picked up on the next load. document.write keeps it
+  // a classic, blocking script with no build step.
+  document.write('<script src="config.js?v=' + Date.now() + '"><\/script>');
+</script>
+<script>
+(function(){
+  "use strict";
+  window.TURNSTYL_API = window.TURNSTYL_API || "";
+
+  /* ── scene state bus (read by the later three.js script) ───────── */
+  var TURNSTYL = window.TURNSTYL = { state:"ring", memoryMissing:false };
+  function setState(s){
+    if(TURNSTYL.memoryMissing) s = "scatter";
+    if(TURNSTYL.state === s) return;
+    TURNSTYL.state = s;
+    document.body.dataset.state = s;
+    window.dispatchEvent(new CustomEvent("scenestate",{detail:{state:s}}));
+  }
+  document.body.dataset.state = "ring";
+
+  /* ── helpers ───────────────────────────────────────────────────── */
+  var $ = function(s,r){ return (r||document).querySelector(s); };
+  function esc(v){
+    return String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+  function trunc(v){
+    var s = String(v==null?"":v);
+    if(s.length <= 13) return s;
+    var head = s.slice(0, s.slice(0,2)==="0x" ? 6 : 6);
+    return head + "…" + s.slice(-4);
+  }
+  function cp(v, cls){
+    if(v==null||v==="") return '<span class="mono muted">—</span>';
+    return '<span class="mono cp '+(cls||"")+'" data-copy="'+esc(v)+'" title="'+esc(v)+'">'+esc(trunc(v))+'</span>';
+  }
+  function isFake(h){ return String(h||"").toLowerCase().indexOf("0xfake") === 0; }
+  function txLink(hash){
+    if(!hash) return "";
+    if(isFake(hash)) return '<span class="mono cp" data-copy="'+esc(hash)+'" title="'+esc(hash)+'">'+esc(trunc(hash))+'</span>';
+    var ex = (S.status && S.status.explorer) || "https://sepolia.basescan.org";
+    return '<a class="mono" href="'+esc(ex)+'/tx/'+esc(hash)+'" target="_blank" rel="noopener" title="'+esc(hash)+'">'+esc(trunc(hash))+'</a>';
+  }
+  function usdc(n){
+    if(n==null) return "—";
+    return Number(n).toFixed(2);
+  }
+  function rel(ts){
+    if(!ts) return "—";
+    var t = Date.parse(ts); if(isNaN(t)) return String(ts);
+    var d = Math.max(0,(Date.now()-t)/1000);
+    if(d < 60) return Math.round(d)+"s ago";
+    if(d < 3600) return Math.round(d/60)+"m ago";
+    if(d < 86400) return Math.round(d/3600)+"h ago";
+    return Math.round(d/86400)+"d ago";
+  }
+  function clock(ts){
+    var t = Date.parse(ts); if(isNaN(t)) return String(ts||"—");
+    var d = new Date(t), p = function(n){ return (n<10?"0":"")+n; };
+    return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+  }
+  function statusPill(s){
+    var cls = "";
+    if(s === "complete") cls = "violet";
+    else if(s === "running") cls = "gold";
+    else if(s === "awaiting_payment") cls = "gold";
+    return '<span class="pill '+cls+'">'+esc(String(s||"unknown").replace(/_/g," "))+'</span>';
+  }
+  function decisionPill(d){
+    var cls = (d === "RUN_ON_CREDIT") ? "gold" : (d === "REFUSE" ? "red" : "");
+    return '<span class="pill '+cls+'">'+esc(d||"—")+'</span>';
+  }
+  function trustPill(t){
+    var cls = t === "trusted" ? "gold" : (t === "blocked" ? "red" : "");
+    return '<span class="pill '+cls+'">'+esc(t||"unknown")+'</span>';
+  }
+
+  /* ── state ─────────────────────────────────────────────────────── */
+  var S = {
+    status:null, jobs:null, job:null, buyer:null, journal:null,
+    missing:false, connected:false, jobId:null,
+    openStep:null, openMem:{}, memTouched:{}, mine:false,
+    statusFails:0, offline:false
+  };
+  // wallet: nothing is requested on load except a silent eth_accounts when
+  // this tab connected before (sessionStorage "wasConnected")
+  var W = { available:false, addr:null, chainId:null, balance:null, busy:false, err:null };
+  // the in-flight payment, rendered from state so the 3s re-render never
+  // wipes a status line mid-transaction
+  var P = { jobId:null, step:null, status:null, tx:null, busy:false };
+  var BASE_CHAIN = "0x14a34";
+  var BASE_SEPOLIA = { chainId:BASE_CHAIN, chainName:"Base Sepolia", rpcUrls:["https://sepolia.base.org"],
+                       nativeCurrency:{ name:"Ether", symbol:"ETH", decimals:18 },
+                       blockExplorerUrls:["https://sepolia.basescan.org"] };
+
+  function jobParam(){
+    var m = /[?&]job=([^&#]+)/.exec(location.search);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  /* ── fetch ─────────────────────────────────────────────────────── */
+  // API origin from config.js ("" = same origin) + the header a tunnel
+  // provider may want (harmless on Cloudflare).
+  function apiUrl(path){ return String(window.TURNSTYL_API || "").replace(/\/+$/, "") + path; }
+  var API_HEADERS = { accept:"application/json", "ngrok-skip-browser-warning":"true" };
+  function api(path){
+    return fetch(apiUrl(path),{cache:"no-store",headers:API_HEADERS})
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+      .catch(function(){ return null; });
+  }
+
+  function poll(){
+    var id = S.jobId;
+    var jobsUrl = (S.mine && W.addr) ? "/api/jobs?buyer=" + encodeURIComponent(W.addr) : "/api/jobs";
+    var calls = [ api("/api/status"), api(jobsUrl), api("/api/journal?limit=50") ];
+    calls.push(id ? api("/api/jobs/"+encodeURIComponent(id)) : Promise.resolve(null));
+    calls.push(id ? api("/api/journal?job="+encodeURIComponent(id)+"&limit=50") : Promise.resolve(null));
+    return Promise.all(calls).then(function(r){
+      var status = r[0], jobs = r[1], gjournal = r[2], job = r[3], jjournal = r[4];
+      S.connected = !!status;
+      // "agent offline" is two consecutive failed status polls; one success clears it
+      S.statusFails = status ? 0 : S.statusFails + 1;
+      S.offline = S.statusFails >= 2;
+      if(status) S.status = status;
+      if(jobs) S.jobs = jobs;
+      if(job) S.job = job; else if(id && jobs) S.job = S.job;
+      S.journal = id ? (jjournal || null) : (gjournal || null);
+      S.globalJournal = gjournal || S.globalJournal || null;
+
+      var missing = false;
+      [status, jobs, job, gjournal, jjournal].forEach(function(x){
+        if(x && x.memory_missing === true) missing = true;
+      });
+      if(status && status.db_exists === false) missing = true;
+      S.missing = missing;
+
+      var buyerAddr = S.job && S.job.buyer;
+      if(!missing && id && buyerAddr){
+        return api("/api/buyers/"+encodeURIComponent(buyerAddr)).then(function(b){
+          if(b) S.buyer = b;
+          if(b && b.memory_missing === true) S.missing = true;
+          render();
+        });
+      }
+      if(!id || missing) S.buyer = null;
+      render();
+    }).then(function(){ if(W.addr) refreshBalance(); });
+  }
+
+  /* ── record count ──────────────────────────────────────────────── */
+  function records(){
+    var st = S.status;
+    if(!st) return { n:null, label:"records in memory", unit:"records" };
+    if(typeof st.records === "number")
+      return { n:st.records, label:"records in memory", unit:"records" };
+    if(typeof st.db_size_bytes === "number")
+      return { n:Math.round(st.db_size_bytes/1024), label:"KB in memory", unit:"KB in memory" };
+    return { n:null, label:"records in memory", unit:"records" };
+  }
+
+  /* ── render: chrome ────────────────────────────────────────────── */
+  function renderChrome(){
+    var st = S.status || {};
+    document.body.classList.toggle("memory-missing", !!S.missing);
+    document.body.classList.toggle("agent-offline", !!S.offline && !S.missing);
+    TURNSTYL.memoryMissing = !!S.missing;
+    $("#topbar").classList.toggle("shifted", !!S.missing || !!S.offline);
+    if(S.missing){
+      $("#banner").textContent = "memory deleted: " + (st.db_path || "unknown path");
+      setState("scatter");
+    } else if(S.offline){
+      $("#banner").textContent = "agent offline: the operator's machine is not reachable right now";
+    }
+
+    var dot = $("#dbDot");
+    dot.className = "dot " + (S.missing ? "off" : (st.db_exists ? "on" : (S.connected ? "off" : "")));
+    $("#dbPath").textContent = S.offline ? "agent offline" : (st.db_path || (S.connected ? "no path reported" : "api unreachable"));
+
+    var ex = st.explorer || "https://sepolia.basescan.org";
+    var chain = '<span>Base Sepolia</span>';
+    if(st.receipts_address){
+      chain += '<a href="'+esc(ex)+'/address/'+esc(st.receipts_address)+'" target="_blank" rel="noopener" title="'+esc(st.receipts_address)+'">'+esc(trunc(st.receipts_address))+'</a>';
+    } else {
+      chain += '<span class="muted mono">receipts —</span>';
+    }
+    $("#chainRow").innerHTML = chain;
+
+    var rc = records();
+    $("#recCount").textContent = rc.n == null ? "—" : rc.n.toLocaleString();
+    $("#recLabel").textContent = S.missing ? "memory file deleted" : rc.label;
+    $("#liveDot").className = "dot " + (S.missing ? "off" : "on");
+
+    var f = $("#footReceipts");
+    if(st.receipts_address){
+      f.innerHTML = 'receipts <a class="mono" href="'+esc(ex)+'/address/'+esc(st.receipts_address)+'" target="_blank" rel="noopener" title="'+esc(st.receipts_address)+'">'+esc(trunc(st.receipts_address))+'</a>';
+      f.className = "";
+    }
+
+    // story 02 live line — newest event across all jobs
+    var g = S.globalJournal, box = $("#latestDecision");
+    if(S.missing){
+      box.innerHTML = '<span class="d gone-note">NO JOURNAL</span><span class="e">the memory file is gone; there is no record of any decision</span>';
+    } else if(g && g.events && g.events.length){
+      var e = g.events[0];
+      var line = (e.evaluated && e.evaluated[0]) || "no evaluated lines recorded";
+      box.innerHTML = '<span class="d">'+esc(e.decision||"—")+'</span><span class="e">'+esc(line)+'</span>';
+    } else {
+      box.innerHTML = '<span class="d muted">—</span><span class="e">no decisions in memory yet</span>';
+    }
+  }
+
+  /* ── render: console ───────────────────────────────────────────── */
+  // Always four cards. The API now returns unrun steps as "not_started" with
+  // their base price; if an older API omits them, they are synthesised here
+  // from the same pricing rules, so either shape renders the full ladder.
+  var STEP_NAMES = { 1:"scope", 2:"findings", 3:"patch", 4:"verify" };
+  var BASE_PRICES = { 1:0.00, 2:0.50, 3:0.75, 4:0.25 };
+  function fourSteps(job){
+    var byNo = {};
+    (job && job.steps || []).forEach(function(s){ byNo[Number(s.step)] = s; });
+    return [1,2,3,4].map(function(n){
+      return byNo[n] || { step:n, name:STEP_NAMES[n], status:"not_started", price_usdc:BASE_PRICES[n],
+                          paid:false, cached:false, tokens_in:null, tokens_out:null, seconds:null,
+                          output_sha256:null, commit_tx:null, pay_tx:null, output:null };
+    });
+  }
+  function stepState(step, job){
+    var inv = job && job.open_invoice;
+    if(step.status === "not_started"){
+      if(inv && inv.step === step.step && !inv.paid) return { label:"awaiting payment", cls:"gold" };
+      return { label:"not started", cls:"" };
+    }
+    if(Number(step.price_usdc) === 0) return { label:"free", cls:"" };
+    if(step.paid) return { label:"paid", cls:"violet" };
+    if(inv && inv.step === step.step && !inv.paid) return { label:"awaiting payment", cls:"gold" };
+    if(step.output) return { label:"on credit", cls:"gold" };
+    return { label:"not started", cls:"" };
+  }
+
+  function stepCard(step, job){
+    var st = stepState(step, job);
+    var isCur = Number(job.current_step) === Number(step.step);
+    var open = S.openStep === step.step;
+    var facts = [];
+    if(step.tokens_in != null || step.tokens_out != null)
+      facts.push("tokens " + (step.tokens_in==null?"—":step.tokens_in) + " in / " + (step.tokens_out==null?"—":step.tokens_out) + " out");
+    if(step.seconds != null) facts.push(Number(step.seconds).toFixed(1) + "s");
+    if(step.step === 3 && step.compiles != null)
+      facts.push('<span style="color:'+(step.compiles?"#4FB56E":"#E5484D")+'">PATCH COMPILES ' + (step.compiles ? "yes" : "no") + "</span>");
+
+    var txs = "";
+    if(step.pay_tx) txs += '<div>pay ' + txLink(step.pay_tx) + "</div>";
+    if(step.commit_tx) txs += '<div>commit ' + txLink(step.commit_tx) + "</div>";
+
+    return '<button class="step'+(isCur?" current":"")+(open?" open":"")+'" data-step="'+step.step+'" type="button">' +
+      '<div class="no"><span>step '+step.step+'</span>'+(isCur?'<span class="pill solid">current</span>':"")+'</div>' +
+      '<div class="nm">'+esc(step.name||"—")+'</div>' +
+      '<div class="price">'+usdc(step.price_usdc)+'<small>USDC</small></div>' +
+      '<div><span class="pill '+st.cls+'">'+st.label+'</span></div>' +
+      (step.cached ? '<span class="tag">served from memory</span>' : "") +
+      (facts.length ? '<div class="facts">'+facts.map(function(f){ return "<div>"+f+"</div>"; }).join("")+"</div>" : "") +
+      (txs ? '<div class="txs">'+txs+"</div>" : "") +
+      "</button>";
+  }
+
+  function outputBlock(job){
+    if(S.openStep == null) return "";
+    var step = fourSteps(job).filter(function(s){ return s.step === S.openStep; })[0];
+    if(!step) return "";
+    return '<div class="out">' +
+      '<div class="oh"><span>step '+step.step+" · "+esc(step.name||"")+" output</span>" +
+      '<span>sha256 '+(step.output_sha256 ? cp(step.output_sha256) : "—")+"</span></div>" +
+      "<pre>"+esc(step.output || "no output recorded for this step")+"</pre></div>";
+  }
+
+  function isYou(addr){ return !!(W.addr && addr && W.addr.toLowerCase() === String(addr).toLowerCase()); }
+  function youPill(addr){ return isYou(addr) ? ' <span class="pill gold">this is you</span>' : ""; }
+
+  // a step that ran before its invoice cleared: the buyer had credit
+  function creditNote(job){
+    var open = fourSteps(job).filter(function(s){ return s.status === "done" && !s.paid && Number(s.price_usdc) > 0; });
+    if(!open.length) return "";
+    return open.map(function(s){
+      return '<div class="wait"><span class="blip"></span>step '+esc(s.step)+' started on credit, invoice open ('+usdc(s.price_usdc)+' USDC)</div>';
+    }).join("");
+  }
+
+  function payControls(job, inv){
+    var st = S.status || {};
+    if(S.offline) return '<div class="actions"><span class="wait">agent offline: payments are held until the operator\'s machine is back</span></div>';
+    var mineJob = (P.jobId === job.job_id && P.step === inv.step);
+    var line = mineJob && P.status ? P.status : "";
+    var link = (mineJob && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (mineJob && P.tx ? ' ' + cp(P.tx) : "");
+    var status = line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "";
+    if(st.payments_backend === "fake"){
+      return '<div class="actions"><button type="button" class="btn" id="simPayBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Simulate payment</button>' +
+        '<span class="wait">fake backend: no wallet involved</span>' + status + '</div>';
+    }
+    if(!W.addr)
+      return '<div class="actions"><span class="wait">connect as '+esc(trunc(job.buyer))+' to pay</span></div>';
+    if(!isYou(job.buyer))
+      return '<div class="actions"><span class="wait">connect as '+esc(trunc(job.buyer))+' to pay (you are '+esc(trunc(W.addr))+')</span></div>';
+    if(W.chainId && W.chainId !== BASE_CHAIN)
+      return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
+    return '<div class="actions"><button type="button" class="btn" id="payBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Pay '+usdc(inv.amount_usdc)+' USDC</button>' + status + '</div>';
+  }
+
+  // same pattern as the invoice panel: Pay on Base, Simulate on the fake backend
+  function outstandingControls(b, o){
+    var st = S.status || {};
+    if(S.offline) return '<div class="actions"><span class="wait">agent offline: payments are held until the operator\'s machine is back</span></div>';
+    var mine = (P.jobId === o.job_id && P.step === Number(o.step));
+    var line = mine && P.status ? P.status : "";
+    var link = (mine && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (mine && P.tx ? ' ' + cp(P.tx) : "");
+    var status = line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "";
+    var attrs = ' data-settle="1" data-job="'+esc(o.job_id)+'" data-step="'+esc(o.step)+'" data-memo="'+esc(o.memo||"")+'" data-amount="'+esc(o.amount_usdc)+'" data-buyer="'+esc(b.buyer)+'"';
+    if(st.payments_backend === "fake")
+      return '<div class="actions"><button type="button" class="btn"'+attrs+(mine && P.busy ? " disabled" : "")+'>Simulate payment</button>' + status + '</div>';
+    if(!W.addr) return '<div class="actions"><span class="wait">connect as '+esc(trunc(b.buyer))+' to pay</span></div>';
+    if(!isYou(b.buyer)) return '<div class="actions"><span class="wait">connect as '+esc(trunc(b.buyer))+' to pay (you are '+esc(trunc(W.addr))+')</span></div>';
+    if(W.chainId && W.chainId !== BASE_CHAIN)
+      return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
+    return '<div class="actions"><button type="button" class="btn"'+attrs+(mine && P.busy ? " disabled" : "")+'>Pay '+usdc(o.amount_usdc)+' USDC</button>' + status + '</div>';
+  }
+
+  function invoicePanel(job){
+    var inv = job.open_invoice;
+    if(!inv || inv.paid) return "";
+    var cmd = ".venv/bin/python scripts/buyer_pay.py " + job.job_id + " " + inv.step;
+    return '<div class="card invoice"><h3>open invoice — step '+esc(inv.step)+'</h3>' +
+      '<div class="kv">' +
+        '<div><div class="k">amount</div><div class="v big">'+usdc(inv.amount_usdc)+' USDC</div></div>' +
+        '<div><div class="k">memo</div><div class="v">'+cp(inv.memo)+'</div></div>' +
+        '<div><div class="k">invoice block</div><div class="v">'+esc(inv.invoice_block==null?"—":inv.invoice_block)+'</div></div>' +
+      '</div>' +
+      payControls(job, inv) +
+      '<div class="cmd"><code>'+esc(cmd)+'</code><button type="button" data-copy="'+esc(cmd)+'">copy</button></div>' +
+      '<div class="wait"><span class="blip"></span>waiting for payment on Base</div></div>';
+  }
+
+  function timeline(){
+    var j = S.journal;
+    var events = (j && j.events) || [];
+    if(S.missing)
+      return '<div class="card"><h3>decision timeline</h3><div class="empty gone-note">journal gone — every decision this agent recorded lived in the deleted memory file</div></div>';
+    if(!events.length)
+      return '<div class="card"><h3>decision timeline</h3><div class="empty">no decisions recorded for this job</div></div>';
+
+    var rows = events.map(function(e, i){
+      var key = (e.ts||"") + ":" + (e.step||"") + ":" + (e.decision||"");
+      var isOpen = S.memTouched[key] != null ? S.memTouched[key] : (i === 0);
+      var acted = (e.acted||[]).map(function(a){ return "<li>"+esc(a)+"</li>"; }).join("");
+      var evaluated = (e.evaluated||[]);
+      return '<div class="ev">' +
+        '<div class="top">'+decisionPill(e.decision) +
+          '<span class="ts">'+esc(clock(e.ts))+'</span>' +
+          '<span class="stp">step '+esc(e.step==null?"—":e.step)+'</span>' +
+          (e.buyer ? '<span class="ts">'+esc(trunc(e.buyer))+'</span>' : "") +
+        '</div>' +
+        (acted ? '<ul class="acted">'+acted+"</ul>" : '<div class="empty" style="padding:0">no actions recorded</div>') +
+        '<details class="mem" data-mem="'+esc(key)+'"'+(isOpen?" open":"")+'>' +
+          '<summary>memory read<span class="n">'+evaluated.length+' lines</span></summary>' +
+          '<div class="lines">' +
+            (evaluated.length ? evaluated.map(function(l){ return "<code>"+esc(l)+"</code>"; }).join("")
+                              : '<code class="muted">nothing evaluated</code>') +
+          "</div>" +
+        "</details>" +
+        "</div>";
+    }).join("");
+    return '<div class="card"><h3>decision timeline — newest first</h3>'+rows+"</div>";
+  }
+
+  function buyerCard(){
+    if(S.missing)
+      return '<div class="card"><h3>buyer ledger</h3><div class="empty gone-note">no ledger — paid steps, trust tier and outstanding invoices were all in the deleted file</div></div>';
+    var b = S.buyer;
+    if(!b || !b.ledger)
+      return '<div class="card"><h3>buyer ledger</h3><div class="empty">buyer unknown to memory</div></div>';
+    var L = b.ledger, T = b.trust || {};
+    function cell(k,v){ return '<div><div class="k">'+esc(k)+'</div><div class="v">'+v+"</div></div>"; }
+    // the API's outstanding list carries the memo the chain expects
+    // (keccak256("<job_id>:<step>"), computed server-side); the raw ledger
+    // copy does not, so the API list is the one rendered
+    var items = (b.outstanding && b.outstanding.length) ? b.outstanding : (L.outstanding||[]);
+    var outs = items.map(function(o){
+      return '<div class="o"><span>'+esc(o.job_id)+'</span><span>step '+esc(o.step)+'</span><span>'+usdc(o.amount_usdc)+' USDC</span>' +
+        (o.memo && /^0x[0-9a-fA-F]{64}$/.test(o.memo) ? '<span>'+cp(o.memo)+'</span>' : "") + '</div>' +
+        outstandingControls(b, o);
+    }).join("");
+    return '<div class="card"><h3>buyer ledger</h3>' +
+      '<div class="kv">' +
+        cell("buyer", cp(b.buyer) + youPill(b.buyer)) +
+        cell("trust tier", trustPill(L.trust_tier || T.trust_tier)) +
+        cell("paid steps", esc(L.paid_steps==null?"—":L.paid_steps)) +
+        cell("usdc paid", usdc(L.paid_usdc)) +
+        cell("open invoices", esc(L.open_invoices==null?"—":L.open_invoices)) +
+        cell("unpaid, prior jobs", esc(L.unpaid_from_prior_jobs==null?"—":L.unpaid_from_prior_jobs)) +
+        cell("defaults", esc(L.defaults==null?"—":L.defaults)) +
+        cell("paid since default", esc(L.consecutive_paid_since_default==null?"—":L.consecutive_paid_since_default)) +
+        cell("steps until credit", esc(T.steps_until_credit==null?"—":T.steps_until_credit)) +
+        (T.would_decide ? cell("would decide", decisionPill(T.would_decide)) : "") +
+      "</div>" +
+      (T.explanation ? '<div class="expl">'+esc(T.explanation)+"</div>" : "") +
+      (outs ? '<div class="outs"><div class="k" style="font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)">outstanding</div>'+outs+"</div>" : "") +
+      "</div>";
+  }
+
+  function jobView(){
+    var job = S.job;
+    if(S.missing)
+      return '<div class="card"><h3>job '+esc(S.jobId)+'</h3><div class="empty gone-note">job gone — steps, prices, outputs and invoices were stored in the deleted memory file</div></div>' +
+        timeline() + buyerCard();
+    if(!job)
+      return '<div class="card"><h3>job '+esc(S.jobId)+'</h3><div class="empty">job not found in memory</div></div>';
+
+    var head = '<div class="card"><div class="kv">' +
+      '<div><div class="k">job id</div><div class="v big">'+cp(job.job_id)+'</div></div>' +
+      '<div><div class="k">buyer</div><div class="v">'+cp(job.buyer)+youPill(job.buyer)+'</div></div>' +
+      '<div><div class="k">contract hash</div><div class="v">'+cp(job.contract_hash)+'</div></div>' +
+      '<div><div class="k">status</div><div class="v">'+statusPill(job.status)+'</div></div>' +
+      '<div><div class="k">current step</div><div class="v">'+esc(job.current_step==null?"—":job.current_step)+' of 4</div></div>' +
+      (job.archived ? '<div><div class="k">source</div><div class="v muted">archived, read-only</div></div>' : "") +
+      "</div>" + creditNote(job) + "</div>";
+
+    var steps = '<div class="card"><h3>metered steps</h3><div class="steps">' +
+      fourSteps(job).map(function(s){ return stepCard(s, job); }).join("") +
+      "</div>" + outputBlock(job) + "</div>";
+
+    return head + steps + invoicePanel(job) + timeline() + buyerCard();
+  }
+
+  function listView(){
+    if(S.missing)
+      return '<div class="card"><h3>jobs</h3><div class="empty gone-note">no jobs — the index of every job the agent has run was in the deleted memory file</div></div>';
+    var d = S.jobs;
+    if(!d) return '<div class="card"><div class="empty">connecting to memory…</div></div>';
+    var jobs = d.jobs || [];
+    if(!jobs.length) return '<div class="card"><h3>'+(S.mine ? "your jobs" : "jobs")+'</h3>' + mineToggle() + '<div class="empty">'+(S.mine ? "no jobs for this wallet yet" : "no jobs in memory")+'</div></div>';
+    var rows = jobs.map(function(j){
+      return "<tr>" +
+        '<td><a href="?job='+encodeURIComponent(j.job_id)+'#console">'+esc(j.job_id)+"</a></td>" +
+        "<td>"+cp(j.buyer)+"</td>" +
+        "<td>"+statusPill(j.status)+"</td>" +
+        "<td>"+esc(j.current_step==null?"—":j.current_step)+"</td>" +
+        '<td class="muted">'+esc(rel(j.updated_at))+"</td>" +
+        '<td class="muted">'+(j.archived?"archived":"live")+"</td>" +
+        "</tr>";
+    }).join("");
+    return '<div class="card"><h3>'+(S.mine ? "your jobs" : "jobs in memory")+'</h3>' + mineToggle() + '<table class="jobs">' +
+      "<thead><tr><th>job id</th><th>buyer</th><th>status</th><th>step</th><th>updated</th><th>source</th></tr></thead>" +
+      "<tbody>"+rows+"</tbody></table></div>";
+  }
+  function mineToggle(){
+    if(!W.addr) return "";
+    return '<div class="actions" style="margin:0 0 16px"><button type="button" class="btn quiet" id="mineBtn">'+(S.mine ? "All jobs" : "Your jobs")+'</button>' +
+      '<span class="wait">'+(S.mine ? "filtered to " + esc(trunc(W.addr)) : "every job in memory")+'</span></div>';
+  }
+
+  function render(){
+    renderChrome();
+    renderWallet();
+    syncAuditPanel();
+    var title = $("#consoleTitle"), meta = $("#consoleMeta"), body = $("#consoleBody");
+    if(S.jobId){
+      title.innerHTML = 'Job <span class="mono" style="font-size:26px">'+esc(S.jobId)+"</span>";
+      meta.innerHTML = '<a class="back" href="./#console">← all jobs</a>';
+      body.innerHTML = jobView();
+    } else {
+      title.textContent = "Operator console";
+      var n = (S.jobs && S.jobs.jobs) ? S.jobs.jobs.length : 0;
+      meta.textContent = S.missing ? "memory missing" : (S.connected ? n + " jobs · polling 3s" : "api unreachable · retrying");
+      body.innerHTML = listView();
+    }
+  }
+
+  /* ── wallet ────────────────────────────────────────────────────── */
+  W.available = !!(window.ethereum && typeof window.ethereum.request === "function") && typeof window.ethers !== "undefined";
+  function eth(method, params){ return window.ethereum.request({ method:method, params:params || [] }); }
+  function isRejected(e){
+    if(!e) return false;
+    if(e.code === 4001 || e.code === "ACTION_REJECTED") return true;
+    var inner = e.info && e.info.error;
+    return !!(inner && inner.code === 4001);
+  }
+  function errText(e){
+    if(isRejected(e)) return "cancelled";
+    var m = (e && (e.shortMessage || e.reason || e.message)) || String(e || "failed");
+    return String(m).split("\n")[0].slice(0, 140);
+  }
+  function ensureChain(){
+    return eth("eth_chainId").then(function(id){
+      if(String(id).toLowerCase() === BASE_CHAIN) return;
+      return eth("wallet_switchEthereumChain", [{ chainId:BASE_CHAIN }]).catch(function(e){
+        var code = e && (e.code === 4902 ? 4902 : (e.data && e.data.originalError && e.data.originalError.code));
+        if(code === 4902) return eth("wallet_addEthereumChain", [BASE_SEPOLIA]);
+        throw e;
+      });
+    });
+  }
+  function provider(){ return new ethers.BrowserProvider(window.ethereum); }
+  function refreshBalance(){
+    var st = S.status;
+    if(!W.addr || !st || !st.usdc_address || !st.usdc_abi || W.chainId !== BASE_CHAIN) return Promise.resolve();
+    var c = new ethers.Contract(st.usdc_address, st.usdc_abi, provider());
+    return Promise.all([c.balanceOf(W.addr), c.decimals().catch(function(){ return 6; })]).then(function(r){
+      var dec = Number(r[1]) || 6;
+      W.balance = Number(r[0]) / Math.pow(10, dec);
+      renderWallet();
+    }).catch(function(){ W.balance = null; renderWallet(); });
+  }
+  function readWallet(silent){
+    // accounts already granted (no prompt) + current chain
+    return Promise.all([eth("eth_accounts"), eth("eth_chainId")]).then(function(r){
+      W.addr = (r[0] && r[0][0]) ? String(r[0][0]) : null;
+      W.chainId = r[1] ? String(r[1]).toLowerCase() : null;
+      W.err = null;
+      renderWallet();
+      return refreshBalance();
+    }).catch(function(e){ if(!silent) W.err = errText(e); renderWallet(); });
+  }
+  function connectWallet(){
+    if(!W.available || W.busy) return;
+    W.busy = true; W.err = null; renderWallet();
+    eth("eth_requestAccounts").then(function(){ return ensureChain(); })
+      .then(function(){ try{ sessionStorage.setItem("wasConnected","1"); }catch(_){} return readWallet(false); })
+      .catch(function(e){ W.err = errText(e); })
+      .then(function(){ W.busy = false; renderWallet(); render(); });
+  }
+  // One chip, four states: gray dot disconnected, green on Base Sepolia,
+  // amber on any other chain (the chip's label becomes the switch action).
+  function renderWallet(){
+    var row = $("#walletRow");
+    if(!row) return;
+    var err = W.err ? '<span class="err">'+esc(W.err)+'</span>' : "";
+    if(!W.available){
+      var why = typeof window.ethers === "undefined" ? "the ethers library did not load" : "no injected wallet (window.ethereum) was found; install Rabby or MetaMask and reload";
+      row.innerHTML = '<button type="button" class="chip" id="walletChip" disabled title="'+esc(why)+'"><span class="dot"></span><span class="addr">No wallet found</span></button>';
+      return;
+    }
+    if(!W.addr){
+      row.innerHTML = '<button type="button" class="chip" id="connectBtn"'+(W.busy ? " disabled" : "")+'><span class="dot"></span><span class="addr">'+(W.busy ? "Connecting…" : "Connect wallet")+'</span></button>' + err;
+      return;
+    }
+    var wrong = W.chainId && W.chainId !== BASE_CHAIN;
+    if(wrong){
+      row.innerHTML = '<button type="button" class="chip" id="switchChainBtn" title="'+esc(W.addr)+' is on another chain; click to switch"><span class="dot warn"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="lbl">switch to Base Sepolia</span></button>' + err;
+      return;
+    }
+    row.innerHTML = '<span class="chip" id="walletChip" data-copy="'+esc(W.addr)+'" title="'+esc(W.addr)+' (click to copy)"><span class="dot on"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="bal">'+(W.balance == null ? "—" : usdc(W.balance))+' USDC</span></span>' + err;
+  }
+  if(W.available && typeof window.ethereum.on === "function"){
+    window.ethereum.on("accountsChanged", function(){ P = { jobId:null, step:null, status:null, tx:null, busy:false }; readWallet(true).then(render); });
+    window.ethereum.on("chainChanged", function(){ readWallet(true).then(render); });
+  }
+
+  /* ── new audit: built once, synced on every render ──────────────── */
+  function buildAuditPanel(){
+    var host = $("#auditPanel");
+    if(!host || host.firstChild) return;
+    host.innerHTML = '<div class="card"><h3>new audit</h3>' +
+      '<textarea class="src" id="srcText" spellcheck="false" placeholder="// paste Solidity source here, or drop a .sol file below"></textarea>' +
+      '<div class="drop" id="dropZone">drop a .sol file here, or click to choose</div>' +
+      '<div class="links"><a href="https://faucet.circle.com" target="_blank" rel="noopener">get test USDC on Base Sepolia</a>' +
+      '<a id="receiptsLink" href="https://sepolia.basescan.org" target="_blank" rel="noopener">receipts contract</a></div>' +
+      '<input type="file" id="srcFile" accept=".sol,text/plain" style="display:none">' +
+      '<div class="actions"><button type="button" class="btn" id="submitBtn" disabled>Submit for scope (free)</button>' +
+      '<span class="wait" id="auditMsg"></span></div></div>';
+    var ta = $("#srcText"), dz = $("#dropZone"), fi = $("#srcFile");
+    function fill(file){
+      if(!file) return;
+      var rd = new FileReader();
+      rd.onload = function(){ ta.value = String(rd.result || ""); syncAuditPanel(); };
+      rd.readAsText(file);
+    }
+    ta.addEventListener("input", syncAuditPanel);
+    dz.addEventListener("click", function(){ fi.click(); });
+    fi.addEventListener("change", function(){ fill(fi.files && fi.files[0]); fi.value = ""; });
+    ["dragenter","dragover"].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.add("over"); }); });
+    ["dragleave","drop"].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); dz.classList.remove("over"); }); });
+    dz.addEventListener("drop", function(e){ var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; fill(f); });
+  }
+  var auditNote = "";
+  function syncAuditPanel(){
+    var host = $("#auditPanel");
+    if(!host) return;
+    if(S.jobId){ host.style.display = "none"; return; }
+    host.style.display = "";
+    buildAuditPanel();
+    var ta = $("#srcText"), btn = $("#submitBtn"), msg = $("#auditMsg");
+    if(!ta || !btn || !msg) return;
+    var text = ta.value.trim();
+    var rl = $("#receiptsLink"), stx = S.status || {};
+    if(rl && stx.receipts_address) rl.href = (stx.explorer || "https://sepolia.basescan.org") + "/address/" + stx.receipts_address;
+    if(S.offline){
+      btn.disabled = true; msg.textContent = "agent offline: submissions are held until the operator's machine is back"; msg.className = "wait"; return;
+    }
+    if(S.missing){
+      btn.disabled = true; msg.textContent = "the agent cannot take jobs while memory is missing"; msg.className = "wait gone-note"; return;
+    }
+    msg.className = "wait";
+    if(btn.dataset.busy === "1"){ btn.disabled = true; msg.textContent = "submitting… scope runs now, free"; return; }
+    if(!W.addr){ btn.disabled = true; msg.textContent = W.available ? "connect a wallet to submit" : "no wallet found"; return; }
+    btn.disabled = !text;
+    msg.textContent = auditNote || (text ? "scope is free; step 2 is invoiced at " + usdc(BASE_PRICES[2]) + " USDC" : "paste or drop a contract");
+  }
+  function submitAudit(){
+    var ta = $("#srcText"), btn = $("#submitBtn");
+    if(!ta || !btn || !W.addr || !ta.value.trim()) return;
+    btn.dataset.busy = "1"; auditNote = ""; syncAuditPanel();
+    fetch(apiUrl("/api/jobs"), { method:"POST", headers:{ "content-type":"application/json", accept:"application/json", "ngrok-skip-browser-warning":"true" },
+      body: JSON.stringify({ buyer:W.addr, source:ta.value, filename:"pasted.sol" }) })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        btn.dataset.busy = "";
+        if(res.ok && res.body && res.body.job_id){
+          if(res.body.resumed){ try{ sessionStorage.setItem("turnstylNote", "resumed the open job for this contract; nothing was re-run"); }catch(_){} }
+          location.href = "?job=" + encodeURIComponent(res.body.job_id) + "#console";
+          return;
+        }
+        auditNote = "error " + res.status + ": " + ((res.body && res.body.detail) ? (typeof res.body.detail === "string" ? res.body.detail : JSON.stringify(res.body.detail)) : "request failed");
+        syncAuditPanel();
+      })
+      .catch(function(e){ btn.dataset.busy = ""; auditNote = "error: " + errText(e); syncAuditPanel(); });
+  }
+
+  /* ── pay: allowance, approve if short, pay, wait ─────────────────── */
+  function payInvoice(job){
+    var inv = job && job.open_invoice;
+    if(!inv) return;
+    payMemo(job.job_id, inv.step, inv.memo, inv.amount_usdc, "confirmed; the agent will run the step");
+  }
+  // one sequence for an open invoice and for an outstanding item on a closed
+  // job: allowance, approve once if short, pay(memo, units), wait
+  function payMemo(jobId, step, memo, amountUsdc, doneText){
+    var st = S.status;
+    if(!st || !W.addr || P.busy) return;
+    P = { jobId:jobId, step:Number(step), status:"checking allowance", tx:null, busy:true };
+    render();
+    var units = BigInt(Math.round(Number(amountUsdc) * 1e6));
+    if(!/^0x[0-9a-fA-F]{64}$/.test(String(memo || ""))){
+      P.status = "no on-chain memo for this item (fake backend?)"; P.busy = false; render(); return;
+    }
+    if(!st.usdc_address || !st.receipts_address){
+      P.status = "server did not report the USDC or receipts address"; P.busy = false; render(); return;
+    }
+    provider().getSigner().then(function(signer){
+      var usdcC = new ethers.Contract(st.usdc_address, st.usdc_abi, signer);
+      var rc = new ethers.Contract(st.receipts_address, st.receipts_abi, signer);
+      return usdcC.allowance(W.addr, st.receipts_address).then(function(al){
+        if(BigInt(al) >= units) return;
+        P.status = "approving 100 USDC once"; render();
+        return usdcC.approve(st.receipts_address, BigInt(100) * BigInt(1000000)).then(function(tx){ return tx.wait(); });
+      }).then(function(){
+        P.status = "paying"; render();
+        return rc.pay(memo, units);
+      }).then(function(tx){
+        P.tx = tx.hash; P.status = "confirming"; render();
+        return tx.wait();
+      }).then(function(){
+        P.status = doneText; P.busy = false; render();
+        refreshBalance();
+      });
+    }).catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+  function simulateSettle(buyer, jobId, step){
+    if(P.busy) return;
+    P = { jobId:jobId, step:Number(step), status:"marking paid", tx:null, busy:true };
+    render();
+    fetch(apiUrl("/api/buyers/" + encodeURIComponent(buyer) + "/settle/" + encodeURIComponent(jobId) + "/" + encodeURIComponent(step)),
+          { method:"POST", headers:API_HEADERS })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        if(res.ok){ P.tx = (res.body.settled && res.body.settled.tx_hash) || null; P.status = "settled (simulated); reconciled from memory"; }
+        else P.status = "error " + res.status + ": " + ((res.body && res.body.detail) || "request failed");
+        P.busy = false; render();
+      })
+      .catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+  function simulatePay(job){
+    if(!job || P.busy) return;
+    var inv = job.open_invoice;
+    P = { jobId:job.job_id, step:inv ? inv.step : null, status:"marking paid", tx:null, busy:true };
+    render();
+    fetch(apiUrl("/api/jobs/" + encodeURIComponent(job.job_id) + "/pay"), { method:"POST", headers:API_HEADERS })
+      .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
+      .then(function(res){
+        if(res.ok){ P.tx = res.body.tx_hash || null; P.status = "paid (simulated); the worker will run the step"; }
+        else P.status = "error " + res.status + ": " + ((res.body && res.body.detail) || "request failed");
+        P.busy = false; render();
+      })
+      .catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+
+  /* ── interactions ──────────────────────────────────────────────── */
+  document.addEventListener("click", function(e){
+    var t = e.target;
+    var hit = function(id){ return t.closest && t.closest("#" + id); };
+    if(hit("connectBtn")){ connectWallet(); return; }
+    if(hit("switchChainBtn")){ ensureChain().then(function(){ return readWallet(true); }).then(render).catch(function(err){ W.err = errText(err); renderWallet(); }); return; }
+    if(hit("submitBtn")){ submitAudit(); return; }
+    if(hit("payBtn")){ payInvoice(S.job); return; }
+    if(hit("simPayBtn")){ simulatePay(S.job); return; }
+    var settle = t.closest && t.closest("[data-settle]");
+    if(settle){
+      var o = settle.dataset;
+      if((S.status||{}).payments_backend === "fake") simulateSettle(o.buyer, o.job, o.step);
+      else payMemo(o.job, o.step, o.memo, o.amount, "confirmed; the agent will reconcile it on the next pass");
+      return;
+    }
+    if(hit("mineBtn")){ S.mine = !S.mine; S.jobs = null; render(); poll(); return; }
+    var stepBtn = e.target.closest && e.target.closest(".step");
+    var copyEl = e.target.closest && e.target.closest("[data-copy]");
+    if(copyEl){
+      e.stopPropagation();
+      var val = copyEl.getAttribute("data-copy");
+      var done = function(){
+        var was = copyEl.textContent;
+        copyEl.classList.add("copied");
+        var addr = copyEl.classList.contains("chip") ? copyEl.querySelector(".addr") : null;
+        if(addr){ var wasAddr = addr.textContent; addr.textContent = "copied"; setTimeout(function(){ addr.textContent = wasAddr; copyEl.classList.remove("copied"); },1200); }
+        else if(copyEl.tagName === "BUTTON"){ copyEl.textContent = "copied"; setTimeout(function(){ copyEl.textContent = was; copyEl.classList.remove("copied"); },1200); }
+        else setTimeout(function(){ copyEl.classList.remove("copied"); },1200);
+      };
+      if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(val).then(done, done);
+      else done();
+      return;
+    }
+    if(stepBtn){
+      var n = Number(stepBtn.getAttribute("data-step"));
+      S.openStep = (S.openStep === n) ? null : n;
+      render();
+    }
+  });
+
+  document.addEventListener("toggle", function(e){
+    var d = e.target;
+    if(d && d.classList && d.classList.contains("mem")){
+      S.memTouched[d.getAttribute("data-mem")] = d.open;
+    }
+  }, true);
+
+  window.addEventListener("popstate", function(){ S.jobId = jobParam(); S.job = null; S.buyer = null; S.openStep = null; render(); poll(); });
+
+  /* ── scroll: reveals + scene state ─────────────────────────────── */
+  var sections = Array.prototype.slice.call(document.querySelectorAll("[data-state]"));
+  if("IntersectionObserver" in window){
+    var revIO = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){ if(en.isIntersecting) en.target.classList.add("in"); });
+    },{ rootMargin:"0px 0px -18% 0px", threshold:.15 });
+    document.querySelectorAll(".reveal").forEach(function(el){ revIO.observe(el); });
+  } else {
+    document.querySelectorAll(".reveal").forEach(function(el){ el.classList.add("in"); });
+  }
+  function pickState(){
+    var mid = window.innerHeight * 0.42, best = null, bestD = Infinity;
+    sections.forEach(function(s){
+      var r = s.getBoundingClientRect();
+      if(r.bottom < 0 || r.top > window.innerHeight) return;
+      var d = Math.abs(r.top - mid) < Math.abs(r.bottom - mid) ? Math.abs(r.top - mid) : Math.abs(r.bottom - mid);
+      if(r.top <= mid && r.bottom >= mid) d = 0;
+      if(d < bestD){ bestD = d; best = s; }
+    });
+    if(best) setState(best.getAttribute("data-state"));
+  }
+  var ticking = false;
+  window.addEventListener("scroll", function(){
+    if(ticking) return; ticking = true;
+    requestAnimationFrame(function(){ pickState(); ticking = false; });
+  }, {passive:true});
+  window.addEventListener("resize", pickState);
+
+  /* ── canvas sizing (the later script may take this over) ───────── */
+  var cv = $("#scene");
+  function sizeCanvas(){
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = Math.floor(window.innerWidth * dpr);
+    cv.height = Math.floor(window.innerHeight * dpr);
+  }
+  sizeCanvas();
+  window.addEventListener("resize", sizeCanvas);
+
+  /* ── loader ────────────────────────────────────────────────────── */
+  var loader = $("#loader"), lCount = $("#loadCount"), lUnit = $("#loadUnit"), lRule = $("#loadRule");
+  var t0 = Date.now(), firstDone = false, hidden = false;
+  requestAnimationFrame(function(){ lRule.style.transitionDuration = "2.5s"; lRule.style.transform = "scaleX(1)"; });
+
+  function countTo(target, unit){
+    lUnit.textContent = unit;
+    var from = Number(String(lCount.textContent).replace(/[^0-9]/g,"")) || 0;
+    var start = performance.now(), dur = 900;
+    (function tick(now){
+      var p = Math.min(1, (now - start)/dur), e = 1 - Math.pow(1-p, 3);
+      lCount.textContent = Math.round(from + (target-from)*e).toLocaleString();
+      if(p < 1) requestAnimationFrame(tick);
+    })(performance.now());
+  }
+  function hideLoader(){
+    if(hidden) return; hidden = true;
+    loader.classList.add("gone");
+    setTimeout(function(){ loader.classList.add("off"); pickState(); }, 950);
+  }
+  function maybeHide(){
+    var wait = Math.max(0, 2500 - (Date.now() - t0));
+    setTimeout(hideLoader, wait);
+  }
+
+  poll().then(function(){
+    firstDone = true;
+    var rc = records();
+    countTo(rc.n == null ? 0 : rc.n, S.missing ? "memory deleted" : rc.unit);
+    maybeHide();
+  });
+  setTimeout(function(){ if(!firstDone){ lUnit.textContent = "no memory reachable"; maybeHide(); } }, 2600);
+  setTimeout(hideLoader, 5200);
+
+  S.jobId = jobParam();
+  try{
+    var note = sessionStorage.getItem("turnstylNote");
+    if(note && S.jobId){ sessionStorage.removeItem("turnstylNote"); auditNote = note; }
+  }catch(_){}
+  render();
+  // reconnect without a prompt only if this tab connected before
+  try{
+    if(W.available && sessionStorage.getItem("wasConnected") === "1") readWallet(true).then(render);
+  }catch(_){}
+  setInterval(poll, 3000);
+  pickState();
+})();
+</script>
+
+
+
+<!-- ── three.js particle scene ───────────────────────────────────────
+     Attaches to #scene. The form is driven by scroll position through
+     keyframes at each section's centre, morphing through a fixed scatter
+     between them. It locks to scatter while body.memory-missing is set and
+     reads 'scenestate' only for section flourishes. No build step: three.js
+     arrives from the CDN through the import map below.
+     ─────────────────────────────────────────────────────────────────── -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+(async function scene(){
+  const canvas = document.getElementById('scene');
+  if (!canvas) return;
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ── constants ──────────────────────────────────────────────────── */
+  const COUNT = 5000;
+  const AMBIENT = 300;                 // excluded from every form
+  const FORM_N = COUNT - AMBIENT;
+  const PULSE_MS = 1200, REFORM_MS = 800, FLASH_MS = 600;
+  const EASE_RATE = 9;                 // positions follow the scroll target at 9/s
+  const FULL_TURN = 2 * Math.PI;       // one revolution while travelling through scatter
+  const SWAY_W = 2 * Math.PI / 44;     // peak rate ≈ 0.05 rad/s
+  const BULGE_R = 0.9, BULGE_PUSH = 0.6, BULGE_SCALE = 0.6, BULGE_RATE = 5;
+  const BRAIN_OPACITY = 0.7, OTHER_OPACITY = 0.85, BULB_OPACITY = 0.8;
+  const LOGO_DIAMETER = 2.6, LOGO_STROKE = 1.4, LOGO_DEPTH = 0.7;   // grid units except diameter
+  const COIN_R = 1.35, COIN_STROKE = 0.16, COIN_DEPTH = 0.35;     // ring
+  const COIN_GLYPH_H = 1.7, COIN_GLYPH_Z = 0.12, COIN_DISC_R = 1.2, COIN_DISC_Z = -0.2;
+  const BULB_HEIGHT = 2.7, BULB_TILT = 0.10, GLASS_Y = -0.60;   // glass above, base below
+  const COIL_TURNS = 6, COIL_R = 0.09, COIL_JITTER = 0.05;
+  const GOLD = 0xE2B04A, VIOLET = 0x7F77DD, WHITE = 0x9a9890, LOGO_WHITE = 0xF2F0EA,
+        DIM_WHITE = 0x6f6e68, GLASS_DIM = 0xb8b6ae, PINK = 0xED93B1, TEAL = 0x5DCAA5, RED = 0xE24B4A, GREY = 0x6a6a6a;
+
+  /* ── inline value noise (no library) ────────────────────────────── */
+  function hash3(i, j, k){
+    let n = Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ Math.imul(k, 1274126177);
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+  }
+  function fade(t){ return t * t * (3 - 2 * t); }
+  function lerp1(a, b, t){ return a + (b - a) * t; }
+  function noise3(x, y, z){
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = fade(xf), v = fade(yf), w = fade(zf);
+    const c000 = hash3(xi,   yi,   zi  ), c100 = hash3(xi+1, yi,   zi  );
+    const c010 = hash3(xi,   yi+1, zi  ), c110 = hash3(xi+1, yi+1, zi  );
+    const c001 = hash3(xi,   yi,   zi+1), c101 = hash3(xi+1, yi,   zi+1);
+    const c011 = hash3(xi,   yi+1, zi+1), c111 = hash3(xi+1, yi+1, zi+1);
+    const x00 = lerp1(c000, c100, u), x10 = lerp1(c010, c110, u);
+    const x01 = lerp1(c001, c101, u), x11 = lerp1(c011, c111, u);
+    return lerp1(lerp1(x00, x10, v), lerp1(x01, x11, v), w) * 2 - 1;
+  }
+  function noise2(x, y){ return noise3(x, y, 0.37); }         // a fixed slice of the 3D field
+  function ridged(n){ return 1 - Math.abs(n); }
+  function smoothstep(e0, e1, x){
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  /* ── renderer ───────────────────────────────────────────────────── */
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, alpha:true, antialias:true });
+  } catch (e) { return; }              // no WebGL: leave the page unharmed
+  renderer.setClearColor(0x000000, 0);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+  const scene3 = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
+  camera.position.set(0, 0.85, 6);
+  camera.lookAt(0, 0, 0);
+
+  const group = new THREE.Group();
+  scene3.add(group);
+
+  const geo = new THREE.TetrahedronGeometry(1, 0);
+  const mat = new THREE.MeshBasicMaterial({
+    wireframe: true, transparent: true, opacity: BRAIN_OPACITY,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  const mesh = new THREE.InstancedMesh(geo, mat, COUNT);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(COUNT * 3), 3);
+  mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  group.add(mesh);
+  const colOut = mesh.instanceColor.array;   // written directly on recolour
+
+  /* ── flat per-instance stores, allocated once ───────────────────── */
+  const F = Float32Array;
+  const posBrain = new F(COUNT*3), posLogo = new F(COUNT*3), posCoin = new F(COUNT*3), posBulb = new F(COUNT*3), posScatter = new F(COUNT*3);
+  const colBrain = new F(COUNT*3), colLogo = new F(COUNT*3), colCoin = new F(COUNT*3), colBulb = new F(COUNT*3), colScatter = new F(COUNT*3);
+  const cur = new F(COUNT*3), bulge = new F(COUNT*3), drift = new F(COUNT*3);
+  const axis = new F(COUNT*3);
+  const spinAng = new F(COUNT), spinVel = new F(COUNT);
+  const sBrain = new F(COUNT), sLogo = new F(COUNT), sCoin = new F(COUNT), sBulb = new F(COUNT), sScatter = new F(COUNT);  // size per form
+  const sBase = new F(COUNT), sBulge = new F(COUNT);
+
+  const cGold = new THREE.Color(GOLD), cViolet = new THREE.Color(VIOLET),
+        cWhite = new THREE.Color(WHITE), cLogoWhite = new THREE.Color(LOGO_WHITE),
+        cDim = new THREE.Color(DIM_WHITE), cGlassDim = new THREE.Color(GLASS_DIM), cPink = new THREE.Color(PINK),
+        cTeal = new THREE.Color(TEAL), cRed = new THREE.Color(RED), cGrey = new THREE.Color(GREY);
+
+  function put(arr, i, c){ arr[i*3] = c.r; arr[i*3+1] = c.g; arr[i*3+2] = c.b; }
+  function ambientXYZ(arr, i){
+    arr[i*3] = (Math.random()-0.5)*12; arr[i*3+1] = (Math.random()-0.5)*7; arr[i*3+2] = (Math.random()-0.5)*6;
+  }
+
+  /* sizes. Brain, logo, coin and bulb particles are the fine class only
+     (0.014-0.024); scatter keeps the three classes; the 2% large shards belong
+     to the ambient field and the scatter form only. */
+  for (let i = 0; i < COUNT; i++) {
+    const r = Math.random();
+    let s;
+    if (i >= FORM_N) s = r < 0.02 ? 0.18 + Math.random()*0.17 : 0.012 + Math.random()*0.018;
+    else if (r < 0.92) s = 0.012 + Math.random()*0.018;
+    else if (r < 0.98) s = 0.04  + Math.random()*0.04;
+    else               s = 0.18  + Math.random()*0.17;
+    sScatter[i] = s;
+    sBrain[i] = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sLogo[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sCoin[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sBulb[i]  = (i >= FORM_N) ? s : 0.014 + Math.random()*0.010;
+    sBase[i] = sBrain[i];
+    const ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
+    const al = Math.hypot(ax, ay, az) || 1;
+    axis[i*3] = ax/al; axis[i*3+1] = ay/al; axis[i*3+2] = az/al;
+    spinAng[i] = Math.random()*Math.PI*2;
+    spinVel[i] = (Math.random()-0.5) * 0.5;                    // slow tumble
+    const dx = Math.random()*2-1, dy = Math.random()*2-1, dz = Math.random()*2-1;
+    const dl = Math.hypot(dx, dy, dz) || 1;
+    drift[i*3] = dx/dl; drift[i*3+1] = dy/dl; drift[i*3+2] = dz/dl;
+  }
+  const isTeal = new Uint8Array(COUNT);
+  for (let i = 0; i < COUNT; i++) isTeal[i] = Math.random() < 0.04 ? 1 : 0;
+
+  /* ── form: brain, from a lateral silhouette ─────────────────────── */
+  // Closed outline in a unit square, x right, y up, front of the brain on the
+  // LEFT. Cerebrum clockwise from the frontal lobe, then cerebellum, brainstem,
+  // temporal lobe, back to the start.
+  const OUTLINE = [
+    [0.08,0.45],[0.06,0.55],[0.10,0.66],[0.18,0.76],[0.30,0.84],[0.45,0.88],[0.60,0.87],
+    [0.74,0.82],[0.86,0.72],[0.93,0.60],[0.92,0.48],[0.86,0.40],[0.78,0.36],
+    [0.80,0.30],[0.74,0.22],[0.64,0.20],[0.58,0.24],[0.56,0.30],
+    [0.55,0.22],[0.52,0.12],[0.46,0.10],[0.44,0.20],[0.46,0.30],
+    [0.42,0.30],[0.34,0.28],[0.24,0.31],[0.16,0.37],[0.10,0.42]
+  ];
+  // sub-polygons, in outline coordinates
+  const CEREBELLUM = [[0.78,0.36],[0.80,0.30],[0.74,0.22],[0.64,0.20],[0.58,0.24],[0.56,0.30]];
+  const BRAINSTEM_AXIS = [[0.51,0.30],[0.49,0.11]];            // centreline, top to bottom
+
+  function catmullRom(points, perSeg){                        // closed spline
+    const n = points.length, out = [];
+    for (let i = 0; i < n; i++) {
+      const p0 = points[(i - 1 + n) % n], p1 = points[i], p2 = points[(i + 1) % n], p3 = points[(i + 2) % n];
+      for (let k = 0; k < perSeg; k++) {
+        const t = k / perSeg, t2 = t*t, t3 = t2*t;
+        out.push([
+          0.5*((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+          0.5*((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+        ]);
+      }
+    }
+    return out;
+  }
+  function insidePolygon(x, y, poly){
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  function polygonCentroid(poly){
+    let a = 0, cx = 0, cy = 0;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const cross = poly[j][0]*poly[i][1] - poly[i][0]*poly[j][1];
+      a += cross; cx += (poly[j][0] + poly[i][0]) * cross; cy += (poly[j][1] + poly[i][1]) * cross;
+    }
+    a *= 0.5;
+    return [cx / (6*a), cy / (6*a)];
+  }
+  function segDist(px, py, ax, ay, bx, by){
+    const vx = bx - ax, vy = by - ay, wx = px - ax, wy = py - ay;
+    const L = vx*vx + vy*vy || 1e-9;
+    const t = Math.min(1, Math.max(0, (wx*vx + wy*vy) / L));
+    return Math.hypot(px - (ax + vx*t), py - (ay + vy*t));
+  }
+  function polylineDist(x, y, poly, closed){
+    let d = Infinity;
+    for (let i = 0, n = poly.length; i < (closed ? n : n - 1); i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const s = segDist(x, y, a[0], a[1], b[0], b[1]);
+      if (s < d) d = s;
+    }
+    return d;
+  }
+
+  // The smoothed silhouette, centred on its centroid and scaled anisotropically:
+  // width 3.2, height 3.2 / 1.35. Everything below works in these world units.
+  const SIL_U = catmullRom(OUTLINE, 7);                        // 196 points, unit square
+  const [XC, YC] = polygonCentroid(SIL_U);
+  let oMinX = Infinity, oMaxX = -Infinity, oMinY = Infinity, oMaxY = -Infinity;
+  for (const p of SIL_U) {
+    if (p[0] < oMinX) oMinX = p[0]; if (p[0] > oMaxX) oMaxX = p[0];
+    if (p[1] < oMinY) oMinY = p[1]; if (p[1] > oMaxY) oMaxY = p[1];
+  }
+  const SX = 3.2 / (oMaxX - oMinX), SY = (3.2 / 1.35) / (oMaxY - oMinY);
+  function toWorld(p){ return [(p[0] - XC) * SX, (p[1] - YC) * SY]; }
+  const SIL = SIL_U.map(toWorld);
+  const CEREB = CEREBELLUM.map(toWorld);
+  const STEM = BRAINSTEM_AXIS.map(toWorld);
+  const wMinX = (oMinX - XC) * SX, wMaxX = (oMaxX - XC) * SX;
+  const wMinY = (oMinY - YC) * SY, wMaxY = (oMaxY - YC) * SY;
+  const HALF_H = Math.max(wMaxY, -wMinY);
+
+  // Half-thickness: the y profile closes at the silhouette, the x taper is 1.75.
+  function halfThick(x, y){
+    const ty = 1 - (y / HALF_H) * (y / HALF_H);
+    const tx = 1 - (x / 1.75) * (x / 1.75);
+    return 0.62 * Math.sqrt(Math.max(0, ty)) * Math.sqrt(Math.max(0.15, tx));
+  }
+
+  // grooves: the Sylvian fissure (a bowed curve) and the cerebellum boundary
+  const SYLVIAN = [];
+  for (let k = 0; k <= 24; k++) {
+    const t = k / 24, mt = 1 - t;                              // quadratic Bézier
+    SYLVIAN.push(toWorld([mt*mt*0.20 + 2*mt*t*0.36 + t*t*0.55, mt*mt*0.42 + 2*mt*t*0.40 + t*t*0.50]));
+  }
+  const CEREB_LINE = [toWorld([0.78,0.36]), toWorld([0.56,0.30])];
+  function grooveDist(x, y){
+    return Math.min(polylineDist(x, y, SYLVIAN, false), polylineDist(x, y, CEREB_LINE, false));
+  }
+
+  // The brain pose (front-left three-quarter, from above) is applied by the
+  // group at brain keyframes, not baked into the positions, so the rotation can
+  // interpolate to the coin's and logo's camera-facing pose between keyframes.
+  const RX = 0.12, RY = 0.35;
+  let brainMinY = Infinity, brainMaxY = -Infinity;
+  function rotateInto(x, y, z, arr, i){
+    arr[i*3] = x; arr[i*3+1] = y; arr[i*3+2] = z;
+    if (y < brainMinY) brainMinY = y; if (y > brainMaxY) brainMaxY = y;
+  }
+
+  /* particle budget over the 4700 form instances */
+  const N_BAND = Math.round(FORM_N * 0.22), N_STREAM = Math.round(FORM_N * 0.62);
+  const N_INTERIOR = Math.round(FORM_N * 0.10), N_STEM = 40;
+  const N_CEREB = FORM_N - N_BAND - N_STREAM - N_INTERIOR;     // 6%, absorbs rounding
+  const stats = { band:0, streamlineCurves:0, frontParticles:0, backCurves:0, streamlineParticles:0, mirroredCurves:0,
+                  interior:0, parked:0, cerebellumCurves:0, cerebellumParticles:0, brainstem:0 };
+  let slot = 0;                                                // next free instance index
+  function placeBrain(x, y, z, c){
+    if (slot >= FORM_N) return false;
+    rotateInto(x, y, z, posBrain, slot);
+    put(colBrain, slot, c);
+    slot++;
+    return true;
+  }
+
+  // 22%: the outline band. Points within 0.06 of the silhouette, on both skins.
+  function outlineBand(n){
+    const cum = [0];
+    for (let i = 0; i < SIL.length; i++) {
+      const a = SIL[i], b = SIL[(i + 1) % SIL.length];
+      cum.push(cum[i] + Math.hypot(b[0]-a[0], b[1]-a[1]));
+    }
+    const total = cum[cum.length - 1];
+    let placed = 0, tries = 0;
+    while (placed < n && tries < n * 20) {
+      tries++;
+      const s = Math.random() * total;
+      let i = 0; while (i < SIL.length - 1 && cum[i+1] < s) i++;
+      const a = SIL[i], b = SIL[(i + 1) % SIL.length];
+      const t = (s - cum[i]) / ((cum[i+1] - cum[i]) || 1e-9);
+      const qx = a[0] + (b[0]-a[0])*t, qy = a[1] + (b[1]-a[1])*t;
+      const ex = b[0]-a[0], ey = b[1]-a[1], el = Math.hypot(ex, ey) || 1e-9;
+      let nx = ey/el, ny = -ex/el;                             // one of the two normals
+      if (!insidePolygon(qx + nx*0.02, qy + ny*0.02, SIL)) { nx = -nx; ny = -ny; }
+      const d = Math.random() * 0.06, jt = (Math.random()-0.5) * 0.02;
+      const x = qx + nx*d - ny*jt, y = qy + ny*d + nx*jt;
+      if (!insidePolygon(x, y, SIL)) continue;
+      const z = (Math.random() < 0.5 ? 1 : -1) * halfThick(x, y) * 0.9;
+      if (placeBrain(x, y, z, cGold)) placed++;
+    }
+    return placed;
+  }
+
+  // 62%: gyri streamlines along a rotated noise gradient, kept 0.055 apart.
+  const SPACING = 0.055;
+  const gCols = Math.ceil((wMaxX - wMinX) / SPACING) + 2, gRows = Math.ceil((wMaxY - wMinY) / SPACING) + 2;
+  // One occupancy grid per surface. Each cell remembers which curve owns it and
+  // where that curve's point is, so spacing is a real distance test, not a
+  // cell-adjacency test that would over-exclude to ~2 cells.
+  function makeGrid(){
+    return { id: new Int16Array(gCols * gRows).fill(-1), px: new F(gCols * gRows), py: new F(gCols * gRows) };
+  }
+  const gridFront = makeGrid(), gridBack = makeGrid();
+  function cellOf(x, y){
+    const cx = Math.floor((x - wMinX) / SPACING) + 1, cy = Math.floor((y - wMinY) / SPACING) + 1;
+    if (cx < 0 || cy < 0 || cx >= gCols || cy >= gRows) return -1;
+    return cy * gCols + cx;
+  }
+  function occupiedByOther(g, x, y, self){
+    const c = cellOf(x, y);
+    if (c < 0) return true;
+    const cx = c % gCols, cy = (c - cx) / gCols;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= gCols || ny >= gRows) continue;
+      const k = ny * gCols + nx, id = g.id[k];
+      if (id === -1 || id === self) continue;
+      if (Math.hypot(g.px[k] - x, g.py[k] - y) < SPACING) return true;
+    }
+    return false;
+  }
+  function claim(g, x, y, id){
+    const c = cellOf(x, y);
+    if (c >= 0) { g.id[c] = id; g.px[c] = x; g.py[c] = y; }
+  }
+  // regions: cerebrum curves stay out of the cerebellum and the brainstem
+  const STEM_POLY = [[0.56,0.30],[0.55,0.22],[0.52,0.12],[0.46,0.10],[0.44,0.20],[0.46,0.30]].map(toWorld);
+  function inCerebrum(x, y){
+    return insidePolygon(x, y, SIL) && !insidePolygon(x, y, CEREB) && !insidePolygon(x, y, STEM_POLY);
+  }
+  const _d = [0, 0], _in = [0, 0];
+  const STEER_R = 0.18;
+  function inwardDir(x, y, poly, out){                         // gradient of distance-to-edge
+    const h = 0.01;
+    out[0] = (polylineDist(x + h, y, poly, true) - polylineDist(x - h, y, poly, true)) / (2*h);
+    out[1] = (polylineDist(x, y + h, poly, true) - polylineDist(x, y - h, poly, true)) / (2*h);
+    const l = Math.hypot(out[0], out[1]) || 1e-9;
+    out[0] /= l; out[1] /= l;
+  }
+  function steer(x, y, poly, d){
+    const e = polylineDist(x, y, poly, true);
+    if (e >= STEER_R) return;
+    inwardDir(x, y, poly, _in);
+    if (d[0]*_in[0] + d[1]*_in[1] >= 0) return;                // already heading in
+    const k = (STEER_R - e) / STEER_R * 1.4;
+    d[0] += _in[0] * k; d[1] += _in[1] * k;
+    const l = Math.hypot(d[0], d[1]) || 1e-9;
+    d[0] /= l; d[1] /= l;
+  }
+  function fieldDir(x, y, out){                                // rotate90(∇noise2(p·2.6))
+    const h = 0.01, k = 2.6;
+    const gx = (noise2((x+h)*k, y*k) - noise2((x-h)*k, y*k)) / (2*h);
+    const gy = (noise2(x*k, (y+h)*k) - noise2(x*k, (y-h)*k)) / (2*h);
+    const l = Math.hypot(gx, gy) || 1e-9;
+    out[0] = -gy / l; out[1] = gx / l;
+  }
+  function walkStreamline(id, sx, sy, steps, stepLen, region, poly, g, side, mirror, colour, jitterZ){
+    let x = sx, y = sy, pdx = 0, pdy = 0, ang = 0, placed = 0;
+    const driftRate = (Math.random() - 0.5) * 0.16;            // slow per-curve meander
+    for (let s = 0; s < steps; s++) {
+      if (!region(x, y)) break;
+      if (grooveDist(x, y) < 0.03) break;
+      if (occupiedByOther(g, x, y, id)) break;
+      claim(g, x, y, id);
+      if (mirror) claim(gridBack, x, y, id);
+      const w = halfThick(x, y);
+      if (!placeBrain(x, y, side * (w - Math.random() * jitterZ), colour)) return placed;
+      placed++;
+      if (mirror) { if (!placeBrain(x, y, -side * (w - Math.random() * jitterZ), colour)) return placed; placed++; }
+      fieldDir(x, y, _d);
+      ang += driftRate + (Math.random() - 0.5) * 0.06;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      let dx = _d[0]*ca - _d[1]*sa, dy = _d[0]*sa + _d[1]*ca;
+      if (pdx*dx + pdy*dy < 0) { dx = -dx; dy = -dy; }         // never reverse
+      _d[0] = dx; _d[1] = dy;
+      steer(x, y, poly, _d);                                   // curl along the rim
+      dx = _d[0]; dy = _d[1];
+      pdx = dx; pdy = dy;
+      x += dx * stepLen; y += dy * stepLen;
+    }
+    return placed;
+  }
+  // Clearance to the nearest point of any other curve, looked up over a 5x5
+  // neighbourhood. Used to pick starts with room to run.
+  function clearance(g, x, y){
+    const c = cellOf(x, y);
+    if (c < 0) return 0;
+    const cx = c % gCols, cy = (c - cx) / gCols;
+    let best = 9;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= gCols || ny >= gRows) continue;
+      const k = ny * gCols + nx;
+      if (g.id[k] === -1) continue;
+      const d = Math.hypot(g.px[k] - x, g.py[k] - y);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  const _start = [0, 0];
+  function pickStart(region, edgeClear, g){
+    // best of 40 valid candidates by clearance: a curve that starts with room
+    // runs long before it meets another trail, which is what fills the budget
+    let bestD = -1, found = false, cands = 0;
+    for (let t = 0; t < 400 && cands < 40; t++) {
+      const x = wMinX + Math.random() * (wMaxX - wMinX), y = wMinY + Math.random() * (wMaxY - wMinY);
+      if (!region(x, y)) continue;
+      const e = polylineDist(x, y, SIL, true);
+      if (e < edgeClear) continue;
+      const gdist = grooveDist(x, y);
+      if (gdist < 0.03) continue;
+      const d = Math.min(clearance(g, x, y), e, gdist);
+      if (d < SPACING) continue;
+      cands++;
+      if (d > bestD) { bestD = d; _start[0] = x; _start[1] = y; found = true; }
+    }
+    return found ? _start : null;
+  }
+  const inCereb = (x, y) => insidePolygon(x, y, CEREB);
+  function curveColour(){
+    const r = Math.random();
+    return r < 0.5 ? cLogoWhite : r < 0.8 ? cViolet : r < 0.9 ? cPink : cTeal;
+  }
+
+  // An instance the brain cannot place on the outline, a streamline, the
+  // cerebellum, the brainstem or the 10% interior is parked: ambient position,
+  // scale 0.004 (effectively invisible), dim white. It still morphs with every
+  // form change, so the logo and scatter keep their full count.
+  const PARKED_SCALE = 0.004;
+  function parkInstance(){
+    ambientXYZ(posBrain, slot);
+    put(colBrain, slot, cDim);
+    sBrain[slot] = PARKED_SCALE;
+    sBase[slot] = PARKED_SCALE;
+    slot++;
+    stats.parked++;
+  }
+  function interiorPoint(c){
+    for (let t = 0; t < 200; t++) {
+      const x = wMinX + Math.random() * (wMaxX - wMinX), y = wMinY + Math.random() * (wMaxY - wMinY);
+      if (!insidePolygon(x, y, SIL)) continue;
+      return placeBrain(x, y, (Math.random()*2 - 1) * halfThick(x, y) * 0.9, c);
+    }
+    ambientXYZ(posBrain, slot); put(colBrain, slot, c); slot++;   // unreachable in practice
+    return true;
+  }
+  function buildBrain(){
+    stats.band = outlineBand(N_BAND);
+
+    // 62%: 90 front-surface curves, 35% of them mirrored, as specified
+    const streamStart = slot, streamEnd = slot + N_STREAM;
+    let id = 0;
+    while (slot < streamEnd && id < 90) {
+      const start = pickStart(inCerebrum, 0.08, gridFront);
+      if (!start) break;
+      const mirror = Math.random() < 0.35;
+      const before = slot;
+      walkStreamline(id, start[0], start[1], 38, 0.035, inCerebrum, SIL, gridFront, 1, mirror, curveColour(), 0.03);
+      if (slot > before) { stats.streamlineCurves++; if (mirror) stats.mirroredCurves++; }
+      id++;
+    }
+    stats.frontParticles = slot - streamStart;
+    // the front is now as sparse as the spacing rule allows; the rest of the
+    // streamline budget goes on the back surface, on its own spacing grid
+    id = 500;
+    while (slot < streamEnd && id < 700) {
+      const start = pickStart(inCerebrum, 0.08, gridBack);
+      if (!start) break;
+      const before = slot;
+      walkStreamline(id, start[0], start[1], 38, 0.035, inCerebrum, SIL, gridBack, -1, false, curveColour(), 0.03);
+      if (slot > before) stats.backCurves++;
+      id++;
+    }
+    stats.streamlineParticles = slot - streamStart;
+    while (slot < streamEnd) parkInstance();
+
+    // 10%: interior at random depth
+    for (let k = 0; k < N_INTERIOR; k++) { interiorPoint(cDim); stats.interior++; }
+
+    // 6%: cerebellum streamlines in their own sub-polygon, then the brainstem
+    const cerebStart = slot, cerebEnd = slot + N_CEREB - N_STEM;
+    let cid = 1000;
+    while (slot < cerebEnd && cid < 1040) {
+      const start = pickStart(inCereb, 0.02, gridFront);
+      if (!start) break;
+      const before = slot;
+      walkStreamline(cid, start[0], start[1], 16, 0.022, inCereb, CEREB, gridFront, 1, Math.random() < 0.35,
+                     Math.random() < 0.3 ? cGold : cViolet, 0.02);
+      if (slot > before) stats.cerebellumCurves++;
+      cid++;
+    }
+    stats.cerebellumParticles = slot - cerebStart;
+    while (slot < cerebEnd) parkInstance();
+    for (let k = 0; k < N_STEM && slot < FORM_N; k++) {
+      const t = (k + 0.5) / N_STEM;
+      const x = STEM[0][0] + (STEM[1][0]-STEM[0][0])*t + (Math.random()-0.5)*0.03;
+      const y = STEM[0][1] + (STEM[1][1]-STEM[0][1])*t + (Math.random()-0.5)*0.03;
+      if (placeBrain(x, y, (Math.random()-0.5) * 0.1, cLogoWhite)) stats.brainstem++;
+    }
+    while (slot < FORM_N) parkInstance();
+  }
+  buildBrain();
+
+  /* ── form: logo, from the mark geometry (24x24 grid, stroke 1.4) ─ */
+  function buildLogo(){
+    const R = 9, SW = LOGO_STROKE, DEPTH = LOGO_DEPTH, S = LOGO_DIAMETER / (2 * R);
+    const deg = Math.PI / 180;
+    const nRing = Math.round(FORM_N * 0.62), nArm = Math.round(FORM_N * 0.12);
+    const nGold = FORM_N - nRing - 2 * nArm;                   // 14%, absorbs rounding
+    let i = 0;
+    function place(gx, gy, c){                                 // grid -> world
+      const gz = (Math.random() - 0.5) * DEPTH;
+      posLogo[i*3] = (gx - 12) * S; posLogo[i*3+1] = (gy - 12) * S; posLogo[i*3+2] = gz * S;
+      put(colLogo, i, c);
+      i++;
+    }
+    for (let k = 0; k < nRing; k++) {
+      const a = (24 + Math.random() * (336 - 24)) * deg;       // gap on the right
+      const r = R + (Math.random() - 0.5) * SW;
+      place(12 + r*Math.cos(a), 12 + r*Math.sin(a), Math.random() < 0.06 ? cViolet : cLogoWhite);
+    }
+    const arms = [[120, 7, nArm, cLogoWhite], [240, 7, nArm, cLogoWhite], [0, 10.5, nGold, cGold]];
+    for (const [ang, len, n, c] of arms) {
+      const a = ang * deg, ux = Math.cos(a), uy = Math.sin(a), px = -uy, py = ux;
+      for (let k = 0; k < n; k++) {
+        const t = Math.random() * len, o = (Math.random() - 0.5) * SW;
+        place(12 + ux*t + px*o, 12 + uy*t + py*o, c);
+      }
+    }
+    return i;
+  }
+  buildLogo();
+
+  /* ── form: coin, a gold ring around a rasterised dollar glyph ─────── */
+  const coinStats = { ring:0, glyph:0, disc:0, glyphPixels:0, font:'' };
+  function rasteriseGlyph(){
+    // "$" in the page's display font, sampled from an offscreen 2D canvas.
+    const size = 512, cw = 768, ch = 768;
+    const cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    const loaded = !!(document.fonts && document.fonts.check && document.fonts.check('300 ' + size + 'px Outfit'));
+    coinStats.font = loaded ? 'Outfit 300' : 'sans-serif fallback';
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.fillStyle = '#fff';
+    ctx.font = '300 ' + size + 'px Outfit, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('$', cw / 2, ch / 2);
+    const data = ctx.getImageData(0, 0, cw, ch).data;
+    const xs = [], ys = [];
+    let minX = cw, maxX = 0, minY = ch, maxY = 0;
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      if (data[(y * cw + x) * 4 + 3] > 128) {                    // alpha > 128: ink
+        xs.push(x); ys.push(y);
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+    if (xs.length === 0) return null;
+    return { xs, ys, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, h: Math.max(1, maxY - minY) };
+  }
+  function buildCoin(){
+    const nRing = Math.round(FORM_N * 0.34), nGlyph = Math.round(FORM_N * 0.46);
+    const nDisc = FORM_N - nRing - nGlyph;                       // 20%, absorbs rounding
+    let i = 0;
+    function place(x, y, z, c){
+      posCoin[i*3] = x; posCoin[i*3+1] = y; posCoin[i*3+2] = z;
+      put(colCoin, i, c);
+      i++;
+    }
+    // ring: evenly spaced around the circle, jittered across the stroke and depth
+    for (let k = 0; k < nRing; k++) {
+      const a = (k / nRing) * Math.PI * 2;
+      const r = COIN_R + (Math.random() - 0.5) * COIN_STROKE;
+      place(r * Math.cos(a), r * Math.sin(a), (Math.random() - 0.5) * COIN_DEPTH, cGold);
+    }
+    coinStats.ring = nRing;
+    // glyph: random picks from the ink pixels, mapped to 1.7 units tall, centred
+    const g = rasteriseGlyph();
+    if (g) {
+      coinStats.glyphPixels = g.xs.length;
+      const sc = COIN_GLYPH_H / g.h;
+      for (let k = 0; k < nGlyph; k++) {
+        const p = (Math.random() * g.xs.length) | 0;
+        place((g.xs[p] - g.cx) * sc, -(g.ys[p] - g.cy) * sc, (Math.random() - 0.5) * 2 * COIN_GLYPH_Z,
+              Math.random() < 0.08 ? cViolet : cLogoWhite);
+      }
+      coinStats.glyph = nGlyph;
+    } else {
+      // no canvas or no ink: the glyph's budget joins the disc so the count holds
+      for (let k = 0; k < nGlyph; k++) {
+        const r = COIN_DISC_R * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
+        place(r * Math.cos(a), r * Math.sin(a), COIN_DISC_Z, cDim);
+      }
+    }
+    // faint disc fill behind the glyph
+    for (let k = 0; k < nDisc; k++) {
+      const r = COIN_DISC_R * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
+      place(r * Math.cos(a), r * Math.sin(a), COIN_DISC_Z, cDim);
+    }
+    coinStats.disc = nDisc;
+    return i;
+  }
+  // the glyph is drawn in the page's display font, so wait for it (bounded)
+  if (document.fonts && document.fonts.ready) {
+    await Promise.race([document.fonts.ready, new Promise(function(r){ setTimeout(r, 2000); })]);
+  }
+  buildCoin();
+
+  /* ── form: bulb, a surface of revolution around Y ─────────────────── */
+  // Profile as (radius, y), top to bottom. Glass down to y = -0.60, then the
+  // base: five screw-thread ridges from -0.70 to -1.20 (radius 0.46 on a ridge,
+  // 0.40 in the valley between, alternating every 0.10 in y), then the tip.
+  const BULB_RIDGES = [-0.70, -0.80, -0.90, -1.00, -1.10];
+  const BULB_PROFILE = [
+    [0.00, 1.60], [0.45, 1.55], [0.80, 1.35], [1.00, 1.00], [1.05, 0.60], [0.95, 0.20],
+    [0.72, -0.15], [0.50, -0.45], [0.42, -0.60], [0.46, -0.70]
+  ];
+  for (let k = 0; k < BULB_RIDGES.length; k++) {               // ridge, then the valley below it
+    if (k > 0) BULB_PROFILE.push([0.46, BULB_RIDGES[k]]);
+    BULB_PROFILE.push([0.40, BULB_RIDGES[k] - 0.05]);
+  }
+  BULB_PROFILE.push([0.40, -1.20], [0.28, -1.35], [0.18, -1.45], [0.00, -1.50]);
+
+  function catmullRomOpen(points, perSeg){                     // open spline, ends clamped
+    const n = points.length, out = [];
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = points[Math.max(0, i - 1)], p1 = points[i], p2 = points[i + 1], p3 = points[Math.min(n - 1, i + 2)];
+      for (let k = 0; k < perSeg; k++) {
+        const t = k / perSeg, t2 = t*t, t3 = t2*t;
+        out.push([
+          Math.max(0, 0.5*((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)),
+          0.5*((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+        ]);
+      }
+    }
+    out.push([points[n - 1][0], points[n - 1][1]]);
+    return out;
+  }
+  const bulbStats = { profilePoints:0, glass:0, silhouette:0, base:0, baseOnRidges:0, filament:0, coil:0, tip:0, parked:0, height:0 };
+  function revolveProfile(prof, filter, weightByArea){
+    // Cumulative weights along the profile: arc length, or arc length times the
+    // ring circumference for an even distribution over the revolved surface.
+    const segs = [];
+    let total = 0;
+    for (let i = 0; i < prof.length - 1; i++) {
+      const a = prof[i], b = prof[i + 1];
+      const ym = (a[1] + b[1]) / 2, rm = (a[0] + b[0]) / 2;
+      if (!filter(ym)) continue;
+      const ds = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const w = ds * (weightByArea ? Math.max(0.02, rm) : 1);
+      total += w;
+      segs.push({ i, w: total });
+    }
+    return {
+      total,
+      pick: function(out){                                     // random point on the surface -> [r, y]
+        const s = Math.random() * total;
+        let lo = 0, hi = segs.length - 1;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (segs[mid].w < s) lo = mid + 1; else hi = mid; }
+        const a = prof[segs[lo].i], b = prof[segs[lo].i + 1], t = Math.random();
+        out[0] = a[0] + (b[0] - a[0]) * t; out[1] = a[1] + (b[1] - a[1]) * t;
+        return out;
+      }
+    };
+  }
+  function buildBulb(){
+    const prof = catmullRomOpen(BULB_PROFILE, 7);              // ~170 points
+    bulbStats.profilePoints = prof.length;
+    let yMin = Infinity, yMax = -Infinity;
+    for (const q of prof) { if (q[1] < yMin) yMin = q[1]; if (q[1] > yMax) yMax = q[1]; }
+    const S = BULB_HEIGHT / Math.max(0.001, yMax - yMin), yC = (yMin + yMax) / 2;
+    bulbStats.height = (yMax - yMin) * S;
+    const nGlass = Math.round(FORM_N * 0.42), nSil = Math.round(FORM_N * 0.16), nBase = Math.round(FORM_N * 0.16);
+    const nFil = Math.round(FORM_N * 0.18), nTip = Math.round(FORM_N * 0.02);
+    const nPark = FORM_N - nGlass - nSil - nBase - nFil - nTip; // 6%, absorbs rounding
+    let i = 0;
+    function place(x, y, z, c){                                // profile units -> world, centred
+      posBulb[i*3] = x * S; posBulb[i*3+1] = (y - yC) * S; posBulb[i*3+2] = z * S;
+      put(colBulb, i, c);
+      i++;
+    }
+    // azimuth is measured from +z toward +x, so 90° and 270° are the edges the
+    // camera sees when the bulb faces it
+    function onSurface(r, y, azDeg, c){
+      const a = azDeg * Math.PI / 180;
+      place(r * Math.sin(a), y, r * Math.cos(a), c);
+    }
+    const q = [0, 0];
+    // glass, 42%: even over the revolved surface, no interior fill
+    const glass = revolveProfile(prof, function(y){ return y > GLASS_Y; }, true);
+    for (let k = 0; k < nGlass; k++) {
+      glass.pick(q);
+      const r = Math.random();
+      const c = r < 0.35 ? cViolet : (r < 0.675 ? cLogoWhite : cGlassDim);   // 35% violet, 65% white (half dim)
+      onSurface(q[0], q[1], Math.random() * 360, c);
+    }
+    bulbStats.glass = nGlass;
+    // silhouette band, 16%: the glass profile at the two edges, gold
+    const rim = revolveProfile(prof, function(y){ return y > GLASS_Y; }, false);
+    for (let k = 0; k < nSil; k++) {
+      rim.pick(q);
+      onSurface(q[0], q[1], (Math.random() < 0.5 ? 90 : 270) + (Math.random() - 0.5) * 12, cGold);
+    }
+    bulbStats.silhouette = nSil;
+    // base, 16%: 60% on the five thread ridges, the rest over the base surface
+    const base = revolveProfile(prof, function(y){ return y <= GLASS_Y; }, true);
+    const nRidge = Math.round(nBase * 0.6);
+    for (let k = 0; k < nBase; k++) {
+      const c = Math.random() < 0.10 ? cTeal : cWhite;
+      if (k < nRidge) {
+        const y = BULB_RIDGES[k % BULB_RIDGES.length] + (Math.random() - 0.5) * 0.02;
+        onSurface(0.46, y, Math.random() * 360, c);
+      } else {
+        base.pick(q);
+        onSurface(q[0], q[1], Math.random() * 360, c);
+      }
+    }
+    bulbStats.base = nBase; bulbStats.baseOnRidges = nRidge;
+    // filament, 18%: two support wires, then the coil between them
+    const nWire = Math.round(nFil * 0.25), nCoil = nFil - nWire;
+    for (let k = 0; k < nWire; k++) {
+      const side = k % 2 === 0 ? -1 : 1, t = Math.random();
+      const x = side * (0.22 + (0.30 - 0.22) * t), y = -0.55 + (0.25 + 0.55) * t;
+      place(x + (Math.random() - 0.5) * 0.02, y, (Math.random() - 0.5) * 0.02, cLogoWhite);
+    }
+    for (let k = 0; k < nCoil; k++) {                          // x = -0.30 + 0.60u, y = 0.25 + 0.09 sin, z = 0.09 cos
+      const u = Math.random(), ph = u * Math.PI * 2 * COIL_TURNS;
+      place(-0.30 + 0.60 * u + (Math.random() - 0.5) * COIL_JITTER,
+            0.25 + COIL_R * Math.sin(ph) + (Math.random() - 0.5) * COIL_JITTER,
+            COIL_R * Math.cos(ph) + (Math.random() - 0.5) * COIL_JITTER, cGold);
+    }
+    bulbStats.filament = nFil; bulbStats.coil = nCoil;
+    // contact tip, 2%: a small cluster at the foot
+    for (let k = 0; k < nTip; k++) {
+      const r = 0.12 * Math.cbrt(Math.random()), th = Math.random() * Math.PI * 2, ph = Math.acos(Math.random() * 2 - 1);
+      place(r * Math.sin(ph) * Math.cos(th), -1.48 + r * Math.cos(ph), r * Math.sin(ph) * Math.sin(th), cLogoWhite);
+    }
+    bulbStats.tip = nTip;
+    // remaining 6%: parked, as the brain form does
+    for (let k = 0; k < nPark; k++) {
+      ambientXYZ(posBulb, i); put(colBulb, i, cDim);
+      sBulb[i] = PARKED_SCALE;
+      i++;
+    }
+    bulbStats.parked = nPark;
+    return i;
+  }
+  buildBulb();
+
+  /* ── form: scatter ──────────────────────────────────────────────── */
+  for (let i = 0; i < FORM_N; i++) {
+    posScatter[i*3]   = (Math.random()-0.5)*9;
+    posScatter[i*3+1] = (Math.random()-0.5)*5;
+    posScatter[i*3+2] = (Math.random()-0.5)*5;
+    put(colScatter, i, isTeal[i] ? cTeal : cWhite);
+  }
+
+  /* ── ambient field: same place in every form ────────────────────── */
+  for (let i = FORM_N; i < COUNT; i++) {
+    ambientXYZ(posBrain, i);
+    posLogo[i*3] = posCoin[i*3] = posBulb[i*3] = posScatter[i*3] = posBrain[i*3];
+    posLogo[i*3+1] = posCoin[i*3+1] = posBulb[i*3+1] = posScatter[i*3+1] = posBrain[i*3+1];
+    posLogo[i*3+2] = posCoin[i*3+2] = posBulb[i*3+2] = posScatter[i*3+2] = posBrain[i*3+2];
+    const c = isTeal[i] ? cTeal : cWhite;
+    put(colBrain, i, c); put(colLogo, i, c); put(colCoin, i, c); put(colBulb, i, c); put(colScatter, i, c);
+  }
+
+  const FORMS = { brain: posBrain, logo: posLogo, coin: posCoin, bulb: posBulb, scatter: posScatter };
+  const FORM_COLS = { brain: colBrain, logo: colLogo, coin: colCoin, bulb: colBulb, scatter: colScatter };
+  // base group rotation per form: the brain's pose; coin, bulb and logo face the camera
+  const BASE_ROT = { brain: [RX, RY], logo: [0, 0], coin: [0, 0], bulb: [BULB_TILT, 0], scatter: [0, 0] };
+  const SWAY_AMP = { brain: 0.30, logo: 0.25, coin: 0.20, bulb: 0.20, scatter: 0.30 };
+
+  const sceneStats = { count: COUNT, formInstances: FORM_N, brain: stats, coin: coinStats, bulb: bulbStats,
+                       formA: 'brain', formB: 'brain', t: 0, form: 'brain', scattered: false };
+  if (window.TURNSTYL) window.TURNSTYL.sceneStats = sceneStats;
+
+  const SIZES = { brain: sBrain, logo: sLogo, coin: sCoin, bulb: sBulb, scatter: sScatter };
+  const OPACITY = { brain: BRAIN_OPACITY, logo: OTHER_OPACITY, coin: OTHER_OPACITY, bulb: BULB_OPACITY, scatter: OTHER_OPACITY };
+  cur.set(posBrain);
+
+  /* ── keyframes: one per section, in document order ──────────────── */
+  // hero = brain, story 1 (pulse) = coin, story 2 (reform) = bulb,
+  // story 3 (scatter) = scatter, story 4 (reform) = logo, console = logo
+  const KEY_FORMS = ['brain', 'coin', 'bulb', 'scatter', 'logo', 'logo'];
+  const SECTIONS = Array.from(document.querySelectorAll('section[data-state]'));
+  const keyY = new F(Math.max(1, SECTIONS.length));
+  const keyForm = SECTIONS.map(function(_, i){ return KEY_FORMS[i] || 'logo'; });
+  let docHeight = 0;
+  function measureKeys(){
+    const sy = window.scrollY;
+    for (let i = 0; i < SECTIONS.length; i++) {
+      const r = SECTIONS[i].getBoundingClientRect();
+      keyY[i] = r.top + sy + r.height / 2;                    // section centre, document coords
+    }
+    docHeight = document.documentElement.scrollHeight;
+  }
+  measureKeys();
+
+  // Where the scroll anchor sits between keyframes. Before the first: t = 0 on
+  // the hero. After the last: hold the console form.
+  let kA = 0, kB = 0, kT = 0, lastInterval = -1;
+  function locate(){
+    const n = SECTIONS.length;
+    if (n === 0) { kA = kB = 0; kT = 0; return; }
+    const anchor = window.scrollY + window.innerHeight * 0.5;
+    if (anchor <= keyY[0]) { kA = kB = 0; kT = 0; }
+    else if (anchor >= keyY[n - 1]) { kA = kB = n - 1; kT = 0; }
+    else {
+      let i = 0;
+      while (i < n - 2 && anchor >= keyY[i + 1]) i++;
+      kA = i; kB = i + 1;
+      const span = keyY[kB] - keyY[kA];
+      kT = span > 0 ? Math.min(1, Math.max(0, (anchor - keyY[kA]) / span)) : 0;
+    }
+    const fa = keyForm[kA], fb = keyForm[kB];
+    sceneStats.formA = fa; sceneStats.formB = fb; sceneStats.t = kT;
+    sceneStats.form = kT < 0.5 ? fa : fb;
+    sceneStats.scattered = Math.abs(kT - 0.5) < 0.15 && fa !== fb;
+    if (kA !== lastInterval) {                                 // once per interval crossing
+      lastInterval = kA;
+      console.info(fa === fb ? 'turnstyl scene: ' + fa + ' (hold)'
+                             : 'turnstyl scene: ' + fa + ' -> scatter -> ' + fb);
+    }
+  }
+
+  /* ── state ──────────────────────────────────────────────────────── */
+  let state = document.body.dataset.state || 'ring';
+  let missing = document.body.classList.contains('memory-missing');
+  let swayT = 0, pulseAt = -1e9, reformAt = -1e9, flashAt = -1e9;
+  let greyMix = 0, redMix = 0, lastColourKey = '';
+  let offX = 0, groupY = 0;
+  let rotX = 0, rotY = 0;
+  let mouseX = 0, mouseY = 0, hasPointer = false;
+  let fitScale = 1;
+
+  function triggerPulse(){ pulseAt = performance.now(); }
+  function triggerReform(){
+    reformAt = performance.now();
+    for (let i = 0; i < COUNT; i++) {
+      const dx = Math.random()*2-1, dy = Math.random()*2-1, dz = Math.random()*2-1;
+      const dl = Math.hypot(dx, dy, dz) || 1;
+      drift[i*3] = dx/dl; drift[i*3+1] = dy/dl; drift[i*3+2] = dz/dl;
+    }
+  }
+
+  // The page's story state no longer chooses the form; the scroll does. It is
+  // still read for the flourishes the sections trigger.
+  window.addEventListener('scenestate', function(e){
+    const next = e && e.detail && e.detail.state;
+    if (!next || next === state) return;
+    const prev = state;
+    state = next;
+    if (state === 'pulse' && prev !== 'pulse') triggerPulse();
+    if (state === 'reform' && prev !== 'reform') triggerReform();
+    if (reduced) draw(0);
+  });
+
+  /* memory-missing locks the form apart and turns it red, whatever the scroll */
+  new MutationObserver(function(){
+    const now = document.body.classList.contains('memory-missing');
+    if (now === missing) return;
+    missing = now;
+    if (!missing) triggerReform();       // memory came back: settle into the scroll target
+    if (reduced) draw(0);
+  }).observe(document.body, { attributes:true, attributeFilter:['class'] });
+
+  /* pulses from the journal: the page polls it but does not publish it */
+  let lastTs = null;
+  async function pollJournal(){
+    if (document.hidden) return;
+    try {
+      const res = await fetch(String(window.TURNSTYL_API || '').replace(/\/+$/, '') + '/api/journal?limit=1',
+                              { cache:'no-store', headers:{ 'ngrok-skip-browser-warning':'true' } });
+      if (!res.ok) return;
+      const body = await res.json();
+      const ev = body && body.events && body.events[0];
+      if (!ev || !ev.ts) return;
+      if (lastTs !== null && ev.ts !== lastTs) {
+        triggerPulse();
+        if (ev.decision === 'REFUSE') flashAt = performance.now();
+      }
+      lastTs = ev.ts;
+    } catch (e) { /* API down: no pulse, no noise */ }
+  }
+  pollJournal();
+  setInterval(pollJournal, 3000);
+
+  /* ── interaction ────────────────────────────────────────────────── */
+  window.addEventListener('mousemove', function(e){
+    mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+    mouseY = -((e.clientY / window.innerHeight) * 2 - 1);
+    hasPointer = true;
+  }, { passive:true });
+  const hero = document.querySelector('.hero');
+  if (hero) hero.addEventListener('click', function(){ triggerPulse(); });
+  window.addEventListener('scroll', function(){
+    groupY = Math.max(-0.6, Math.min(0.6, -0.0005 * window.scrollY));
+    if (reduced) draw(0);
+  }, { passive:true });
+
+  /* ── scratch objects: nothing is allocated per frame ────────────── */
+  const dummy = new THREE.Object3D();
+  const _q = new THREE.Quaternion(), _v = new THREE.Vector3();
+  const _axis = new THREE.Vector3();
+  const _hit = new THREE.Vector3(), _dir = new THREE.Vector3();
+  let bulgeX = 0, bulgeY = 0, bulgeZ = 0, bulgeOn = false;
+
+  function pointerIntoScene(){
+    bulgeOn = false;
+    if (reduced || !hasPointer) return;
+    _v.set(mouseX, mouseY, 0.5).unproject(camera);
+    _dir.copy(_v).sub(camera.position);
+    if (Math.abs(_dir.z) < 1e-6) return;
+    const t = (0 - camera.position.z) / _dir.z;               // plane z = 0
+    if (t <= 0) return;
+    _hit.copy(camera.position).addScaledVector(_dir, t);
+    group.worldToLocal(_hit);
+    bulgeX = _hit.x; bulgeY = _hit.y; bulgeZ = _hit.z;
+    bulgeOn = true;
+  }
+
+  // Three-point blend between keyframes A and B through the fixed scatter:
+  // returns the source array pair and the blend weight for this frame.
+  let srcA = posBrain, srcB = posBrain, colA = colBrain, colB = colBrain, sizA = sBrain, sizB = sBrain, blendW = 0;
+  function blendTarget(){
+    if (missing) {                                             // forced apart, regardless of scroll
+      srcA = srcB = posScatter; colA = colB = colScatter; sizA = sizB = sScatter; blendW = 0; return;
+    }
+    const fa = keyForm[kA], fb = keyForm[kB];
+    if (fa === fb) {                                           // same form both sides: hold it
+      srcA = srcB = FORMS[fa]; colA = colB = FORM_COLS[fa]; sizA = sizB = SIZES[fa]; blendW = 0; return;
+    }
+    if (kT < 0.5) {
+      srcA = FORMS[fa]; colA = FORM_COLS[fa]; sizA = SIZES[fa];
+      srcB = posScatter; colB = colScatter; sizB = sScatter;
+      blendW = smoothstep(0, 1, kT * 2);
+    } else {
+      srcA = posScatter; colA = colScatter; sizA = sScatter;
+      srcB = FORMS[fb]; colB = FORM_COLS[fb]; sizB = SIZES[fb];
+      blendW = smoothstep(0, 1, (kT - 0.5) * 2);
+    }
+  }
+
+  function draw(dt){
+    const now = performance.now();
+    const pulseP = (now - pulseAt) / PULSE_MS;
+    const reformP = (now - reformAt) / REFORM_MS;
+    const waving = pulseP >= 0 && pulseP <= 1 && !reduced;
+    const env = waving ? (1 - pulseP) * (1 - pulseP) : 0;
+    const loose = (reformP >= 0 && reformP <= 1 && !reduced) ? (1 - reformP) : 0;
+
+    if (document.documentElement.scrollHeight !== docHeight) measureKeys();  // layout moved
+    locate();
+    blendTarget();
+    const w = blendW, iw = 1 - w;
+    const shownForm = missing ? 'scatter' : (kT < 0.5 ? keyForm[kA] : keyForm[kB]);
+
+    /* group: per-keyframe base rotation, one full Y turn while travelling
+       through scatter, bounded sway, mouse parallax, offset, scroll drift */
+    if (!reduced) swayT += dt;
+    const gk = reduced ? 1 : 1 - Math.exp(-2 * dt);            // eased at 2/s
+    rotX += (mouseY * 0.18 - rotX) * gk;
+    rotY += (mouseX * 0.28 - rotY) * gk;
+    const fracA = kA === 0 ? 0.76 : 0.78, fracB = kB === 0 ? 0.76 : 0.78;
+    const offXT = (fracA + (fracB - fracA) * kT - 0.5) * visW;  // form centre at 76% / 78%
+    offX += (offXT - offX) * (reduced ? 1 : 1 - Math.exp(-2.5 * dt));
+    const fa = keyForm[kA], fb = keyForm[kB];
+    const ra = BASE_ROT[fa] || BASE_ROT.scatter, rb = BASE_ROT[fb] || BASE_ROT.scatter;
+    const st = smoothstep(0, 1, kT);
+    const turn = (fa !== fb && !reduced) ? FULL_TURN : 0;      // spin only where a scatter passage exists
+    const baseX = ra[0] + (rb[0] - ra[0]) * st;
+    const baseY = ra[1] + (rb[1] + turn - ra[1]) * st;         // arrives at B's base exactly
+    const sway = reduced ? 0 : (SWAY_AMP[shownForm] || 0.30) * Math.sin(swayT * SWAY_W);
+    group.rotation.set(baseX + rotX, baseY + sway + rotY, 0);
+    group.position.set(offX, groupY, 0);
+    group.scale.setScalar(fitScale);
+    group.updateMatrixWorld();
+
+    /* material opacity follows the shown form: 0.7 brain, 0.8 bulb, 0.85 elsewhere */
+    const wantOp = OPACITY[shownForm] || OTHER_OPACITY;
+    mat.opacity += (wantOp - mat.opacity) * (reduced ? 1 : 1 - Math.exp(-3 * dt));
+
+    /* colours: the same three-point blend, then grey / red tints. Written only
+       when something moved, so a page at rest costs nothing here. */
+    const flashing = (now - flashAt) < FLASH_MS;
+    const wantGrey = (shownForm === 'scatter' && !missing) ? 1 : 0;
+    const wantRed = missing ? 0.85 : (flashing ? 0.8 : 0);
+    const tk = reduced ? 1 : 1 - Math.exp(-4 * dt);
+    greyMix += (wantGrey - greyMix) * tk;
+    redMix += (wantRed - redMix) * tk;
+    const colourKey = kA + ':' + kB + ':' + w.toFixed(3) + ':' + greyMix.toFixed(2) + ':' + redMix.toFixed(2) + ':' + (missing ? 1 : 0);
+    if (colourKey !== lastColourKey) {
+      lastColourKey = colourKey;
+      for (let i = 0; i < COUNT; i++) {
+        const j = i*3;
+        let r = colA[j]   * iw + colB[j]   * w;
+        let g = colA[j+1] * iw + colB[j+1] * w;
+        let b = colA[j+2] * iw + colB[j+2] * w;
+        r += (cGrey.r - r)*greyMix; g += (cGrey.g - g)*greyMix; b += (cGrey.b - b)*greyMix;
+        colOut[j]   = r + (cRed.r - r)*redMix;
+        colOut[j+1] = g + (cRed.g - g)*redMix;
+        colOut[j+2] = b + (cRed.b - b)*redMix;
+      }
+      mesh.instanceColor.needsUpdate = true;
+    }
+
+    pointerIntoScene();
+
+    const k = reduced ? 1 : 1 - Math.exp(-EASE_RATE * dt);     // follow the scroll target
+    for (let i = 0; i < COUNT; i++) {
+      const j = i*3;
+      let tx = srcA[j]   * iw + srcB[j]   * w;
+      let ty = srcA[j+1] * iw + srcB[j+1] * w;
+      let tz = srcA[j+2] * iw + srcB[j+2] * w;
+
+      if (waving && i < FORM_N) {                              // radial wave
+        const pr = Math.hypot(tx, tz) || 1e-4;
+        const wv = Math.max(0, Math.sin(Math.atan2(tz, tx) * 2 - pulseP * Math.PI * 2));
+        const out = 0.5 * env * wv;
+        tx += (tx/pr) * out; tz += (tz/pr) * out;
+      }
+      if (loose > 0 && i < FORM_N) {
+        tx += drift[j]   * 0.9 * loose;
+        ty += drift[j+1] * 0.9 * loose;
+        tz += drift[j+2] * 0.9 * loose;
+      }
+
+      cur[j]   += (tx - cur[j])   * k;
+      cur[j+1] += (ty - cur[j+1]) * k;
+      cur[j+2] += (tz - cur[j+2]) * k;
+
+      /* bulge: additive, applied after the form lerp so it never fights it */
+      let wantBx = 0, wantBy = 0, wantBz = 0, wantS = 0;
+      if (bulgeOn) {
+        const dx = cur[j] - bulgeX, dy = cur[j+1] - bulgeY, dz = cur[j+2] - bulgeZ;
+        const d = Math.hypot(dx, dy, dz);
+        if (d < BULGE_R) {
+          const f = 1 - d / BULGE_R;
+          const s = f * f;
+          const inv = d > 1e-4 ? 1/d : 0;
+          wantBx = dx * inv * s * BULGE_PUSH;
+          wantBy = dy * inv * s * BULGE_PUSH;
+          wantBz = dz * inv * s * BULGE_PUSH;
+          wantS = s * BULGE_SCALE;                             // up to 1.6x
+        }
+      }
+      if (reduced) {
+        bulge[j] = bulge[j+1] = bulge[j+2] = 0; sBulge[i] = 0;
+      } else {
+        const bk = 1 - Math.exp(-BULGE_RATE * dt);             // settles over ~0.6s
+        bulge[j]   += (wantBx - bulge[j])   * bk;
+        bulge[j+1] += (wantBy - bulge[j+1]) * bk;
+        bulge[j+2] += (wantBz - bulge[j+2]) * bk;
+        sBulge[i]  += (wantS  - sBulge[i])  * bk;
+        spinAng[i] += spinVel[i] * dt;
+      }
+      sBase[i] += ((sizA[i] * iw + sizB[i] * w) - sBase[i]) * k;   // scale blends the same way
+
+      dummy.position.set(cur[j] + bulge[j], cur[j+1] + bulge[j+1], cur[j+2] + bulge[j+2]);
+      _axis.set(axis[j], axis[j+1], axis[j+2]);
+      _q.setFromAxisAngle(_axis, spinAng[i]);
+      const sc = sBase[i] * (1 + sBulge[i]);
+      dummy.scale.set(sc, sc, sc);
+      dummy.matrix.compose(dummy.position, _q, dummy.scale);
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+
+    renderer.render(scene3, camera);
+  }
+
+  /* ── composition ────────────────────────────────────────────────── */
+  let visW = 8, visH = 5;
+  function resize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setSize(w, h, false);
+    visH = 2 * camera.position.z * Math.tan((camera.fov * Math.PI / 180) / 2);
+    visW = visH * camera.aspect;
+    const formH = Math.max(0.001, brainMaxY - brainMinY);
+    fitScale = (0.62 * visH / formH) * Math.min(1, Math.min(w, h) / 900);
+    measureKeys();
+    if (reduced) draw(0);
+  }
+  window.addEventListener('resize', resize);
+
+  /* ── loop, paused while the tab is hidden ───────────────────────── */
+  let raf = 0, last = performance.now();
+  function frame(){
+    const now = performance.now();
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    draw(dt);
+    raf = requestAnimationFrame(frame);
+  }
+  function start(){
+    if (reduced || raf) return;
+    last = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+  function stop(){ if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden) stop(); else start();
+  });
+
+  resize();
+  locate();
+  offX = ((kA === 0 ? 0.76 : 0.78) - 0.5) * visW;   // start in place, no slide-in on load
+  if (reduced) draw(0); else start();
+})();
+</script>
+
+</body></html>

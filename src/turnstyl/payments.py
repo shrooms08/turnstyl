@@ -148,6 +148,11 @@ class PaymentBackend(ABC):
                         "decision": "RECONCILED",
                         "price": item["amount_usdc"],
                         "tx_hash": item["tx_hash"],
+                        "summary": (
+                            f"Debt on job {item['job_id'][:6]} step {item['step']} "
+                            f"({item['amount_usdc']:.2f} USDC) settled "
+                            + ("from chain." if self.name == BASE else "on the fake backend.")
+                        ),
                     },
                 )
             )

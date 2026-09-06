@@ -100,6 +100,9 @@ wait_step "$JOB4" 2 done && ok "worker ran step 2 of job 4 on credit without pay
 D=$(jget "/api/jobs/$JOB4")
 [ "$(echo "$D" | jq_ "[s['pay_tx'] for s in d['steps'] if s['step']==2][0]")" = "None" ] && ok "step 2 has no pay tx (credit)" || bad "step 2 has no pay tx (credit)"
 [ "$(jget "/api/journal?job=$JOB4&limit=50" | jq_ "any(e['decision']=='RUN_ON_CREDIT' and e['step']==2 for e in d['events'])")" = "True" ] && ok "journal records RUN_ON_CREDIT for step 2" || bad "journal records RUN_ON_CREDIT for step 2"
+JS=$(jget "/api/journal?job=$JOB4&limit=50")
+[ "$(echo "$JS" | jq_ "all((e.get('extra') or {}).get('summary') for e in d['events']), len(d['events'])>0")" = "True True" ] && ok "every journal event carries extra.summary" || bad "every journal event carries extra.summary" "$(echo "$JS" | jq_ "[(e.get('extra') or {}).get('summary') for e in d['events']]" | head -c 300)"
+[ "$(echo "$JS" | jq_ "[e['extra']['summary'] for e in d['events'] if e['decision']=='RUN_ON_CREDIT'][0]")" = "Ran step 2 (findings) on credit: 3 fully paid jobs on record. Served from memory, no model call. Next: step 3 invoiced at 0.38 USDC." ] && ok "RUN_ON_CREDIT summary reads as one sentence" || bad "RUN_ON_CREDIT summary" "$(echo "$JS" | jq_ "[e['extra']['summary'] for e in d['events'] if e['decision']=='RUN_ON_CREDIT']")"
 simulate_step "$JOB4" 3 || bad "job 4 step 3"; simulate_step "$JOB4" 4 || bad "job 4 step 4"
 [ "$(jget "/api/jobs/$JOB4" | jq_ "d['status']")" = "complete" ] && ok "job 4 complete with step 2 owed" || bad "job 4 complete"
 JOB="$JOB4"   # the outstanding checks below settle step 2 of this job

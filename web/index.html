@@ -168,7 +168,9 @@ h1{font-family:var(--disp);font-weight:200;font-size:clamp(42px,6.6vw,88px);line
 
 .ev{border-top:1px solid var(--line);padding:20px 0}
 .ev:first-of-type{border-top:0;padding-top:0}
-.ev .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+.ev .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+.ev .sum{font-size:15px;line-height:1.55;color:var(--ink);margin:0 0 10px;max-width:70ch}
+.mem .lines ul.acted{margin:0 0 12px}
 .ev .ts{font-family:var(--mono);font-size:11px;color:var(--mute);letter-spacing:.06em}
 .ev .stp{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase}
 .ev ul.acted{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
@@ -795,21 +797,24 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 
     var rows = events.map(function(e, i){
       var key = (e.ts||"") + ":" + (e.step||"") + ":" + (e.decision||"");
-      // newest event open by default on desktop; closed on mobile, tap to expand
-      var mobile = window.matchMedia && window.matchMedia("(max-width:700px)").matches;
-      var isOpen = S.memTouched[key] != null ? S.memTouched[key] : (i === 0 && !mobile);
+      // details are collapsed by default at every width; one click opens them
+      var isOpen = S.memTouched[key] || false;
       var acted = (e.acted||[]).map(function(a){ return "<li>"+esc(a)+"</li>"; }).join("");
       var evaluated = (e.evaluated||[]);
+      // the decision as one sentence; events written before summaries existed
+      // fall back to their first acted line
+      var summary = (e.extra && e.extra.summary) || (e.acted && e.acted[0]) || "no summary recorded";
       return '<div class="ev">' +
         '<div class="top">'+decisionPill(e.decision) +
           '<span class="ts">'+esc(clock(e.ts))+'</span>' +
           '<span class="stp">step '+esc(e.step==null?"—":e.step)+'</span>' +
           (e.buyer ? '<span class="ts">'+esc(trunc(e.buyer))+'</span>' : "") +
         '</div>' +
-        (acted ? '<ul class="acted">'+acted+"</ul>" : '<div class="empty" style="padding:0">no actions recorded</div>') +
+        '<p class="sum">'+esc(summary)+'</p>' +
         '<details class="mem" data-mem="'+esc(key)+'"'+(isOpen?" open":"")+'>' +
-          '<summary>memory read<span class="n">'+evaluated.length+' lines</span></summary>' +
+          '<summary>details<span class="n">'+(e.acted||[]).length+' actions · '+evaluated.length+' memory lines</span></summary>' +
           '<div class="lines">' +
+            (acted ? '<ul class="acted">'+acted+"</ul>" : '<div class="empty" style="padding:0 0 10px">no actions recorded</div>') +
             (evaluated.length ? evaluated.map(function(l){ return "<code>"+esc(l)+"</code>"; }).join("")
                               : '<code class="muted">nothing evaluated</code>') +
           "</div>" +

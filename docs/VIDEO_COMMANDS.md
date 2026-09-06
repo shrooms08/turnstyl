@@ -84,6 +84,12 @@ you` marks the buyer on any job that is yours.
 
 ## Terminal fallback
 
+Every decision now prints as three lines: a plain sentence (for example `Ran
+step 2 (findings) because the 0.50 USDC invoice was paid. Output committed on
+chain.`), then `DECISION: <NAME>` on its own line for the camera, then the full
+reason in dim text beginning `because …`. The quoted `DECISION:` lines below
+show that reason text; read them as the sentence plus the dim line.
+
 Two terminals, side by side. **LEFT is the agent**, **RIGHT is the buyer**. The
 agent never holds the buyer's key and the buyer never touches the agent's store.
 

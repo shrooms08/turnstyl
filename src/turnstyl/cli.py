@@ -108,15 +108,18 @@ def render_memory_read(outcome: Outcome) -> None:
 
 
 def render_decision(outcome: Outcome) -> None:
-    """The verdict, printed last so it is what stays on screen."""
+    """The verdict: one plain sentence, the DECISION line for the camera, then
+    the full reason in dim text below it."""
     if not outcome.decision:
         return
+    if outcome.summary:
+        console.print(Text(outcome.summary))
     style = DECISION_STYLE.get(outcome.decision, "white")
     line = Text("DECISION: ", style="bold")
     line.append(outcome.decision, style=f"bold {style}")
-    line.append(", because ")
-    line.append(outcome.reason)
     console.print(line)
+    if outcome.reason:
+        console.print(Text(f"because {outcome.reason}", style="dim"))
 
 
 def render_step(outcome: Outcome) -> None:

@@ -58,6 +58,7 @@ class Outcome:
     commit_hash: str | None = None
     commit_error: str | None = None
     reconciled: list[dict] = field(default_factory=list)
+    summary: str = ""            # the decision as one plain sentence
     complete: bool = False
     resumed: bool = False
     note: str = ""
@@ -114,6 +115,10 @@ class Engine:
             read.append(f"fts5 findings/* for {filename} function names")
         existing = self._find_open_job(buyer_key, contract_hash, read)
         if existing is not None:
+            resume_summary = (
+                f"Picked up the open job for this contract at step "
+                f"{existing.current_step} instead of starting a new one."
+            )
             self.store.journal(
                 S.JournalEntry(
                     evaluated=[
@@ -132,12 +137,14 @@ class Engine:
                         "step": existing.current_step,
                         "decision": "RESUME_EXISTING",
                         "price": None,
+                        "summary": resume_summary,
                     },
                 )
             )
             return Outcome(
                 job_id=existing.job_id,
                 status=existing.status,
+                summary=resume_summary,
                 step=existing.current_step,
                 step_name=S.STEP_NAMES.get(existing.current_step),
                 decision="RESUME_EXISTING",
@@ -178,7 +185,10 @@ class Engine:
         self.store.put_buyer(buyer_key, ledger)
         read.append(f"entity buyer/{buyer_key}")
 
-        outcome = self._advance(state, contract_text, extra_reads=read)
+        outcome = self._advance(
+            state, contract_text, extra_reads=read,
+            hint_note="Prior findings for this contract are in memory." if hints else "",
+        )
         outcome.reconciled = reconciled
         outcome.memory_hints = hints
         return outcome
@@ -208,12 +218,14 @@ class Engine:
                         "step": state.current_step,
                         "decision": "ALREADY_COMPLETE",
                         "price": None,
+                        "summary": "Nothing to do: this job is already complete.",
                     },
                 )
             )
             return Outcome(
                 job_id=job_id,
                 status=state.status,
+                summary="Nothing to do: this job is already complete.",
                 step=state.current_step,
                 decision="ALREADY_COMPLETE",
                 reason=(
@@ -377,6 +389,10 @@ class Engine:
                         "step": None,
                         "decision": "RECONCILE_FAILED",
                         "price": None,
+                        "summary": (
+                            "Could not check this buyer's outstanding invoices "
+                            "against payments; using the ledger as last written."
+                        ),
                     },
                 )
             )
@@ -413,6 +429,7 @@ class Engine:
         state: S.JobState,
         contract_text: str,
         extra_reads: list[str],
+        hint_note: str = "",
     ) -> Outcome:
         """Decide and act on exactly one step. Writes exactly one journal event."""
         job_id = state.job_id
@@ -439,11 +456,13 @@ class Engine:
                 state.status = S.STATUS_COMPLETE
                 state.current_step = S.LAST_STEP
                 ledger = self.store.get_buyer(state.buyer)
-                self._complete(state, entity, ledger, skip_acted)
+                closing = self._complete(state, entity, ledger, skip_acted)
                 ledger.trust_tier = policy.recompute_trust_tier(ledger)
                 self.store.put_buyer(state.buyer, ledger)
+                skip_summary = f"Step {step} was already done; skipped it. {closing}"
             else:
                 state.current_step = step + 1
+                skip_summary = f"Step {step} was already done; skipped it and moved on to step {step + 1}."
             self.store.put_job_state(state)
             self.store.journal(
                 S.JournalEntry(
@@ -464,6 +483,7 @@ class Engine:
                         "step": step,
                         "decision": "SKIP_ALREADY_DONE",
                         "price": done.price_usdc,
+                        "summary": skip_summary,
                     },
                 )
             )
@@ -473,6 +493,7 @@ class Engine:
                 step=step,
                 step_name=S.STEP_NAMES.get(step),
                 decision="SKIP_ALREADY_DONE",
+                summary=skip_summary,
                 reason=(
                     f"entity job/{job_id} already holds step {step} with "
                     f"output_sha256 {done.output_sha256[:12]}...; not re-run and "
@@ -498,6 +519,27 @@ class Engine:
         decision, reason = policy.decide(step, ledger, state)
 
         if decision in (S.WAIT_FOR_PAYMENT, S.REFUSE):
+            amount = state.open_invoice.amount_usdc if state.open_invoice else S.BASE_PRICES.get(step, 0.0)
+            if decision == S.REFUSE:
+                owed = ledger.outstanding[0] if ledger.outstanding else None
+                hold_summary = (
+                    f"Refused step {step}: {owed.amount_usdc:.2f} USDC still owed on job "
+                    f"{owed.job_id[:6]} (step {owed.step})."
+                    if owed else
+                    f"Refused step {step}: this buyer left work unpaid on an earlier job."
+                )
+            elif ledger.defaults > 0:
+                hold_summary = (
+                    f"Waiting on step {step}: {amount:.2f} USDC unpaid, and after a default "
+                    f"credit returns after {S.EARN_BACK_PAID_STEPS} consecutive paid steps "
+                    f"({ledger.consecutive_paid_since_default} so far)."
+                )
+            else:
+                hold_summary = (
+                    f"Waiting on step {step}: {amount:.2f} USDC unpaid, and this buyer hasn't "
+                    f"earned credit yet ({ledger.completed_paid_jobs} of "
+                    f"{S.TRUSTED_MIN_PAID_JOBS} fully paid jobs)."
+                )
             self.store.journal(
                 S.JournalEntry(
                     evaluated=[
@@ -522,12 +564,14 @@ class Engine:
                         "price": (
                             state.open_invoice.amount_usdc if state.open_invoice else None
                         ),
+                        "summary": hold_summary,
                     },
                 )
             )
             return Outcome(
                 job_id=job_id,
                 status=state.status,
+                summary=hold_summary,
                 step=step,
                 step_name=S.STEP_NAMES.get(step),
                 decision=decision,
@@ -544,7 +588,7 @@ class Engine:
                 ),
             )
 
-        return self._execute(state, entity, ledger, step, decision, reason, contract_text, read)
+        return self._execute(state, entity, ledger, step, decision, reason, contract_text, read, hint_note)
 
     def _sync_invoice(self, state: S.JobState, read: list[str]) -> None:
         """Ask the backend whether the open invoice has been settled."""
@@ -568,6 +612,7 @@ class Engine:
         reason: str,
         contract_text: str,
         read: list[str],
+        hint_note: str = "",
     ) -> Outcome:
         job_id = state.job_id
         evaluated = [
@@ -722,11 +767,12 @@ class Engine:
         next_invoice: S.OpenInvoice | None = None
         price_reason = ""
         complete = False
+        closing = ""
         if step >= S.LAST_STEP:
             complete = True
             state.current_step = S.LAST_STEP
             state.status = S.STATUS_COMPLETE
-            self._complete(state, entity, ledger, acted)
+            closing = self._complete(state, entity, ledger, acted)
         else:
             next_step = step + 1
             next_invoice, price_reason = self._issue_invoice(
@@ -748,6 +794,35 @@ class Engine:
                 f"{next_invoice.step} ({next_invoice.memo}), then run again"
             ]
         )
+        # The decision as one plain sentence, written here with everything the
+        # sentence needs still in scope. The evaluated / acted / forward lists
+        # above stay exactly as they are; this is the readable line above them.
+        name = S.STEP_NAMES[step]
+        if decision == S.RUN_PAID:
+            summary = f"Ran step {step} ({name}) because the {price_usdc:.2f} USDC invoice was paid."
+        elif decision == S.RUN_ON_CREDIT:
+            summary = (
+                f"Ran step {step} ({name}) on credit: credit earned back after "
+                f"{S.EARN_BACK_PAID_STEPS} consecutive paid steps."
+                if ledger.defaults > 0 else
+                f"Ran step {step} ({name}) on credit: {ledger.completed_paid_jobs} "
+                f"fully paid jobs on record."
+            )
+        else:
+            summary = f"Ran step {step} ({name}) for free."
+            if hint_note:
+                summary += " " + hint_note
+        if cached:
+            summary += " Served from memory, no model call."
+        if step == S.STEP_PATCH and record.compiles is not None:
+            summary += " The patched contract compiles." if record.compiles else " The patched contract does not compile."
+        if commit_tx:
+            summary += " Output committed on chain."
+        if complete:
+            summary += " " + closing
+        elif next_invoice is not None:
+            summary += f" Next: step {next_invoice.step} invoiced at {next_invoice.amount_usdc:.2f} USDC."
+
         self.store.journal(
             S.JournalEntry(
                 evaluated=evaluated,
@@ -759,6 +834,7 @@ class Engine:
                     "step": step,
                     "decision": decision,
                     "price": price_usdc,
+                    "summary": summary,
                 },
             )
         )
@@ -770,6 +846,7 @@ class Engine:
             step_name=S.STEP_NAMES[step],
             decision=decision,
             reason=reason,
+            summary=summary,
             memory_read=_dedupe(read),
             output=output,
             cached=cached,
@@ -849,8 +926,9 @@ class Engine:
         entity: S.JobEntity,
         ledger: S.BuyerLedger,
         acted: list[str],
-    ) -> None:
-        """Copy the outputs into the findings entity, archive the job, settle up."""
+    ) -> str:
+        """Copy the outputs into the findings entity, archive the job, settle up.
+        Returns the closing sentence for the decision summary."""
         findings = self.store.get_findings(state.contract_hash)
         for step_str, record in entity.steps.items():
             findings = findings.with_step(int(step_str), record.output)
@@ -875,6 +953,10 @@ class Engine:
                 f"{ledger.unpaid_from_prior_jobs}, defaults={ledger.defaults}, "
                 f"consecutive_paid_since_default reset to 0"
             )
+            closing = (
+                f"Job closed with {sum(o.amount_usdc for o in carried):.2f} USDC owed on step "
+                f"{', '.join(str(o.step) for o in carried)}. Credit removed."
+            )
         else:
             # Every paid step settled: this is what credit is extended on.
             ledger.completed_paid_jobs += 1
@@ -882,6 +964,7 @@ class Engine:
                 f"entity buyer/{state.buyer} -> job closed fully paid; "
                 f"completed_paid_jobs={ledger.completed_paid_jobs}"
             )
+            closing = "Job complete, all steps paid. Findings cached for this contract."
 
         if self.store.archive_job_entity(
             state.job_id, f"job complete, outputs cached under {state.contract_hash}"
@@ -889,3 +972,4 @@ class Engine:
             acted.append(f"archived entity job/{state.job_id}")
         self.store.remove_active_job(state.job_id)
         acted.append(f"{S.STATE_ACTIVE_JOBS} -> removed {state.job_id}")
+        return closing

@@ -266,9 +266,14 @@ has "mobile panel padding"            ".panel{padding:18px 20px;margin:-18px -20
 N_STORY=$(grep -c 'class="inner reveal panel"' "$PAGE"); N_HERO=$(grep -c 'class="reveal in panel"' "$PAGE")
 [ "$N_STORY" = "4" ] && [ "$N_HERO" = "1" ] && ok "panel class on all five text blocks (4 story + 1 hero)" || bad "panel class on all five text blocks" "story=$N_STORY hero=$N_HERO"
 has "tables as label/value on mobile" "content:attr(data-label)"
-has "memory read closed on mobile"   "i === 0 && !mobile"
+if grep -qF "(i === 0 && !mobile)" "$PAGE"; then bad "newest event no longer auto-expanded" "old auto-expand still present"; else ok "newest event no longer auto-expanded"; fi
 has "outstanding item pay button"     'data-settle="1"'
 has "ledger memo comes from the API"  "o.memo"
+has "timeline: summary sentence"      '<p class="sum">'
+has "timeline: summary from extra"    "e.extra.summary"
+has "timeline: fallback to first acted line" "e.acted[0]"
+has "timeline: details collapsed by default" "S.memTouched[key] || false"
+has "timeline: details disclosure"    "<summary>details<span"
 has "download report button"          'id="downloadReportBtn"'
 has "report link hits report.md"      '/report.md'
 has "verify all button"               'id="verifyAllBtn"'

@@ -1,1 +1,1 @@
-window.TURNSTYL_API = "https://condos-solar-chains-penetration.trycloudflare.com";
+window.TURNSTYL_API = "";

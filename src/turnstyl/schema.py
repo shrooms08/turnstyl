@@ -201,6 +201,10 @@ class OpenInvoice(_Model):
     # invoice so any later display can say why the step costs what it costs.
     invoice_block: int | None = None
     price_reason: str = ""
+    # When this invoice was offered. The settlement event carries it, so the
+    # time a buyer took to pay is read off one event rather than inferred by
+    # pairing it with whichever earlier event happened to create the invoice.
+    issued_at: str = Field(default_factory=utc_now)
 
 
 class InjectionFlag(_Model):

@@ -127,6 +127,10 @@
     var cls = (d === "RUN_ON_CREDIT") ? "gold" : (d === "REFUSE" ? "red" : "");
     return '<span class="pill '+cls+'">'+esc(d||"—")+'</span>';
   }
+  // Some journal entries record what happened rather than what the agent
+  // chose. They belong in the timeline, behind the decisions.
+  var FACTS = { PAYMENT_SEEN:1, TRUST_CHANGED:1, PAID_X402:1, FLAGGED_UNTRUSTED_SOURCE:1 };
+  function isFact(d){ return !!FACTS[d]; }
   function trustPill(t){
     var cls = t === "trusted" ? "gold" : (t === "blocked" ? "red" : "");
     return '<span class="pill '+cls+'">'+esc(t||"unknown")+'</span>';
@@ -587,7 +591,7 @@
               (evaluated.length ? evaluated.map(function(l){ return "<code>"+esc(l)+"</code>"; }).join("")
                                 : '<code class="muted">nothing evaluated</code>') +
             "</div></details>";
-      return '<div class="ev">' +
+      return '<div class="ev'+(isFact(e.decision) ? " fact" : "")+'">' +
         '<div class="top">'+decisionPill(e.decision) +
           '<span class="ts">'+esc(clock(e.ts))+'</span>' +
           '<span class="stp">step '+esc(e.step==null?"—":e.step)+'</span>' +

@@ -90,7 +90,7 @@ Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
   ```
   base 0.50 for step 2 (findings); no discount (not cached), no surcharge
   (step_cost/2 avg_tokens=744 over 1 run(s)); x0.9 because this buyer has paid
-  within a median of 0s over 16 payments; buyer trust_tier=trusted = 0.45 USDC
+  within a median of 0.2s over 16 payments; buyer trust_tier=trusted = 0.45 USDC
   ```
 
   It buys a discount and nothing else: credit and refusal never read it.
@@ -361,13 +361,19 @@ turnstyl digest for today (2026-09-07)
   steps served from memory 18
   model spend (estimated)  $0.0412 on claude-haiku-4-5
   new buyers               1
-  trust changes            1
+  trust changes            7 (1 buyer(s) above new)
   defaults                 1
   refusals                 1
   injection flags raised   10
+  payment to output        median 0.2s over 16 payment(s)
 
   consolidated as entity digest/2026-09-07
 ```
+
+Trust changes counts `TRUST_CHANGED` events, so it is tiers that actually moved,
+not a snapshot; the snapshot is the figure beside it. Payment to output is timed
+from the `PAYMENT_SEEN` event every rail writes when it first sees an invoice
+settled, and reads "not enough data" until there are three observations.
 
 It writes one entity, `digest/<date>`, so counting the same day again is a
 single read rather than a walk of the journal. `GET /api/digest` returns the

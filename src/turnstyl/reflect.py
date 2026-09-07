@@ -15,16 +15,18 @@ Two rules it will not bend:
 * the median, never the mean. One buyer who paid overnight once should not lose
   the discount, and one who paid instantly once should not earn it.
 
-**Timing, stated exactly.** The journal holds an event per decision, not per
-wire transfer, so "invoice to payment" is measured between two events:
+**Timing, stated exactly.** Every rail writes a ``PAYMENT_SEEN`` event the
+moment it first sees an invoice settled, and that event carries the invoice's
+own issue timestamp. So the figure is read off one event: ``ts - issued_at``,
+on the fake backend, the receipts contract and x402 alike. The pattern's
+``basis`` reads ``payment_seen``.
 
-* *issued* is the event that created the invoice for step N, which is the event
-  that ran step N-1 for that job.
-* *settled* is the ``PAID_X402`` event for step N when there is one, which is
-  written at the moment the facilitator settled. Otherwise it is the
-  ``RUN_PAID`` event for step N, which is when the agent noticed the payment
-  and ran the step. That second case is an upper bound, and the pattern's
-  ``basis`` field says so.
+Journals written before those events existed have none, and for those buyers
+the old measurement still applies: *issued* is the event that ran step N-1 (the
+event that created the invoice for step N), *settled* is the ``PAID_X402``
+event for step N when there is one, and otherwise the ``RUN_PAID`` event, which
+is when the agent noticed and is an upper bound. ``basis`` says which was used,
+so a median is never read as more precise than it is.
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ import statistics
 from datetime import datetime, timezone
 from typing import Any
 
+from . import events
 from . import schema as S
 from .memory import TurnstylStore
 
@@ -41,6 +44,7 @@ JOURNAL_WINDOW = 2000
 
 RAN_DECISIONS = (S.RUN_FREE, S.RUN_PAID, S.RUN_ON_CREDIT)
 PAID_X402 = "PAID_X402"
+PAYMENT_SEEN = events.PAYMENT_SEEN
 
 
 def parse_ts(value: Any) -> datetime | None:
@@ -78,7 +82,7 @@ def events_for(store: TurnstylStore, limit: int = JOURNAL_WINDOW) -> list[dict[s
     return rows
 
 
-def observe(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def observe(journal: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Per buyer: the settle times, the steps bought per job, the jobs seen.
 
     Pure: takes events, returns numbers. Nothing here reads or writes memory,
@@ -87,11 +91,11 @@ def observe(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     ran_at: dict[tuple[str, int], datetime] = {}      # (job, step) -> when it ran
     paid_at: dict[tuple[str, int], datetime] = {}     # (job, step) -> when it settled
     exact: set[tuple[str, int]] = set()               # settled by a PAID_X402 event
+    seen: dict[tuple[str, int], float] = {}           # PAYMENT_SEEN: seconds, direct
     buyer_of: dict[str, str] = {}
     steps_of: dict[str, set[int]] = {}
-    paid_steps: dict[str, list[int]] = {}
 
-    for event in events:
+    for event in journal:
         job, step, buyer = event["job_id"], event["step"], event["buyer"]
         if not job or not isinstance(step, int):
             continue
@@ -102,22 +106,40 @@ def observe(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             steps_of.setdefault(job, set()).add(step)
             if event["decision"] == S.RUN_PAID:
                 paid_at.setdefault((job, step), event["at"])
-                paid_steps.setdefault(job, []).append(step)
+        elif event["decision"] == PAYMENT_SEEN:
+            # The event says when the invoice was offered, so the wait is read
+            # off this one event on every rail. Nothing to pair, nothing to
+            # infer.
+            issued = parse_ts((event["extra"] or {}).get("issued_at"))
+            if issued is not None:
+                elapsed = (event["at"] - issued).total_seconds()
+                if elapsed >= 0:
+                    seen[(job, step)] = elapsed
         elif event["decision"] == PAID_X402:
-            # The exact settlement moment beats the moment the agent noticed.
             paid_at[(job, step)] = event["at"]
             exact.add((job, step))
 
     out: dict[str, dict[str, Any]] = {}
     for job, buyer in buyer_of.items():
         row = out.setdefault(
-            buyer, {"seconds": [], "steps_per_job": [], "jobs": set(), "exact": 0}
+            buyer,
+            {"seconds": [], "steps_per_job": [], "jobs": set(), "exact": 0, "seen": 0},
         )
         row["jobs"].add(job)
         if job in steps_of:
             row["steps_per_job"].append(len(steps_of[job]))
 
+    for (job, step), elapsed in seen.items():
+        buyer = buyer_of.get(job)
+        if buyer:
+            out[buyer]["seconds"].append(elapsed)
+            out[buyer]["seen"] += 1
+
+    # Only for invoices no PAYMENT_SEEN covers, which means a journal written
+    # before those events existed.
     for (job, step), settled in sorted(paid_at.items(), key=lambda kv: kv[1]):
+        if (job, step) in seen:
+            continue
         buyer = buyer_of.get(job)
         if not buyer:
             continue
@@ -150,8 +172,16 @@ def pattern_for(
     if len(seconds) >= S.PROMPT_PAYER_MIN_PAYMENTS:
         prompt = bool(median is not None and median < S.PROMPT_PAYER_MAX_SECONDS)
 
+    seen = int(observed.get("seen") or 0)
     if not seconds:
         basis = "no invoice was seen settled in the journal window"
+    elif seen == len(seconds):
+        basis = "payment_seen"
+    elif seen:
+        basis = (
+            f"payment_seen for {seen} of {len(seconds)}; the rest are from a "
+            f"journal written before those events existed and are upper bounds"
+        )
     elif exact == len(seconds):
         basis = "measured from the invoice to the x402 settlement event"
     elif exact:

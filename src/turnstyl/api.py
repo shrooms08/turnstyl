@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from . import auth
 from . import digest
+from . import events
 from . import policy
 from . import schema as S
 from .engine import Engine
@@ -1673,6 +1674,12 @@ def x402_record_settlement(job_id: str, step: int, tx_hash: str, payer: str) -> 
         fresh.open_invoice.paid = True
         fresh.open_invoice.tx_hash = tx_hash
         store.put_job_state(fresh)
+        # The moment the money arrived, on the rail it arrived by. Written here
+        # because this is the point that flipped the invoice, so the invoice
+        # produces exactly one of these however it was settled.
+        events.payment_seen(
+            store, fresh, fresh.open_invoice, events.RAIL_X402, tx_hash
+        )
 
     # Not mark_paid: on the Base backend that deliberately refuses, because a
     # receipts-contract payment must land as a Paid log. An x402 settlement is

@@ -24,6 +24,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from turnstyl import jobtypes  # noqa: E402
 from turnstyl import digest  # noqa: E402
+from turnstyl import events  # noqa: E402
 from turnstyl import injection  # noqa: E402
 from turnstyl import policy  # noqa: E402
 from turnstyl import schema as S  # noqa: E402
@@ -505,8 +506,21 @@ def beat_j() -> None:
                    f"median={pattern.median_seconds_invoice_to_payment}"))
     r.append(check("j", "so pays_promptly is true", pattern.pays_promptly is True,
                    f"pays_promptly={pattern.pays_promptly}"))
-    r.append(check("j", "it records how the median was measured", bool(pattern.basis),
-                   pattern.basis))
+    r.append(check("j", "the median is measured from PAYMENT_SEEN, not inferred",
+                   pattern.basis == "payment_seen", f"basis={pattern.basis!r}"))
+    seen = [e for e in store().read_journal(limit=200)
+            if (e.get("extra") or {}).get("decision") == events.PAYMENT_SEEN]
+    r.append(check("j", "every settled invoice left one PAYMENT_SEEN event",
+                   len(seen) >= pattern.payments_observed,
+                   f"{len(seen)} event(s) for {pattern.payments_observed} payment(s)"))
+    r.append(check("j", "each payment event names the amount, step, rail and tx",
+                   all(all(k in (e.get("extra") or {}) for k in
+                           ("amount", "step", "rail", "tx", "issued_at")) for e in seen),
+                   str((seen[0].get("extra") if seen else {}))[:200]))
+    r.append(check("j", "and reads as one sentence",
+                   bool(seen) and " USDC for step " in (seen[0]["extra"]["summary"])
+                   and " seen on " in seen[0]["extra"]["summary"],
+                   seen[0]["extra"]["summary"] if seen else "no event"))
     r.append(check("j", "and how much of a job this buyer buys",
                    pattern.steps_per_job_median is not None,
                    f"steps_per_job_median={pattern.steps_per_job_median}"))
@@ -527,8 +541,11 @@ def beat_j() -> None:
     r.append(check("j", "at three the price drops a tenth",
                    abs(over - round(plain * 0.9, 2)) < 1e-9 and "x0.9" in over_reason,
                    f"{over} vs {plain}: {over_reason}"))
+    shown = (f"{pattern.median_seconds_invoice_to_payment:.1f}"
+             if pattern.median_seconds_invoice_to_payment < 10
+             else f"{pattern.median_seconds_invoice_to_payment:.0f}")
     r.append(check("j", "and the reason names the median and the count",
-                   f"median of {pattern.median_seconds_invoice_to_payment:.0f}s" in over_reason
+                   f"median of {shown}s" in over_reason
                    and f"over {pattern.payments_observed} payments" in over_reason,
                    over_reason))
 
@@ -543,8 +560,13 @@ def beat_j() -> None:
                    flat2[flat2.find("priced step"):][:200] if "priced step" in flat2 else flat2[:300]))
     r.append(check("j", "the invoice is 0.45 USDC, not 0.50",
                    "amount 0.45 USDC" in flat2, flat2[:400]))
+    notes.append(f"beat j discount reason:\n    {over_reason}")
     notes.append(
-        f"beat j discount reason:\n    {over_reason}"
+        f"beat j payment event:\n    {seen[-1]['extra']['summary'] if seen else 'none'}"
+    )
+    notes.append(
+        f"beat j median: {pattern.median_seconds_invoice_to_payment}s over "
+        f"{pattern.payments_observed} payments, basis {pattern.basis!r}"
     )
     beat_result("j", "the agent learned a buyer pays fast, and charged less for it", r)
 
@@ -594,6 +616,20 @@ def beat_k() -> None:
     r.append(check("k", "injection flags raised are counted",
                    f["injection_flags"] > 0, str(f["injection_flags"])))
     r.append(check("k", "refusals are counted", f["refusals"] > 0, str(f["refusals"])))
+    changes = [e for e in st.read_journal(limit=200)
+               if (e.get("extra") or {}).get("decision") == events.TRUST_CHANGED]
+    r.append(check("k", "a tier that moved left a TRUST_CHANGED event",
+                   len(changes) > 0, f"{len(changes)} event(s)"))
+    r.append(check("k", "the digest counts those events, not a snapshot",
+                   f["trust_changes"] == len(changes),
+                   f"digest={f['trust_changes']} journal={len(changes)}"))
+    r.append(check("k", "and reports the standing snapshot beside it",
+                   f["buyers_above_new"] >= 0, str(f.get("buyers_above_new"))))
+    r.append(check("k", "payment to output is a median over at least three payments",
+                   (f["payment_to_output_observations"] >= digest.MIN_OBSERVATIONS)
+                   == (f["median_seconds_payment_to_output"] is not None),
+                   f"n={f['payment_to_output_observations']} "
+                   f"median={f['median_seconds_payment_to_output']}"))
     r.append(check("k", "the top contracts are named, most audited first",
                    len(f["top_contracts_by_repeat_audits"]) > 0
                    and f["top_contracts_by_repeat_audits"][0]["jobs"] >= 1,
@@ -610,7 +646,9 @@ def beat_k() -> None:
         + ", ".join(
             f"{k}={f[k]}" for k in
             ("jobs_opened", "jobs_completed", "usdc_settled", "steps_run",
-             "steps_served_from_memory", "defaults", "refusals", "injection_flags")
+             "steps_served_from_memory", "defaults", "refusals", "injection_flags",
+             "trust_changes", "median_seconds_payment_to_output",
+             "payment_to_output_observations")
         )
     )
     beat_result("k", "the day counted once, from what the agent wrote down", r)

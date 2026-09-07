@@ -30,7 +30,7 @@ on chain tells the agent which invoice it already collected, so it charges again
 | --- | --- | --- |
 | recall | `TurnstylStore.get_job_state` / `get_buyer` (`memory.py`), called at the top of `Engine.run` and `Engine.new_job` | reads the HOT state document and WARM buyer entity that every decision is derived from |
 | entities | `TurnstylStore.put_job_entity` / `put_buyer` / `record_step_cost` / `put_findings` (`memory.py`) | the four WARM entity families: job, buyer, step_cost, findings. Work products and cost history are namespaced by job type (`findings/<type>/<hash>`, `step_cost/<type>/<n>`); the buyer ledger deliberately is not |
-| temporal | `TurnstylStore.journal` (`memory.py:350`) writes one COLD event per decision; `read_journal` (`memory.py:358`) reads them back newest first | an append-only record of what memory said, what was done, and what was expected next |
+| temporal | `TurnstylStore.journal` (`memory.py`) writes one COLD event per decision, plus two that record a fact rather than a choice: `PAYMENT_SEEN` when any rail first sees an invoice settled and `TRUST_CHANGED` when a buyer's tier actually moves (`events.py`); `read_journal` reads them back newest first | an append-only record of what memory said, what was done, what was expected next, and what happened |
 | reflection | two things. Per decision: `Engine._advance` builds the `evaluated` list before acting, so each journal event states the facts it rested on (`engine.py`). Over time: `reflect.reflect` (`reflect.py`) reads the journal hourly from `Worker._reflect` (`worker.py`) or on demand from `turnstyl reflect`, and writes `("pattern", <address>)` | the agent's own account of why it charged or refused, and what watching a buyer over many jobs has taught it |
 | consolidation | two things. Per job: `Engine._complete` (`engine.py:808`) copies the four step outputs into `findings/<contract_hash>` and archives the job entity via `TurnstylStore.archive_job_entity` (`memory.py:293`). Per day: `digest.build` (`digest.py`) writes `("digest", <YYYY-MM-DD>)` from `turnstyl digest` and `GET /api/digest` | closed jobs leave the working set and their outputs become the cache that prices the next audit; a counted day becomes one entity read instead of a walk of the journal |
 | semantic search (FTS5) | `TurnstylStore.search_findings` (`memory.py:329`), called from `Engine._memory_hints` (`engine.py:297`) on every `job new` | queries `findings/*` with the contract's own function names and prints any hit as a dim "memory hint" line |
@@ -53,11 +53,17 @@ one `("pattern", <address>)` per buyer it saw:
 | `pays_promptly` | `True` when the median is under 300s over at least 3 payments; `False` when it is not; `None` below 3 |
 | `last_reflected_at`, `basis` | when it looked, and how the median was measured |
 
-A pair is *issued* at the event that ran step N-1 of that job, which is the
-event that created the invoice for step N, and *settled* at the `PAID_X402`
-event for step N when there is one (the exact moment the facilitator settled) or
-else the `RUN_PAID` event for step N (when the agent noticed and ran it, which
-is an upper bound). The pattern's `basis` field says which of the two was used.
+Every rail writes a `PAYMENT_SEEN` event the moment it first sees an invoice
+settled, and that event carries the invoice's own `issued_at`. So the wait is
+read off one event, `ts - issued_at`, on the fake backend, the receipts contract
+and x402 alike, and `basis` reads `payment_seen`.
+
+A journal written before those events existed has none, and for those buyers the
+older measurement still applies: *issued* at the event that ran step N-1 (which
+is the event that created the invoice for step N), *settled* at the `PAID_X402`
+event when there is one and otherwise the `RUN_PAID` event, which is when the
+agent noticed and is an upper bound. `basis` always says which was used, so a
+median is never read as more precise than it is.
 
 It is run by `Worker._reflect` once an hour and by `turnstyl reflect` on demand.
 It writes nothing but the pattern entity, and it changes exactly one thing: a
@@ -75,6 +81,14 @@ estimated from the token counts the agent recorded, new buyers, trust changes,
 defaults, refusals, injection flags raised, the median seconds from payment to
 output, and the top three contracts by repeat audits. All of it comes from the
 journal and the entities already in the store.
+
+Two of those figures mean exactly what they say because of the fact events
+above. **Trust changes** counts `TRUST_CHANGED` events in the window, which is a
+count of tiers that actually moved; the standing snapshot sits beside it as
+`buyers_above_new`. **Payment to output** is the median from the `PAYMENT_SEEN`
+event to the event that ran the step it paid for, and it is reported as "not
+enough data" rather than as a median until there are at least three
+observations.
 
 The one write is `("digest", <YYYY-MM-DD>)`. Recomputing a past day gives the
 same answer, so the entity is a cache with a date for a key, and it is what

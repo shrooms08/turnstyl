@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import jobtypes
+from . import events
 from . import injection
 from . import policy
 from . import schema as S
@@ -319,14 +320,20 @@ class Engine:
         return outcome
 
     def peek(self, job_id: str) -> tuple[str, str, tuple | None, S.JobState] | None:
-        """What ``run`` would decide right now, without writing a journal event.
+        """What ``run`` would decide right now, without journaling a decision.
 
         Syncs the open invoice against the payment backend (a real fact, and
         it is recorded in the state document) and asks the policy, but does
-        not act and does not journal. The worker loop uses this every pass so
-        a job that is simply waiting for payment does not leave one journal
-        event per interval. Returns (decision, reason, invoice_signature,
-        state), or None for a job that is complete or unknown.
+        not act. The worker loop uses this every pass so a job that is simply
+        waiting for payment does not leave one journal event per interval.
+
+        It may write one PAYMENT_SEEN event, on the pass that first notices a
+        settlement. That is a fact, not a decision: it is not what this
+        function returns, it never enters the worker's idea of whether the
+        state changed, and an invoice produces exactly one of them however
+        many times it is peeked at. Returns (decision, reason,
+        invoice_signature, state), or None for a job that is complete or
+        unknown.
         """
         state = self.store.get_job_state(job_id)
         if state is None or state.status == S.STATUS_COMPLETE:
@@ -361,9 +368,20 @@ class Engine:
         # Reflect it in the job state immediately so a reader of the state
         # document alone can see the invoice is settled.
         if state.open_invoice is not None and state.open_invoice.step == step:
-            state.open_invoice.paid = True
-            state.open_invoice.tx_hash = resolved
-            self.store.put_job_state(state)
+            if not state.open_invoice.paid:
+                state.open_invoice.paid = True
+                state.open_invoice.tx_hash = resolved
+                self.store.put_job_state(state)
+                events.payment_seen(
+                    self.store,
+                    state,
+                    state.open_invoice,
+                    events.rail_for(self.payments, job_id, step),
+                    resolved,
+                )
+            else:
+                state.open_invoice.tx_hash = resolved
+                self.store.put_job_state(state)
         return resolved
 
     def ledger(self, buyer: str) -> dict:
@@ -542,8 +560,12 @@ class Engine:
                 state.current_step = spec.last_step
                 ledger = self.store.get_buyer(state.buyer)
                 closing = self._complete(state, spec, entity, ledger, skip_acted)
+                tier_before = ledger.trust_tier
                 ledger.trust_tier = policy.recompute_trust_tier(ledger)
                 self.store.put_buyer(state.buyer, ledger)
+                events.trust_changed(
+                    self.store, state.buyer, tier_before, ledger.trust_tier, ledger
+                )
                 skip_summary = f"Step {step} was already done; skipped it. {closing}"
             else:
                 state.current_step = step + 1
@@ -695,6 +717,18 @@ class Engine:
             invoice.paid = True
             invoice.tx_hash = tx_hash
             self.store.put_job_state(state)
+            # A fact, not a decision: this records that money arrived, and it
+            # is written exactly once because the guard above returns early for
+            # an invoice already marked paid. `peek` may reach here, which is
+            # why its contract is "journals no decision" rather than "writes
+            # nothing".
+            events.payment_seen(
+                self.store,
+                state,
+                invoice,
+                events.rail_for(self.payments, state.job_id, invoice.step),
+                tx_hash,
+            )
 
     def _execute(
         self,
@@ -913,8 +947,12 @@ class Engine:
             )
             state.status = S.STATUS_AWAITING_PAYMENT
 
+        tier_before = ledger.trust_tier
         ledger.trust_tier = policy.recompute_trust_tier(ledger)
         self.store.put_buyer(state.buyer, ledger)
+        events.trust_changed(
+            self.store, state.buyer, tier_before, ledger.trust_tier, ledger
+        )
         acted.append(f"entity buyer/{state.buyer} -> trust_tier={ledger.trust_tier}")
         self.store.put_job_state(state)
 

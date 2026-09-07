@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 
 from dotenv import load_dotenv
 
+from . import events
 from . import policy
 from . import schema as S
 from .memory import TurnstylMemory, TurnstylStore
@@ -168,6 +169,10 @@ class PaymentBackend(ABC):
         before = ledger.trust_tier
         ledger.trust_tier = policy.recompute_trust_tier(ledger)
         store.put_buyer(buyer_key, ledger)
+        events.trust_changed(
+            store, buyer_key, before, ledger.trust_tier, ledger,
+            reason="an outstanding invoice was settled",
+        )
 
         for item in cleared:
             store.journal(

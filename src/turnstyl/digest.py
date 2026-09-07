@@ -19,7 +19,11 @@ from typing import Any
 
 from . import schema as S
 from .memory import TurnstylStore, archived_job_ids, read_archived_job
+from .events import PAYMENT_SEEN, TRUST_CHANGED
 from .reflect import PAID_X402, RAN_DECISIONS, events_for, parse_ts
+
+# Fewer than this and a median is a story about one buyer's afternoon.
+MIN_OBSERVATIONS = 3
 
 # List price per million tokens, the same table scripts/eval.py uses. Only ever
 # multiplied by token counts the agent recorded itself.
@@ -41,11 +45,13 @@ PUBLIC_FIGURES = (
     "steps_run",
     "new_buyers",
     "trust_changes",
+    "buyers_above_new",
     "defaults",
     "refusals",
     "injection_flags",
     "median_seconds_payment_to_output",
     "payment_to_output_observations",
+    "payment_to_output_minimum",
 )
 
 
@@ -81,6 +87,7 @@ def compute(store: TurnstylStore, days: int = 1) -> dict[str, Any]:
     usdc = 0.0
     paid_at: dict[tuple[str, int], datetime] = {}
     payment_to_output: list[float] = []
+    trust_change_events = 0
 
     for event in events:
         decision, job, step = event["decision"], event["job_id"], event["step"]
@@ -97,8 +104,13 @@ def compute(store: TurnstylStore, days: int = 1) -> dict[str, Any]:
                 seconds = (event["at"] - paid_at[key]).total_seconds()
                 if seconds >= 0:
                     payment_to_output.append(seconds)
-        elif decision == PAID_X402:
-            paid_at[(job, step)] = event["at"]
+        elif decision in (PAYMENT_SEEN, PAID_X402):
+            # PAYMENT_SEEN is written by every rail the moment the money is
+            # seen, so this is the real start of "how long until the buyer had
+            # their output". PAID_X402 is kept for journals written before it.
+            paid_at.setdefault((job, step), event["at"])
+        elif decision == TRUST_CHANGED:
+            trust_change_events += 1
         elif decision == S.REFUSE:
             refusals += 1
         elif decision == "FLAGGED_UNTRUSTED_SOURCE":
@@ -112,7 +124,7 @@ def compute(store: TurnstylStore, days: int = 1) -> dict[str, Any]:
     cached_steps = 0
     contracts: dict[str, dict[str, Any]] = {}
     new_buyers = 0
-    trust_changes = 0
+    above_new = 0
     defaults = 0
 
     for job_id in all_job_ids(store):
@@ -150,7 +162,7 @@ def compute(store: TurnstylStore, days: int = 1) -> dict[str, Any]:
         ledger = S.BuyerLedger.model_validate(row["body"])
         defaults += ledger.defaults
         if ledger.trust_tier != S.TRUST_NEW:
-            trust_changes += 1
+            above_new += 1
         created = parse_ts(row.get("created_at") or row.get("updated_at"))
         if created is not None and created >= since:
             new_buyers += 1
@@ -172,14 +184,23 @@ def compute(store: TurnstylStore, days: int = 1) -> dict[str, Any]:
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "new_buyers": new_buyers,
-        "trust_changes": trust_changes,
+        # Counted from TRUST_CHANGED events in the window: an actual move, not
+        # a snapshot. `buyers_above_new` is the standing snapshot beside it.
+        "trust_changes": trust_change_events,
+        "buyers_above_new": above_new,
         "defaults": defaults,
         "refusals": refusals,
         "injection_flags": injection_flags,
+        # A median over one or two payments says nothing, so it is not
+        # reported as one: below MIN_OBSERVATIONS the figure is None and the
+        # count beside it says why.
         "median_seconds_payment_to_output": (
-            round(statistics.median(payment_to_output), 1) if payment_to_output else None
+            round(statistics.median(payment_to_output), 1)
+            if len(payment_to_output) >= MIN_OBSERVATIONS
+            else None
         ),
         "payment_to_output_observations": len(payment_to_output),
+        "payment_to_output_minimum": MIN_OBSERVATIONS,
         "top_contracts_by_repeat_audits": [
             {"contract_hash": c["contract_hash"][:16], "jobs": c["jobs"],
              "steps_from_memory": c["steps_from_memory"]}
@@ -224,7 +245,8 @@ def lines(entity: S.DigestEntity) -> list[str]:
         f"  model spend (estimated)  ${f.get('model_spend_usd_estimated'):.4f} "
         f"on {f.get('model')} ({f.get('tokens_in'):,} in / {f.get('tokens_out'):,} out)",
         f"  new buyers               {f.get('new_buyers')}",
-        f"  trust changes            {f.get('trust_changes')}",
+        f"  trust changes            {f.get('trust_changes')} "
+        f"({f.get('buyers_above_new')} buyer(s) above new)",
         f"  defaults                 {f.get('defaults')}",
         f"  refusals                 {f.get('refusals')}",
         f"  injection flags raised   {f.get('injection_flags')}",
@@ -232,7 +254,11 @@ def lines(entity: S.DigestEntity) -> list[str]:
         + (
             f"median {median:.1f}s over {f.get('payment_to_output_observations')} payment(s)"
             if median is not None
-            else "not observed in this window"
+            else (
+                f"not enough data ({f.get('payment_to_output_observations', 0)} of "
+                f"{f.get('payment_to_output_minimum', MIN_OBSERVATIONS)} payment(s) "
+                f"needed)"
+            )
         ),
         "",
         "  top contracts by repeat audits:"

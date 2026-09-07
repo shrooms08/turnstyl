@@ -85,10 +85,13 @@ def price(
     # Applied last, so it discounts whatever the other rules arrived at.
     if buyer_pattern is not None and buyer_pattern.pays_promptly:
         amount *= PROMPT_PAYER_MULTIPLIER
+        # A median under a second is a real answer, not zero: show a decimal
+        # rather than round a fast payer's record down to "0s".
+        median = buyer_pattern.median_seconds_invoice_to_payment
+        shown = f"{median:.1f}" if median < 10 else f"{median:.0f}"
         parts.append(
             f"x{PROMPT_PAYER_MULTIPLIER} because this buyer has paid within a "
-            f"median of {buyer_pattern.median_seconds_invoice_to_payment:.0f}s "
-            f"over {buyer_pattern.payments_observed} payments"
+            f"median of {shown}s over {buyer_pattern.payments_observed} payments"
         )
     parts.append(f"buyer trust_tier={buyer_entity.trust_tier}")
 

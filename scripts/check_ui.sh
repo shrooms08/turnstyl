@@ -489,6 +489,15 @@ d=json.load(sys.stdin)
 print('ok' if d['complete'] is False and 'model_spend_usd_estimated' not in d['figures'] else 'bad')" 2>/dev/null)
 [ "$DGPUB" = "ok" ] && ok "the public digest is counts only" || bad "public digest is counts only" "got: $DGPUB"
 
+# ---------------------------------------------------------------- journal facts
+echo
+echo "journal facts"
+hasapp "facts are marked apart from decisions" "function isFact("
+hasapp "PAYMENT_SEEN is one of them"           "PAYMENT_SEEN:1"
+hasapp "TRUST_CHANGED is one of them"          "TRUST_CHANGED:1"
+hasapp "the timeline dims a fact"              'isFact(e.decision) ? " fact" : ""'
+has   "facts are styled dimmer than decisions" ".ev.fact .sum{color:var(--dim)"
+
 # ---------------------------------------------------------------- untrusted source
 echo
 echo "untrusted source"

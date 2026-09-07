@@ -219,6 +219,7 @@ footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
 .btn:hover{background:var(--gold);color:#000}
 .btn.quiet{border-color:var(--line-2);color:var(--dim)}
 .btn.quiet:hover{background:none;color:var(--gold);border-color:var(--gold)}
+.nogas{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--violet)}
 .btn:disabled,.btn:disabled:hover{opacity:.45;cursor:not-allowed;background:none;color:var(--dim);border-color:var(--line-2)}
 /* wallet chip: a bordered pill on the card surface, readable over anything */
 .chip{display:inline-flex;align-items:center;gap:10px;min-height:32px;padding:6px 12px;background:var(--card);border:1px solid var(--line-2);color:var(--ink);font-family:var(--mono);font-weight:300;font-size:13px;letter-spacing:.01em;line-height:1;cursor:copy;white-space:nowrap;text-decoration:none;border-radius:0}
@@ -687,7 +688,9 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
                  (step.compiles ? "yes" : "no") + "</span>");
 
     var txs = "";
-    if(step.pay_tx) txs += '<div>pay ' + txLink(step.pay_tx) + "</div>";
+    if(step.pay_tx)
+      txs += '<div>pay ' + txLink(step.pay_tx) +
+             (step.pay_method === "x402" ? ' <span class="nogas">x402</span>' : "") + "</div>";
     if(step.commit_tx) txs += '<div>commit ' + txLink(step.commit_tx) + "</div>";
 
     return '<button class="step'+(isCur?" current":"")+(open?" open":"")+'" data-step="'+step.step+'" type="button">' +
@@ -741,6 +744,11 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
       return '<div class="actions"><span class="wait">connect as '+esc(trunc(job.buyer))+' to pay (you are '+esc(trunc(W.addr))+')</span></div>';
     if(W.chainId && W.chainId !== BASE_CHAIN)
       return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
+    if(x402On())
+      return '<div class="actions">' +
+        '<button type="button" class="btn" id="payX402Btn"'+(mineJob && P.busy ? " disabled" : "")+'>Pay '+usdc(inv.amount_usdc)+' USDC, no gas</button>' +
+        '<button type="button" class="btn quiet" id="payBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Pay on chain</button>' +
+        '<span class="nogas">no gas needed</span>' + status + '</div>';
     return '<div class="actions"><button type="button" class="btn" id="payBtn"'+(mineJob && P.busy ? " disabled" : "")+'>Pay '+usdc(inv.amount_usdc)+' USDC</button>' + status + '</div>';
   }
 
@@ -759,6 +767,11 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(!isYou(b.buyer)) return '<div class="actions"><span class="wait">connect as '+esc(trunc(b.buyer))+' to pay (you are '+esc(trunc(W.addr))+')</span></div>';
     if(W.chainId && W.chainId !== BASE_CHAIN)
       return '<div class="actions"><button type="button" class="btn" id="switchChainBtn">Switch to Base Sepolia</button>' + status + '</div>';
+    if(x402On())
+      return '<div class="actions">' +
+        '<button type="button" class="btn"'+attrs+' data-x402="1"'+(mine && P.busy ? " disabled" : "")+'>Pay '+usdc(o.amount_usdc)+' USDC, no gas</button>' +
+        '<button type="button" class="btn quiet"'+attrs+(mine && P.busy ? " disabled" : "")+'>Pay on chain</button>' +
+        '<span class="nogas">no gas needed</span>' + status + '</div>';
     return '<div class="actions"><button type="button" class="btn"'+attrs+(mine && P.busy ? " disabled" : "")+'>Pay '+usdc(o.amount_usdc)+' USDC</button>' + status + '</div>';
   }
 
@@ -1172,6 +1185,124 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
       });
     }).catch(function(e){ P.status = errText(e); P.busy = false; render(); });
   }
+  // ── x402: the buyer signs a USDC transfer, a facilitator submits it ──
+  // No approval and no ETH: the authorisation is EIP-3009, and the gas is the
+  // facilitator's. See docs/X402.md for the wire formats.
+  function x402On(){ return !!((S.status || {}).x402 || {}).enabled; }
+  function b64(str){
+    // btoa is byte-wise; encode UTF-8 first so a non-ASCII byte cannot corrupt it
+    var bytes = new TextEncoder().encode(str), bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+  function x402Url(jobId, step, settleFor){
+    return settleFor
+      ? apiUrl("/api/buyers/" + encodeURIComponent(settleFor) + "/settle-x402/" +
+               encodeURIComponent(jobId) + "/" + encodeURIComponent(step))
+      : apiUrl("/api/jobs/" + encodeURIComponent(jobId) + "/pay-x402/" + encodeURIComponent(step));
+  }
+  function payX402(jobId, step, amountUsdc, settleFor, doneText){
+    if(P.busy || !W.addr) return;
+    P = { jobId:jobId, step:Number(step), status:"asking for the price", tx:null, busy:true };
+    render();
+    var url = x402Url(jobId, step, settleFor);
+
+    fetch(url, { method:"POST", headers:API_HEADERS })
+      .then(function(r){
+        if(r.status !== 402){
+          return r.json().catch(function(){ return {}; }).then(function(b){
+            throw new Error("expected a 402 with payment requirements, got " + r.status +
+                            (b && b.detail ? ": " + b.detail : ""));
+          });
+        }
+        // v2 puts the requirements in PAYMENT-REQUIRED; turnstyl mirrors them
+        // into the body, which needs no CORS permission to read
+        var hdr = r.headers.get("payment-required");
+        return r.json().then(function(body){
+          if(body && body.accepts) return body;
+          if(hdr) return JSON.parse(new TextDecoder().decode(
+            Uint8Array.from(atob(hdr), function(c){ return c.charCodeAt(0); })));
+          throw new Error("the 402 carried no payment requirements");
+        });
+      })
+      .then(function(requirements){
+        var want = (requirements.accepts || [])[0];
+        if(!want) throw new Error("the 402 offered no payment requirements");
+        P.status = "waiting for your signature"; render();
+        var st = S.status || {};
+        var usdcC = new ethers.Contract(want.asset, st.usdc_abi, provider());
+        var extra = want.extra || {};
+        // read the domain off the contract; fall back to what the 402 declared
+        return Promise.all([
+          usdcC.name().catch(function(){ return extra.name || "USDC"; }),
+          usdcC.version().catch(function(){ return extra.version || "2"; }),
+          provider().getSigner()
+        ]).then(function(r){
+          var domain = {
+            name: r[0], version: r[1],
+            chainId: 84532,
+            verifyingContract: want.asset
+          };
+          var types = { TransferWithAuthorization: [
+            { name:"from", type:"address" }, { name:"to", type:"address" },
+            { name:"value", type:"uint256" }, { name:"validAfter", type:"uint256" },
+            { name:"validBefore", type:"uint256" }, { name:"nonce", type:"bytes32" }
+          ]};
+          var nonce = ethers.hexlify(ethers.randomBytes(32));
+          var message = {
+            from: W.addr, to: want.payTo, value: want.amount,
+            validAfter: "0",
+            validBefore: String(Math.floor(Date.now()/1000) + (want.maxTimeoutSeconds || 600)),
+            nonce: nonce
+          };
+          return r[2].signTypedData(domain, types, message).then(function(signature){
+            return { want:want, requirements:requirements, message:message, signature:signature };
+          });
+        });
+      })
+      .then(function(signed){
+        P.status = "submitting"; render();
+        // The payload shape the package expects, including `accepted` and
+        // `resource`: the server matches the payload against the requirement
+        // the client chose, and rejects one that carries neither.
+        var payload = {
+          x402Version: signed.requirements.x402Version || 2,
+          payload: { authorization: signed.message, signature: signed.signature },
+          accepted: signed.want,
+          resource: signed.requirements.resource
+        };
+        var header = b64(JSON.stringify(payload));
+        return fetch(url, {
+          method:"POST",
+          headers: Object.assign({}, API_HEADERS, { "PAYMENT-SIGNATURE": header })
+        }).then(function(r){
+          return r.json().catch(function(){ return {}; }).then(function(b){
+            return { ok:r.ok, status:r.status, body:b, receipt:r.headers.get("payment-response") };
+          });
+        });
+      })
+      .then(function(res){
+        if(!res.ok){
+          var why = (res.body && res.body.detail) || "";
+          if(!why && res.receipt){
+            try{
+              var rec = JSON.parse(new TextDecoder().decode(
+                Uint8Array.from(atob(res.receipt), function(c){ return c.charCodeAt(0); })));
+              why = rec.errorMessage || rec.error_message || rec.errorReason || rec.error_reason || "";
+            }catch(_){}
+          }
+          P.status = "refused (" + res.status + ")" + (why ? ": " + why : "");
+          P.busy = false; render(); return;
+        }
+        var settlement = res.body.settlement || {};
+        P.tx = settlement.transaction || null;
+        P.status = doneText;
+        P.busy = false; render();
+        refreshBalance();
+      })
+      .catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+  }
+
   function simulateSettle(buyer, jobId, step){
     if(P.busy) return;
     P = { jobId:jobId, step:Number(step), status:"marking paid", tx:null, busy:true };
@@ -1208,12 +1339,20 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(hit("connectBtn")){ connectWallet(); return; }
     if(hit("switchChainBtn")){ ensureChain().then(function(){ return readWallet(true); }).then(render).catch(function(err){ W.err = errText(err); renderWallet(); }); return; }
     if(hit("submitBtn")){ submitAudit(); return; }
+    if(hit("payX402Btn")){
+      var inv0 = S.job && S.job.open_invoice;
+      if(inv0) payX402(S.job.job_id, inv0.step, inv0.amount_usdc, null,
+                       "confirmed, gasless; the agent will run the step");
+      return;
+    }
     if(hit("payBtn")){ payInvoice(S.job); return; }
     if(hit("simPayBtn")){ simulatePay(S.job); return; }
     var settle = t.closest && t.closest("[data-settle]");
     if(settle){
       var o = settle.dataset;
       if((S.status||{}).payments_backend === "fake") simulateSettle(o.buyer, o.job, o.step);
+      else if(o.x402 === "1")
+        payX402(o.job, o.step, o.amount, o.buyer, "settled, gasless; the debt is cleared");
       else payMemo(o.job, o.step, o.memo, o.amount, "confirmed; the agent will reconcile it on the next pass");
       return;
     }

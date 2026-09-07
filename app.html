@@ -60,10 +60,10 @@
   </div>
   <div class="actions" style="margin-top:0">
     <button type="button" class="btn" id="applyOp">Apply</button>
-    <button type="button" class="btn quiet" id="clearOp">Clear</button>
+    <button type="button" class="btn quiet" id="clearOp">Clear operator token</button>
     <span class="wait" id="opMsg"></span>
   </div>
-  <div class="note">Kept in this tab's <b>sessionStorage</b> only. It is never written to disk by the page, never sent anywhere but this agent, and it is gone when the tab closes.</div>
+  <div class="note">Kept in this tab's <b>sessionStorage</b> only. It is never written to disk by the page, never sent anywhere but this agent, and it is gone when the tab closes. <b>Signing out of a wallet does not clear it</b>: it is not a session, and only Clear operator token above removes it.</div>
   <div class="dhead" style="border-bottom:0;padding-bottom:0;margin-top:6px"><h3>session</h3></div>
   <div class="note" id="sessionNote">not signed in</div>
 </aside>
@@ -143,7 +143,7 @@
     statusFails:0, offline:false
   };
   var V = { jobId:null, byStep:{}, shown:{}, busy:false, err:null, summary:null };
-  var W = { available:false, addr:null, chainId:null, balance:null, busy:false, err:null };
+  var W = { available:false, addr:null, chainId:null, balance:null, busy:false, err:null, menu:false };
   var P = { jobId:null, step:null, status:null, tx:null, busy:false };
   // A: who the API thinks we are. `token` is a wallet session; `operator` is
   // the pasted OPERATOR_TOKEN, which outranks it when both are present.
@@ -831,10 +831,38 @@
       .catch(function(e){ A.err = errText(e); })
       .then(function(){ A.busy = false; render(); return poll(); });
   }
+  // Signing out has to mean something on the agent's side as well, so the
+  // token is closed there before it is dropped here. The old token is sent
+  // explicitly: `bearer()` may be the operator token, which is not a session.
   function signOut(){
+    var token = A.token;
     A.token = null; A.address = null; A.buyerOk = false; S.mine = null;
+    W.menu = false;
     if(!A.operator) A.kind = "public";
-    saveSession(); render(); poll();
+    saveSession(); render();
+    var closed = token
+      ? fetch(apiUrl("/api/auth/logout"), {
+          method: "POST",
+          headers: { accept: "application/json", "ngrok-skip-browser-warning": "true",
+                     Authorization: "Bearer " + token }
+        }).catch(function(){ /* the token is gone from this tab either way */ })
+      : Promise.resolve();
+    return closed.then(function(){ return poll(); });
+  }
+
+  // Forget the wallet as well: no cached account, no silent reconnect on the
+  // next load, and the permission handed back where the wallet supports it.
+  function disconnect(){
+    return signOut().then(function(){
+      W.addr = null; W.balance = null; W.chainId = null; W.err = null; W.menu = false;
+      P = { jobId:null, step:null, status:null, tx:null, busy:false };
+      try{ sessionStorage.removeItem("wasConnected"); }catch(_){}
+      if(!W.available) return;
+      // Rabby and MetaMask implement this; wallets that do not simply reject,
+      // and the disconnect is still real on this side.
+      return eth("wallet_revokePermissions", [{ eth_accounts: {} }])
+        .catch(function(){ /* not supported here */ });
+    }).then(function(){ renderWallet(); render(); });
   }
 
   function connectWallet(){
@@ -874,13 +902,32 @@
       row.innerHTML = '<button type="button" class="chip" id="signInBtn"'+(A.busy ? " disabled" : "")+' title="sign a message to prove this wallet is yours; nothing is spent"><span class="dot warn"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="lbl">'+(A.busy ? "signing…" : "sign in")+'</span></button>' + err;
       return;
     }
-    row.innerHTML = '<span class="chip" id="walletChip" data-copy="'+esc(W.addr)+'" title="'+esc(W.addr)+' (click to copy)"><span class="dot on"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="who">'+(isOperator() ? "operator" : "signed in")+'</span><span class="sep"></span><span class="bal">'+(W.balance == null ? "—" : usdc(W.balance))+' USDC</span></span>' + err;
+    // Signed in: the chip is a menu. Copying the address stays the first item
+    // rather than being lost to the click that opens it.
+    var items =
+      '<button type="button" class="mi" data-copy="'+esc(W.addr)+'">Copy address</button>' +
+      (A.token ? '<button type="button" class="mi" id="signOutBtn">Sign out</button>' : "") +
+      '<div class="sepline"></div>' +
+      '<button type="button" class="mi danger" id="disconnectBtn">Disconnect</button>';
+    row.innerHTML = '<span class="menuwrap">' +
+      '<button type="button" class="chip" id="walletChip" aria-haspopup="menu" aria-expanded="'+(W.menu ? "true" : "false")+'" title="'+esc(W.addr)+'">' +
+        '<span class="dot on"></span><span class="addr">'+esc(trunc(W.addr))+'</span>' +
+        '<span class="sep"></span><span class="who">'+(isOperator() ? "operator" : "signed in")+'</span>' +
+        '<span class="sep"></span><span class="bal">'+(W.balance == null ? "—" : usdc(W.balance))+' USDC</span>' +
+        '<span class="caret">▾</span></button>' +
+      '<div class="menu'+(W.menu ? " open" : "")+'" id="walletMenu" role="menu">'+items+'</div>' +
+    '</span>' + err;
   }
   if(W.available && typeof window.ethereum.on === "function"){
     window.ethereum.on("accountsChanged", function(){
+      // A session is bound to one address. Carrying it across an account
+      // switch would leave the page acting as a wallet that is no longer
+      // connected, so the session is closed and the chip drops to Connect.
       P = { jobId:null, step:null, status:null, tx:null, busy:false };
-      signOut();
-      readWallet(true).then(render);
+      signOut().then(function(){
+        W.addr = null; W.balance = null; W.menu = false;
+        renderWallet(); render();
+      });
     });
     window.ethereum.on("chainChanged", function(){ readWallet(true).then(render); });
   }
@@ -1184,6 +1231,9 @@
     if(hit("closeSettings") || t === $("#scrim")){ openSettings(false); return; }
     if(hit("applyOp")){ applyOperator(); return; }
     if(hit("clearOp")){ clearOperator(); return; }
+    if(hit("walletChip")){ W.menu = !W.menu; renderWallet(); return; }
+    if(hit("signOutBtn")){ signOut(); return; }
+    if(hit("disconnectBtn")){ disconnect(); return; }
     if(hit("connectBtn")){ connectWallet(); return; }
     if(hit("signInBtn")){ signIn(); return; }
     if(hit("switchChainBtn")){ ensureChain().then(function(){ return readWallet(true); }).then(render).catch(function(err){ W.err = errText(err); renderWallet(); }); return; }
@@ -1213,6 +1263,10 @@
     var copyEl = e.target.closest && e.target.closest("[data-copy]");
     if(copyEl){
       e.stopPropagation();
+      if(W.menu && copyEl.closest("#walletMenu")){
+        W.menu = false;
+        setTimeout(function(){ renderWallet(); }, 1400);   // after the copied flash
+      }
       var val = copyEl.getAttribute("data-copy");
       var done = function(){
         var was = copyEl.textContent;
@@ -1233,7 +1287,17 @@
     }
   });
 
-  document.addEventListener("keydown", function(e){ if(e.key === "Escape") openSettings(false); });
+  // a click outside the chip closes its menu, like every other dropdown
+  document.addEventListener("click", function(e){
+    if(!W.menu) return;
+    if(e.target.closest && (e.target.closest("#walletMenu") || e.target.closest("#walletChip"))) return;
+    W.menu = false; renderWallet();
+  }, true);
+  document.addEventListener("keydown", function(e){
+    if(e.key !== "Escape") return;
+    openSettings(false);
+    if(W.menu){ W.menu = false; renderWallet(); }
+  });
   document.addEventListener("toggle", function(e){
     var d = e.target;
     if(d && d.classList && d.classList.contains("mem")) S.memTouched[d.getAttribute("data-mem")] = d.open;

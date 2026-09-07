@@ -406,3 +406,10 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 .digest .tops{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--mute);line-height:1.9}
 .digest .tops b{color:var(--dim);font-weight:400}
 @media (max-width:700px){ .digest .cols{grid-template-columns:1fr;gap:20px} }
+
+/* ── journal facts, dimmer than decisions ───────────────────────── */
+/* PAYMENT_SEEN and TRUST_CHANGED record what happened rather than what the
+   agent chose, so they sit behind the decisions in the same timeline. */
+.ev.fact .sum{color:var(--dim);font-size:14px}
+.ev.fact .pill{color:var(--mute);border-color:var(--line)}
+.ev.fact .top{opacity:.75}

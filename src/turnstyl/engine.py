@@ -633,13 +633,33 @@ class Engine:
                 else spec.step(step).base_price_usdc
             )
             if decision == S.REFUSE:
+                # Three refusals, three sentences. A debt is named with the job
+                # it is owed on; a blocked buyer with nothing outstanding is
+                # buying up front and is told how many steps are left, because
+                # telling them they left work unpaid would contradict their own
+                # ledger; anything else states the tier.
                 owed = ledger.outstanding[0] if ledger.outstanding else None
-                hold_summary = (
-                    f"Refused step {step}: {owed.amount_usdc:.2f} USDC still owed on job "
-                    f"{owed.job_id[:6]} (step {owed.step})."
-                    if owed else
-                    f"Refused step {step}: this buyer left work unpaid on an earlier job."
-                )
+                if owed is not None:
+                    hold_summary = (
+                        f"Refused step {step}: {owed.amount_usdc:.2f} USDC still owed on job "
+                        f"{owed.job_id[:6]} (step {owed.step})."
+                    )
+                elif ledger.unpaid_from_prior_jobs > 0:
+                    hold_summary = (
+                        f"Refused step {step}: this buyer left work unpaid on an earlier job."
+                    )
+                elif ledger.trust_tier == S.TRUST_BLOCKED:
+                    hold_summary = (
+                        f"Refused step {step}: blocked after {ledger.defaults} "
+                        f"defaults, so this step must be paid up front. "
+                        f"{policy.steps_until_unblocked(ledger)} more paid steps "
+                        f"to be served normally."
+                    )
+                else:
+                    hold_summary = (
+                        f"Refused step {step}: this buyer's trust tier is "
+                        f"{ledger.trust_tier}."
+                    )
             elif ledger.defaults > 0:
                 hold_summary = (
                     f"Waiting on step {step}: {amount:.2f} USDC unpaid, and after a default "

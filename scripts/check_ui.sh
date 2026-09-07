@@ -525,6 +525,11 @@ hasapp "a failed settlement is a failure even on a 200" "receipt.success === fal
 echo
 echo "blocked"
 hasapp "the ledger card says how to be served again" "how to be served again"
+UB=$(curl -s "${OPH[@]}" "$BASE/api/buyers/0x0000000000000000000000000000000000000001" 2>/dev/null | .venv/bin/python -c "
+import json,sys
+d=json.load(sys.stdin)
+print('none' if (d.get('trust') or {}).get('unblock') is None else 'present')" 2>/dev/null)
+[ "$UB" = "none" ] && ok "trust.unblock is null for a buyer who is not blocked" || bad "trust.unblock for an unblocked buyer" "got: $UB"
 hasapp "it is drawn only for a blocked tier"        "function unblockLine("
 hasapp "it shows the paid steps done of those needed" "paid steps done"
 hasapp "it says a prepaid step is still served"     "A step already paid for is still served while"

@@ -53,12 +53,23 @@ already paid for served, once nothing is outstanding. That is the only route to
 six, and `policy.decide` returns RUN_PAID for it with a reason saying which of
 the six it is.
 
-`policy.unblock_terms` writes the requirement once:
+`policy.unblock_terms` writes the requirement once, in one of two wordings.
+A buyer still carrying a debt has to settle it before anything else matters. A
+buyer who has settled everything is not being refused for an old debt at all:
+they are buying up front until the count is met, and telling them to "settle
+0.00 USDC outstanding" would contradict their own ledger.
 
 ```
 blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more
 consecutive paid steps to be served again
+
+blocked after 2 defaults: this step must be paid up front, 4 more paid
+steps to be served normally
 ```
+
+`Engine._advance` writes the matching summary sentence: a debt is named with
+the job it is owed on, and a blocked buyer with nothing outstanding is told how
+many paid steps are left rather than that they left work unpaid.
 
 The REFUSE reason, the CLI ledger card, `trust.unblock` in
 `GET /api/buyers/<address>` and the app's "how to be served again" line are all

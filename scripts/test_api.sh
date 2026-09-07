@@ -321,6 +321,7 @@ print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, unpaid_from_prior_jo
 print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, consecutive_paid_since_block=6, completed_paid_jobs=9, completed_paid_jobs_at_block=9)))
 print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, consecutive_paid_since_block=6, completed_paid_jobs=12, completed_paid_jobs_at_block=9, consecutive_paid_since_default=6)))
 print(policy.unblock_terms(led()))
+print(policy.unblock_terms(clear))
 " 2>&1)
 [ "$(echo "$BL" | sed -n 1p)" = "RUN_FREE" ] && ok "a blocked buyer still gets the free scope step" || bad "blocked buyer free step" "got $(echo "$BL" | sed -n 1p)"
 [ "$(echo "$BL" | sed -n 2p)" = "REFUSE" ] && ok "a blocked buyer's unpaid step is refused" || bad "blocked buyer paid step refused" "got $(echo "$BL" | sed -n 2p)"
@@ -330,7 +331,9 @@ print(policy.unblock_terms(led()))
 [ "$(echo "$BL" | sed -n 6p)" = "blocked" ] && ok "an outstanding debt keeps the block whatever the count" || bad "debt keeps the block" "got $(echo "$BL" | sed -n 6p)"
 [ "$(echo "$BL" | sed -n 7p)" = "new" ] && ok "credit after a block is earned on jobs completed since it" || bad "credit restarts after a block" "got $(echo "$BL" | sed -n 7p)"
 [ "$(echo "$BL" | sed -n 8p)" = "trusted" ] && ok "three fully paid jobs after the block earns credit again" || bad "credit re-earned after a block" "got $(echo "$BL" | sed -n 8p)"
-[ "$(echo "$BL" | sed -n 9p)" = "blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more consecutive paid steps to be served again" ] && ok "the terms read exactly as specified" || bad "unblock terms wording" "got: $(echo "$BL" | sed -n 9p)"
+[ "$(echo "$BL" | sed -n 9p)" = "blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more consecutive paid steps to be served again" ] && ok "the terms name the debt while there is one" || bad "unblock terms with a debt" "got: $(echo "$BL" | sed -n 9p)"
+[ "$(echo "$BL" | sed -n 10p)" = "blocked after 2 defaults: this step must be paid up front, 3 more paid steps to be served normally" ] && ok "and stop naming a debt once it is settled" || bad "unblock terms with no debt" "got: $(echo "$BL" | sed -n 10p)"
+grep -qE "settle 0\\.00 USDC|left work unpaid" <<< "$BL" && bad "no refusal claims a debt that is settled" "$BL" || ok "no refusal claims a debt that is settled"
 
 # ---------------------------------------------------------------- digest
 # Counted from the journal and the entities, and consolidated as one entity so

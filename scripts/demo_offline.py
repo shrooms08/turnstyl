@@ -728,6 +728,25 @@ def beat_l() -> None:
                    f"consecutive_paid_since_block={ledger.consecutive_paid_since_block}"))
     r.append(check("l", "the buyer is still blocked until the six are done",
                    ledger.trust_tier == S.TRUST_BLOCKED, f"trust_tier={ledger.trust_tier}"))
+    # With the debt gone the refusal must stop talking about a debt: saying
+    # "settle 0.00 USDC outstanding" would contradict the buyer's own ledger.
+    clear_terms = policy.unblock_terms(ledger)
+    r.append(check("l", "with nothing outstanding the terms change wording",
+                   clear_terms == (f"blocked after 2 defaults: this step must be paid "
+                                   f"up front, {S.UNBLOCK_PAID_STEPS - 1} more paid "
+                                   f"steps to be served normally"),
+                   clear_terms))
+    r.append(check("l", "and never claim a debt that is settled",
+                   "outstanding" not in clear_terms and "0.00 USDC" not in clear_terms,
+                   clear_terms))
+    fresh = variant("Blocked1b.sol", "block beat, wording")
+    _, wording_flat = cli("job", "new", str(fresh), "--buyer", BUYER)
+    wording_raw, _ = cli("job", "run", job_for(fresh))
+    no_debt_line = decision_line(wording_raw)
+    r.append(check("l", "the live refusal uses that wording",
+                   "this step must be paid up front" in no_debt_line
+                   and "settle 0.00" not in no_debt_line, no_debt_line))
+    notes.append(f"beat l blocked REFUSE line (no debt):\n    {no_debt_line}")
 
     # Five more paid steps, bought up front. A step already paid for is served
     # while blocked: that is what the count is earned from.

@@ -112,13 +112,19 @@ block them again with the clock at zero. Otherwise **new**.
 A blocked buyer is not shut out. The free scope step is never refused, they can
 submit jobs, and a step they have already paid for is served once nothing is
 outstanding, which is how the six are earned. The refusal says exactly what is
-required, in one line the ledger card, the API and the app all quote:
+required, in one line the ledger card, the API and the app all quote. Which
+line depends on whether there is still a debt, because a buyer who has settled
+everything is not being refused for an old debt and must not be told they were:
 
 ```
 blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more
 consecutive paid steps to be served again
+
+blocked after 2 defaults: this step must be paid up front, 4 more paid
+steps to be served normally
 ```
- Step counts do
+
+Step counts do
 not earn credit: a buyer who pays two steps and walks away from the third has
 paid for nothing the agent can extend credit on. Repeat contracts are served
 from memory at half price, so a history of three paid jobs is cheap to build.

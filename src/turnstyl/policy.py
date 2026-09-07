@@ -150,19 +150,30 @@ def steps_until_unblocked(buyer_entity: BuyerLedger) -> int:
 
 
 def unblock_terms(buyer_entity: BuyerLedger) -> str:
-    """Exactly what a blocked buyer must do, in one clause.
+    """Exactly what a blocked buyer must do next, in one clause.
+
+    Two different situations, and they must not be described in the same
+    words. A buyer carrying a debt has to settle it before anything else
+    happens. A buyer who has settled everything is not being refused for an
+    old debt at all: they are buying up front until the count is met, and
+    saying "settle 0.00 USDC outstanding" to them would contradict their own
+    ledger.
 
     Written once and read everywhere: the REFUSE reason, the CLI ledger card,
     the API's trust explanation and the app all show this sentence, so the
     terms cannot drift between the place they are enforced and the places they
     are quoted.
     """
-    owed = outstanding_usdc(buyer_entity)
     steps = steps_until_unblocked(buyer_entity)
+    if buyer_entity.unpaid_from_prior_jobs > 0:
+        return (
+            f"blocked after {buyer_entity.defaults} defaults: settle "
+            f"{outstanding_usdc(buyer_entity):.2f} USDC outstanding, then "
+            f"{steps} more consecutive paid steps to be served again"
+        )
     return (
-        f"blocked after {buyer_entity.defaults} defaults: settle "
-        f"{owed:.2f} USDC outstanding, then {steps} more consecutive paid "
-        f"steps to be served again"
+        f"blocked after {buyer_entity.defaults} defaults: this step must be "
+        f"paid up front, {steps} more paid steps to be served normally"
     )
 
 

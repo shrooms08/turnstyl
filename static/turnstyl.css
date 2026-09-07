@@ -1,0 +1,363 @@
+/* turnstyl shared stylesheet.
+   One look for both pages: index.html (the story, with the scene) and
+   app.html (the buyer and operator app). Extracted verbatim from
+   index.html so the story page renders exactly as it did; everything
+   below the APP-ONLY rule was added for app.html and the operator strip
+   and uses class names index.html never had. */
+:root{
+  --header-h:64px;          /* 56px under 700px */
+  --banner-h:0px;           /* set by the script while a banner shows */
+  --bg:#000;
+  --ink:#EFECE6;
+  --dim:#9C968C;
+  --mute:#615C55;
+  --line:rgba(255,255,255,.09);
+  --line-2:rgba(255,255,255,.16);
+  --card:#070707;
+  --card-2:#0B0B0B;
+  --gold:#E2B04A;
+  --violet:#7F77DD;
+  --red:#E5484D;
+  --sans:"Work Sans",system-ui,sans-serif;
+  --disp:"Outfit",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--sans);font-weight:300;font-size:17px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+}
+a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line-2)}
+a:hover{color:var(--gold);border-bottom-color:var(--gold)}
+::selection{background:var(--gold);color:#000}
+
+/* ── fixed WebGL stage ─────────────────────────────────────────────
+   THREE.JS MOUNT POINT.
+   A later, separate script attaches to #scene and renders the particle
+   form. It should read the active story state from:
+     document.body.dataset.state        // "ring" | "pulse" | "reform" | "scatter"
+     window.TURNSTYL.state              // same value
+     window.addEventListener('scenestate', e => e.detail.state)
+   and must honour document.body.classList.contains('memory-missing'),
+   which locks the state to "scatter".
+   The scene now lives at the end of this file (import map + module
+   script); nothing above this line was changed to accommodate it.
+   ─────────────────────────────────────────────────────────────────── */
+#scene{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;display:block;background:transparent}
+
+/* ── loader ─────────────────────────────────────────────────────── */
+#loader{position:fixed;inset:0;z-index:100;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;transition:opacity .9s ease}
+#loader.gone{opacity:0;pointer-events:none}
+#loader.off{display:none}
+.load-label{font-size:11px;letter-spacing:.34em;text-transform:uppercase;color:var(--mute)}
+.load-count{font-family:var(--disp);font-weight:200;font-size:88px;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.load-unit{font-family:var(--mono);font-weight:300;font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--mute)}
+.load-rule{width:180px;height:1px;background:var(--line);position:relative;overflow:hidden}
+.load-rule i{position:absolute;inset:0;background:var(--gold);transform-origin:left;transform:scaleX(0);transition:transform .4s linear}
+
+/* ── shell ──────────────────────────────────────────────────────── */
+.shell{position:relative;z-index:2;padding-top:calc(var(--header-h) + var(--banner-h))}
+.wrap{width:100%;max-width:1160px;margin:0 auto;padding:0 40px}
+/* fixed, solid header: wordmark left, wallet chip right, one row at every width.
+   It sits below the banner (top = banner height) and above the shell and scene. */
+.topbar{position:fixed;top:var(--banner-h);left:0;right:0;height:var(--header-h);z-index:30;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 40px;background:#000;border-bottom:1px solid rgba(255,255,255,.08);pointer-events:auto}
+.mark{font-family:var(--disp);font-weight:300;font-size:15px;letter-spacing:.02em;flex:none}
+.mark b{font-weight:400}
+/* the memory path and chain lines live in the console now, as its first row */
+.statusrow{display:flex;flex-wrap:wrap;align-items:center;gap:10px 24px;font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--dim);padding:0 0 16px;margin-bottom:22px;border-bottom:1px solid var(--line)}
+.statusrow .row{display:flex;align-items:center;gap:8px;min-width:0}
+.statusrow .row .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--mute);flex:none}
+.dot.on{background:#4FB56E;box-shadow:0 0 0 3px rgba(79,181,110,.14)}
+.dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(229,72,77,.14)}
+.dot.warn{background:var(--gold);box-shadow:0 0 0 3px rgba(226,176,74,.16)}
+.chain{color:var(--mute)}
+.chain a{color:var(--dim);border-bottom-color:var(--line)}
+
+/* ── memory banner ──────────────────────────────────────────────── */
+#banner{position:fixed;top:0;left:0;right:0;z-index:60;display:none;background:var(--red);color:#0A0000;
+  font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;padding:10px 40px;text-align:center;font-weight:500}
+body.memory-missing #banner{display:block}
+body.agent-offline #banner{display:block;background:#2A2A2A;color:var(--dim)}
+body.memory-missing.agent-offline #banner{background:var(--red);color:#0A0000}
+.links{margin-top:10px;display:flex;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+.links a{color:var(--dim);border-bottom-color:var(--line)}
+
+/* ── hero ───────────────────────────────────────────────────────── */
+.hero{min-height:calc(100vh - var(--header-h));display:flex;flex-direction:column;justify-content:center;padding:90px 0 110px}
+h1{font-family:var(--disp);font-weight:200;font-size:clamp(42px,6.6vw,88px);line-height:1.02;letter-spacing:-.025em;margin:0;max-width:19ch;text-wrap:balance}
+.hero .sub{margin:34px 0 0;font-size:19px;line-height:1.55;color:var(--dim);max-width:44ch;text-wrap:pretty}
+.hero .live{margin-top:46px;display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+.hero .live b{color:var(--gold);font-weight:400;font-variant-numeric:tabular-nums}
+.scrollcue{margin-top:82px;font-family:var(--mono);font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:#3A3733}
+
+/* ── story ──────────────────────────────────────────────────────── */
+.story{min-height:86vh;display:flex;align-items:center;padding:80px 0}
+.story .inner{max-width:760px}
+.story h2{font-family:var(--disp);font-weight:200;font-size:clamp(32px,4.4vw,58px);line-height:1.08;letter-spacing:-.02em;margin:0 0 30px;max-width:22ch;text-wrap:balance}
+.story p{margin:0 0 20px;font-size:18px;line-height:1.65;color:var(--dim);max-width:60ch;text-wrap:pretty}
+.story .kicker{font-family:var(--mono);font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:var(--mute);margin:0 0 26px}
+.story.danger h2{color:var(--red)}
+.livelink{margin-top:34px;padding-top:22px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.8;color:var(--dim);display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}
+.livelink .d{color:var(--gold);letter-spacing:.08em}
+.livelink .e{color:var(--mute);word-break:break-word;max-width:64ch}
+.reveal{opacity:0;transform:translateY(26px);transition:opacity 1s cubic-bezier(.2,.7,.2,1),transform 1s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1;transform:none}
+/* backing panel behind the hero and story text: negative margins equal to the
+   padding, so the text's left edge stays exactly where it was */
+.panel{position:relative;background:rgba(0,0,0,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:28px 32px;margin:-28px -32px}
+.story .inner.panel{max-width:calc(760px + 64px)}
+.hero .panel{align-self:flex-start;width:fit-content;max-width:calc(56vw + 64px)}
+.story.danger .panel{border-color:rgba(229,72,77,.25)}
+
+/* ── console ────────────────────────────────────────────────────── */
+.console{padding:70px 0 40px}
+.chead{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:28px}
+.chead h2{font-family:var(--disp);font-weight:200;font-size:34px;letter-spacing:-.01em;margin:0}
+.chead .meta{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);text-align:right}
+.card{background:var(--card);border:1px solid var(--line);padding:22px 24px;margin-bottom:14px}
+.card.tight{padding:18px 20px}
+.card h3{font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0 0 18px}
+.mono{font-family:var(--mono);font-weight:300;letter-spacing:.01em}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px 22px}
+.kv .k{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:5px}
+.kv .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-word}
+.kv .v.big{font-size:16px}
+.pill{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:400;letter-spacing:.16em;text-transform:uppercase;padding:4px 9px;border:1px solid var(--line-2);color:var(--dim);white-space:nowrap}
+.pill.gold{color:var(--gold);border-color:rgba(226,176,74,.5)}
+.pill.violet{color:var(--violet);border-color:rgba(127,119,221,.5)}
+.pill.red{color:var(--red);border-color:rgba(229,72,77,.5)}
+.pill.solid{background:var(--gold);color:#000;border-color:var(--gold)}
+.muted{color:var(--mute)}
+.cp{cursor:copy;border-bottom:1px dotted rgba(255,255,255,.2)}
+.cp:hover{color:var(--gold);border-bottom-color:var(--gold)}
+.cp.copied{color:var(--gold);border-bottom-color:var(--gold)}
+
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.step{background:var(--card-2);border:1px solid var(--line);padding:16px 16px 18px;display:flex;flex-direction:column;gap:12px;cursor:pointer;text-align:left;color:inherit;font:inherit;transition:border-color .25s ease,background .25s ease}
+.step:hover{border-color:var(--line-2)}
+.step.current{border-color:rgba(226,176,74,.55);background:#0C0A05}
+.step.open{border-color:var(--line-2);background:#101010}
+.step .no{display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute)}
+.step .nm{font-family:var(--disp);font-weight:300;font-size:19px;letter-spacing:.01em}
+.step .price{font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
+.step .price small{color:var(--mute);font-size:10px;letter-spacing:.16em;margin-left:5px}
+.step .facts{display:flex;flex-direction:column;gap:5px;font-family:var(--mono);font-size:11px;color:var(--mute);line-height:1.5}
+.step .txs{display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:11px}
+.step .txs a,.step .txs span{color:var(--dim);border-bottom-color:var(--line)}
+.tag{display:inline-block;font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--violet);border:1px solid rgba(127,119,221,.4);padding:2px 6px;align-self:flex-start}
+.out{margin-top:12px;background:#050505;border:1px solid var(--line);padding:18px 20px}
+.out .oh{display:flex;justify-content:space-between;gap:16px;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:14px}
+.out pre{margin:0;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;color:#CFCAC2;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
+
+.invoice{border-color:rgba(226,176,74,.4);background:#0B0904}
+.invoice .cmd{margin-top:16px;display:flex;align-items:center;gap:12px;background:#050505;border:1px solid var(--line);padding:12px 14px;font-family:var(--mono);font-size:12.5px;color:var(--gold);overflow-x:auto}
+.invoice .cmd button{flex:none;background:none;border:1px solid rgba(226,176,74,.4);color:var(--gold);font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;padding:5px 9px;cursor:pointer}
+.invoice .cmd button:hover{background:var(--gold);color:#000}
+.wait{margin-top:12px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:9px}
+.blip{width:5px;height:5px;border-radius:50%;background:var(--gold);animation:blip 1.8s ease-in-out infinite}
+@keyframes blip{0%,100%{opacity:.25}50%{opacity:1}}
+
+.ev{border-top:1px solid var(--line);padding:20px 0}
+.ev:first-of-type{border-top:0;padding-top:0}
+.ev .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+.ev .sum{font-size:15px;line-height:1.55;color:var(--ink);margin:0 0 10px;max-width:70ch}
+.mem .lines ul.acted{margin:0 0 12px}
+.ev .ts{font-family:var(--mono);font-size:11px;color:var(--mute);letter-spacing:.06em}
+.ev .stp{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.14em;text-transform:uppercase}
+.ev ul.acted{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
+.ev ul.acted li{font-size:15px;color:var(--ink);padding-left:16px;position:relative;line-height:1.5}
+.ev ul.acted li:before{content:"";position:absolute;left:0;top:.62em;width:6px;height:1px;background:var(--gold)}
+.mem{margin-top:16px;border:1px solid var(--line);background:#040404}
+.mem summary{cursor:pointer;list-style:none;padding:11px 14px;font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--violet);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.mem summary::-webkit-details-marker{display:none}
+.mem summary .n{color:var(--mute)}
+.mem[open] summary{border-bottom:1px solid var(--line)}
+.mem .lines{padding:14px;display:flex;flex-direction:column;gap:8px}
+.mem .lines code{font-family:var(--mono);font-weight:300;font-size:12.5px;line-height:1.7;color:#C8C3BA;white-space:pre-wrap;word-break:break-word;display:block;padding-left:18px;position:relative}
+.mem .lines code:before{content:"›";position:absolute;left:0;color:var(--violet)}
+
+table.jobs{width:100%;border-collapse:collapse}
+table.jobs th{text-align:left;font-family:var(--mono);font-weight:400;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);padding:0 14px 12px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+table.jobs td{padding:15px 14px 15px 0;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13.5px;color:var(--dim);vertical-align:middle}
+table.jobs tr:last-child td{border-bottom:0}
+table.jobs td a{color:var(--ink)}
+.empty{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);padding:26px 0}
+.gone-note{color:var(--red)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+.expl{margin-top:18px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.8;color:#C8C3BA;word-break:break-word}
+.outs{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.outs .o{display:flex;gap:14px;font-family:var(--mono);font-size:12px;color:var(--dim)}
+.back{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);border-bottom:0}
+.back:hover{color:var(--gold)}
+
+footer{border-top:1px solid var(--line);margin-top:90px;padding:34px 0 54px;display:flex;flex-wrap:wrap;gap:18px 40px;align-items:baseline;justify-content:space-between}
+footer .fmark{font-family:var(--disp);font-weight:300;font-size:15px}
+footer .fl{font-family:var(--mono);font-size:11.5px;color:var(--mute);display:flex;flex-wrap:wrap;gap:8px 22px;align-items:baseline}
+footer .fl a{color:var(--dim);border-bottom-color:var(--line)}
+
+@media (max-width:1080px){
+  .steps{grid-template-columns:repeat(2,1fr)}
+  .grid2{grid-template-columns:1fr}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .reveal{transition:none;opacity:1;transform:none}
+  .blip{animation:none}
+}
+
+/* ── buyer flow: same language as the console ───────────────────── */
+.btn{background:none;border:1px solid rgba(226,176,74,.4);color:var(--gold);font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;padding:5px 9px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--gold);color:#000}
+.btn.quiet{border-color:var(--line-2);color:var(--dim)}
+.btn.quiet:hover{background:none;color:var(--gold);border-color:var(--gold)}
+.nogas{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--violet)}
+.btn:disabled,.btn:disabled:hover{opacity:.45;cursor:not-allowed;background:none;color:var(--dim);border-color:var(--line-2)}
+/* wallet chip: a bordered pill on the card surface, readable over anything */
+.chip{display:inline-flex;align-items:center;gap:10px;min-height:32px;padding:6px 12px;background:var(--card);border:1px solid var(--line-2);color:var(--ink);font-family:var(--mono);font-weight:300;font-size:13px;letter-spacing:.01em;line-height:1;cursor:copy;white-space:nowrap;text-decoration:none;border-radius:0}
+button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;font-weight:300}
+.chip:hover{border-color:var(--gold)}
+.chip:disabled,.chip:disabled:hover{opacity:.5;cursor:not-allowed;border-color:var(--line-2)}
+.chip .addr{color:var(--ink)}
+.chip .lbl{color:var(--gold)}
+.chip .sep{width:1px;height:14px;background:var(--line-2);flex:none}
+.chip .bal{color:var(--gold);font-variant-numeric:tabular-nums}
+.chip.copied{border-color:var(--gold)}
+.chip.copied .addr{color:var(--gold)}
+.wallet{display:flex;align-items:center;gap:10px;min-width:0}
+.wallet .err{font-family:var(--mono);font-size:11px;color:var(--mute);max-width:28ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.src{width:100%;display:block;background:#050505;border:1px solid var(--line);color:#CFCAC2;font-family:var(--mono);font-weight:300;font-size:13px;line-height:1.75;padding:14px 16px;resize:vertical;min-height:180px;outline:none}
+.src:focus{border-color:var(--line-2)}
+.drop{margin-top:10px;border:1px dashed var(--line-2);padding:12px 14px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;text-align:center}
+.drop.over{border-color:var(--gold);color:var(--gold)}
+.types{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-bottom:14px}
+.type{background:var(--card-2);border:1px solid var(--line);padding:14px 16px;cursor:pointer;text-align:left;color:inherit;font:inherit;display:flex;flex-direction:column;gap:8px;transition:border-color .25s ease,background .25s ease}
+.type:hover{border-color:var(--line-2)}
+.type.on{border-color:rgba(226,176,74,.55);background:#0C0A05}
+.type .tn{font-family:var(--disp);font-weight:300;font-size:17px}
+.type .td{font-size:13px;line-height:1.45;color:var(--dim)}
+.type .tp{font-family:var(--mono);font-size:11px;color:var(--mute);line-height:1.6}
+.type .tp b{color:var(--gold);font-weight:400}
+.actions{margin-top:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.actions .wait{margin-top:0}
+.vbtn{align-self:flex-start}
+.vres{font-family:var(--mono);font-size:11px;line-height:1.5;word-break:break-word}
+.vres.ok{color:#4FB56E}
+.vres.bad{color:var(--red)}
+.vres.none{color:var(--mute)}
+
+/* ── part 6: display type ───────────────────────────────────────── */
+.hero h1{font-size:clamp(64px,8.5vw,132px);line-height:1.02}
+.story h2{font-size:clamp(48px,5.5vw,84px)}
+.hero h1{max-width:56vw}
+
+/* ── mobile ─────────────────────────────────────────────────────── */
+@media (max-width:700px){
+  :root{--header-h:56px}
+  .wrap{padding:0 24px}
+  .topbar{padding:0 16px;gap:10px}
+  .mark img{height:18px !important}
+  /* chip: dot, address, balance; 11px; never wider than 60% of the viewport */
+  .chip{font-size:11px;padding:5px 10px;gap:8px;min-height:30px;max-width:60vw;overflow:hidden;text-overflow:ellipsis}
+  button.chip{font-size:11px}
+  .chip .addr,.chip .bal,.chip .lbl{overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .wallet .err{display:none}
+  /* type scale */
+  body{font-size:16px;line-height:1.5}
+  .hero h1{font-size:clamp(38px,11vw,56px);line-height:1.05;max-width:none}
+  .hero .sub{font-size:16px;line-height:1.5;margin-top:22px}
+  .hero{padding:48px 0 64px}
+  .hero .live{margin-top:30px;font-size:11px}
+  .scrollcue{margin-top:48px}
+  .story h2{font-size:clamp(30px,8.5vw,42px);margin-bottom:20px}
+  .story p{font-size:16px;line-height:1.5}
+  .story .kicker{font-size:10px;margin-bottom:18px}
+  .livelink{font-size:11.5px}
+  /* loader and counter scale down with the type */
+  .load-count{font-size:56px}
+  .load-label,.load-unit{font-size:10px}
+  .load-rule{width:120px}
+  #loader{gap:18px}
+  /* story: 40% less vertical padding, copy readable over the particles */
+  .story{min-height:auto;padding:48px 0}
+  .panel{padding:18px 20px;margin:-18px -20px}
+  .story .inner.panel,.hero .panel{max-width:none;width:auto}
+  /* console */
+  .console{padding:44px 0 30px}
+  .chead{flex-direction:column;align-items:flex-start;gap:8px}
+  .chead h2{font-size:26px}
+  .chead .meta{text-align:left}
+  .card{padding:16px 16px}
+  .kv{grid-template-columns:1fr 1fr;gap:12px 14px}
+  .steps{grid-template-columns:1fr}
+  .grid2{grid-template-columns:1fr}
+  .src{min-height:160px}
+  .out pre{max-height:300px}
+  /* tables become label / value lists */
+  table.jobs,table.jobs tbody,table.jobs tr,table.jobs td{display:block;width:100%}
+  table.jobs thead{display:none}
+  table.jobs tr{border-bottom:1px solid var(--line);padding:10px 0}
+  table.jobs tr:last-child{border-bottom:0}
+  table.jobs td{display:grid;grid-template-columns:92px 1fr;gap:10px;padding:4px 0;border:0;font-size:13px;align-items:center}
+  table.jobs td:before{content:attr(data-label);font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
+  /* the memory-read block is collapsed by default on mobile (the script leaves
+     it closed); the summary is the tap target */
+  .mem summary{padding:12px 14px}
+  footer{margin-top:50px;padding:26px 0 40px}
+}
+
+/* ══ APP-ONLY ═══════════════════════════════════════════════════════
+   Everything below is new: app.html's chrome and index.html's operator
+   strip. No rule here matches an element index.html had before, so the
+   story page renders exactly as it did. */
+
+/* ── header links (both pages) ──────────────────────────────────── */
+.navlink{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);white-space:nowrap}
+.navlink:hover{color:var(--gold);border-bottom-color:var(--gold)}
+.topbar .right{display:flex;align-items:center;gap:14px;min-width:0}
+
+/* ── index.html: the operator strip that replaced the console ───── */
+.opstrip{padding:70px 0 40px}
+.opview{background:var(--card);border:1px solid var(--line);padding:24px 26px;display:flex;flex-direction:column;gap:18px}
+.opview .oline{display:flex;flex-wrap:wrap;align-items:center;gap:10px 26px;font-family:var(--mono);font-size:12px;letter-spacing:.04em;color:var(--dim)}
+.opview .oline .row{display:flex;align-items:center;gap:8px;min-width:0}
+.opview .osum{font-size:16px;line-height:1.55;color:var(--ink);margin:0;max-width:74ch;text-wrap:pretty}
+.opview .osum .d{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-right:10px}
+.opview .go{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.opview .go .btn{font-size:11px;padding:9px 16px}
+
+/* ── app.html: settings drawer ──────────────────────────────────── */
+.scrim{position:fixed;inset:0;z-index:65;background:rgba(0,0,0,.66);display:none}
+.scrim.open{display:block}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,94vw);z-index:70;background:var(--card);border-left:1px solid var(--line-2);transform:translateX(101%);transition:transform .24s cubic-bezier(.2,.7,.2,1);display:flex;flex-direction:column;gap:18px;padding:22px 24px 30px;overflow:auto}
+.drawer.open{transform:none}
+.drawer .dhead{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line);padding-bottom:14px}
+.drawer h3{font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0}
+.drawer .close{background:none;border:0;color:var(--dim);font-family:var(--mono);font-size:16px;cursor:pointer;line-height:1;padding:0 4px}
+.drawer .close:hover{color:var(--gold)}
+.drawer p{margin:0;font-size:14px;line-height:1.6;color:var(--dim)}
+.drawer label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-bottom:8px}
+.drawer input{width:100%;background:#050505;border:1px solid var(--line);color:var(--ink);font-family:var(--mono);font-weight:300;font-size:13px;padding:11px 13px;outline:none}
+.drawer input:focus{border-color:var(--line-2)}
+.drawer .note{font-family:var(--mono);font-size:11px;line-height:1.7;color:var(--mute)}
+.drawer .note b{color:var(--gold);font-weight:400}
+
+/* ── app.html: sign-in state ────────────────────────────────────── */
+.chip .who{color:var(--violet)}
+.signin{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;letter-spacing:.04em;color:var(--mute)}
+.locked{border:1px dashed var(--line-2);padding:16px 18px;font-family:var(--mono);font-size:12px;line-height:1.75;color:var(--mute)}
+.locked b{color:var(--dim);font-weight:400}
+.sect{display:flex;align-items:baseline;justify-content:space-between;gap:20px;margin:34px 0 14px}
+.sect h3{font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0}
+.sect .n{font-family:var(--mono);font-size:11px;color:var(--mute)}
+.sect:first-of-type{margin-top:0}
+
+@media (max-width:700px){
+  .opstrip{padding:44px 0 30px}
+  .opview{padding:18px 18px}
+  .topbar .right{gap:10px}
+  .navlink{font-size:10px;letter-spacing:.12em}
+}

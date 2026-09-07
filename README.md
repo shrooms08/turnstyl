@@ -22,7 +22,7 @@ payments are on chain; only the agent's memory of the first is gone.
 | --- | --- | --- |
 | resume | `job:<id>` state and `job/<id>` entity | picks up at the recorded step; a step with output is never re-run or re-charged |
 | price | `findings/<hash>` and `step_cost/<n>` | 0.50 becomes 0.25 when the output is already stored; 1.5x when recorded avg_tokens > 6000 |
-| credit | `buyer/<addr>` completed_paid_jobs, open_invoices, defaults | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT for a buyer with three fully paid jobs |
+| credit | `buyer/<addr>` completed_paid_jobs, open_invoices, defaults | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT for a buyer with three fully paid jobs, of any service |
 | refuse | `buyer/<addr>` unpaid_from_prior_jobs | REFUSE paid work from a buyer who left a closed job unpaid |
 | cache | `findings/<hash>` | a repeat contract is served from the store with no model call at all |
 
@@ -42,6 +42,37 @@ payments are on chain; only the agent's memory of the first is gone.
 | REFERENCE | `contract:<hash>` | the contract source, so a resumed job needs no file path |
 | ARCHIVE | `job/<job_id>` on completion | closed jobs move out of the active set, outputs copied to `findings/` first |
 | FTS5 | `search_entities` over `findings/*` | on `job new`, queried with the contract's function names for a "memory hint" |
+
+## Services
+
+A job type is a spec: an ordered list of steps, each with a name, a base price,
+a system prompt, and an optional mechanical gate. Everything underneath is
+shared. The same engine runs the steps, the same memory holds the work, the same
+invoice and on-chain receipt settle them, the same policy decides what to charge
+and who gets credit, and the same verify proves the output against its commit.
+Adding a service is adding a spec, not a code path. One buyer ledger serves them
+all: trust belongs to the buyer, so paying for audits earns credit on test
+suites.
+
+| Service | Steps and base prices | Gate |
+| --- | --- | --- |
+| `audit`, Security audit | 1 scope free, 2 findings 0.50, 3 patch 0.75, 4 verify 0.25 | step 3 must compile (`forge build`) |
+| `tests`, Test suite | 1 scope free, 2 plan 0.40, 3 tests 0.75, 4 report 0.25 | step 3 must compile and run (`forge test`) |
+
+```bash
+.venv/bin/turnstyl types                                   # what is on offer
+.venv/bin/turnstyl job new examples/Vault.sol --buyer 0x... --type tests
+```
+
+The test suite is written against your contract and then actually run: step 3's
+answer goes into a throwaway Foundry project with `forge-std`, and
+`forge test --json` runs it. A failing test does not fail the gate. A suite that
+compiles and runs has done its job, and a test that fails may be documenting a
+real defect, which is the point. Step 4 reports on the run results as ground
+truth and treats the test file's own comments as untrusted. A worked example
+against `Vault.sol` with a real model:
+[docs/sample_tests.md](docs/sample_tests.md), 22 tests, 20 pass, 2 fail on the
+reentrancy surface, $0.0362.
 
 ## Policy rules
 
@@ -110,7 +141,7 @@ buyer, and at least the invoiced amount. The agent trusts the log, not the buyer
 Offline, no API key, no chain, no spend:
 
 ```bash
-.venv/bin/python scripts/demo_offline.py        # eight-beat acceptance test
+.venv/bin/python scripts/demo_offline.py        # nine-beat acceptance test
 
 export MOCK_LLM=1 PAYMENTS=fake
 .venv/bin/turnstyl job new examples/Vault.sol --buyer 0xYourAddress
@@ -178,9 +209,17 @@ machine is not reachable right now`, and submit and pay are held.
 Two commands, from the repo on the operator's machine:
 
 ```bash
-scripts/tunnel.sh          # go live: caffeinate, serve --with-worker, cloudflared, publish the URL
+scripts/tunnel.sh          # go live in the foreground; Ctrl-C takes it down
+scripts/tunnel.sh --daemon # go live detached; survives the terminal closing
+scripts/tunnel.sh --status # is it running, and at what URL
+scripts/tunnel.sh --stop   # stop it and publish an empty config.js
 scripts/tunnel_check.sh    # from anywhere: is the published page pointing at a reachable agent?
 ```
+
+`--daemon` starts the same three processes under `nohup` with their output in
+`data/tunnel.log` and their pids in `data/tunnel.pid`, so closing the terminal
+does not take the agent down; `--stop` reads that file, stops them, and
+republishes an empty `config.js` so the page reads "agent offline".
 
 `tunnel.sh` runs with `PAYMENTS=base` and the real model, writes the tunnel
 URL into `web/config.js`, pushes only that file to `gh-pages`, and on Ctrl-C

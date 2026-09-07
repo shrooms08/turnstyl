@@ -29,7 +29,7 @@ on chain tells the agent which invoice it already collected, so it charges again
 | Primitive | Where it is called | What it does |
 | --- | --- | --- |
 | recall | `TurnstylStore.get_job_state` / `get_buyer` (`memory.py`), called at the top of `Engine.run` and `Engine.new_job` | reads the HOT state document and WARM buyer entity that every decision is derived from |
-| entities | `TurnstylStore.put_job_entity` / `put_buyer` / `record_step_cost` / `put_findings` (`memory.py:289-345`) | the four WARM entity families: job, buyer, step_cost, findings |
+| entities | `TurnstylStore.put_job_entity` / `put_buyer` / `record_step_cost` / `put_findings` (`memory.py`) | the four WARM entity families: job, buyer, step_cost, findings. Work products and cost history are namespaced by job type (`findings/<type>/<hash>`, `step_cost/<type>/<n>`); the buyer ledger deliberately is not |
 | temporal | `TurnstylStore.journal` (`memory.py:350`) writes one COLD event per decision; `read_journal` (`memory.py:358`) reads them back newest first | an append-only record of what memory said, what was done, and what was expected next |
 | reflection | `Engine._advance` builds the `evaluated` list before acting, so each journal event states the facts the decision rested on (`engine.py`) | the agent's own account of why it charged or refused, replayable after the fact |
 | consolidation | `Engine._complete` (`engine.py:808`) copies the four step outputs into `findings/<contract_hash>` and archives the job entity via `TurnstylStore.archive_job_entity` (`memory.py:293`) | closed jobs leave the working set; their outputs become the cache that prices the next audit of the same contract |
@@ -43,6 +43,23 @@ held in memory. A match proves the output the buyer received is the one the
 agent committed at payment time. The proof needs both stores: the chain has the
 hash, memory has the output; either alone proves nothing, which is also why the
 delete test cannot be undone from chain.
+
+## Memory per service, trust per buyer
+
+turnstyl sells more than one service, and a job type is only a spec (see the
+README). Two of the four entity families are namespaced by type and two are not,
+and the split is the design:
+
+| Key | Namespaced | Why |
+| --- | --- | --- |
+| `findings/<type>/<contract_hash>` | yes | a test suite for a contract is not an audit of it; caching one as the other would serve the wrong work |
+| `step_cost/<type>/<n>` | yes | step 3 of an audit and step 3 of a test suite cost different amounts to run, so neither should price the other |
+| `job/<job_id>`, `job:<job_id>` | carries `job_type` | one job is one service; the spec is resolved from the row |
+| `buyer/<address>` | no | trust belongs to the buyer, not the product. Three fully paid audits earn credit on a test suite |
+
+Rows written before job types existed carry no type and are read as `audit`,
+which is what they were. Nothing is migrated: reads fall back to the untyped
+name, writes always use the namespaced one.
 
 ## Why not rebuild memory from chain
 

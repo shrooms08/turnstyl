@@ -177,6 +177,41 @@ OTHER=0x000000000000000000000000000000000000dead
 [ "$(jget "/api/jobs?buyer=$OTHER" | jq_ "len(d['jobs'])")" = "0" ] && ok "buyer filter excludes other buyers" || bad "buyer filter excludes other buyers"
 [ "$(jget "/api/jobs" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs without the param lists all" || bad "GET /api/jobs without the param lists all"
 
+# ---------------------------------------------------------------- job types
+JT=$(jget "/api/job_types")
+[ "$(echo "$JT" | jq_ "d['default'], sorted(t['id'] for t in d['job_types'])")" = "audit ['audit', 'tests']" ] && ok "GET /api/job_types lists audit and tests, audit default" || bad "GET /api/job_types" "$(echo "$JT" | head -c 200)"
+[ "$(echo "$JT" | jq_ "[ (s['name'], s['base_price_usdc'], s['gate']) for t in d['job_types'] if t['id']=='tests' for s in t['steps'] ]")" = "[('scope', 0.0, 'none'), ('plan', 0.4, 'none'), ('tests', 0.75, 'forge_test'), ('report', 0.25, 'none')]" ] && ok "the tests type carries its own steps, prices and forge_test gate" || bad "tests type spec" "$(echo "$JT" | jq_ "[t for t in d['job_types'] if t['id']=='tests']")"
+[ "$(jget "/api/status" | jq_ "len(d['job_types']), d['default_job_type']")" = "2 audit" ] && ok "/api/status lists the job types" || bad "/api/status lists the job types"
+
+C=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC,\"job_type\":\"nope\"}")
+[ "$(echo "$C" | tail -1)" = "400" ] && grep -q "unknown job_type" <<< "$C" && ok "POST with an unknown job_type -> 400" || bad "POST with an unknown job_type -> 400" "$(echo "$C" | head -c 160)"
+
+TJ=$(curl -s -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$SRC,\"job_type\":\"tests\"}")
+TJOB=$(echo "$TJ" | jq_ "d['job_id']")
+[ -n "$TJOB" ] && [ "$(echo "$TJ" | jq_ "d['job_type'], [s['name'] for s in d['steps']]")" = "tests ['scope', 'plan', 'tests', 'report']" ] && ok "POST with job_type tests creates a tests job ($TJOB)" || bad "POST with job_type tests" "$(echo "$TJ" | head -c 200)"
+[ "$(echo "$TJ" | jq_ "[s['price_usdc'] for s in d['steps']]")" = "[0.0, 0.4, 0.75, 0.25]" ] && ok "the tests job is priced by its own spec" || bad "tests job prices" "$(echo "$TJ" | jq_ "[s['price_usdc'] for s in d['steps']]")"
+
+# drive it to completion: pay whatever invoice is open, let the worker run each step
+for _ in $(seq 1 12); do
+  ST=$(jget "/api/jobs/$TJOB" | jq_ "d['status'], (d.get('open_invoice') or {}).get('step'), (d.get('open_invoice') or {}).get('paid')")
+  case "$ST" in
+    "complete"*) break;;
+    *" None None") sleep 1;;
+    *" False") curl -s -o /dev/null -X POST "$BASE/api/jobs/$TJOB/pay"; sleep 2;;
+    *) sleep 2;;
+  esac
+done
+[ "$(jget "/api/jobs/$TJOB" | jq_ "d['status']")" = "complete" ] && ok "the tests job ran to completion" || bad "the tests job ran to completion" "$(jget "/api/jobs/$TJOB" | jq_ "d['status'], d['current_step']")"
+TS=$(jget "/api/jobs/$TJOB" | jq_ "[ (s['tests_total'], s['tests_passed'], s['tests_failed'], s['compiles']) for s in d['steps'] if s['step']==3 ][0]")
+case "$TS" in
+  "(5, 3, 2, True)") ok "step 3 went through the forge_test gate: 5 tests, 3 passed, 2 failed";;
+  *) bad "step 3 forge_test results" "got $TS";;
+esac
+curl -s "$BASE/api/jobs/$TJOB/report.md" -o /tmp/turnstyl-tests-report.md
+grep -q "^# turnstyl test suite report" /tmp/turnstyl-tests-report.md && ok "report.md is titled for the service" || bad "report.md title" "$(head -1 /tmp/turnstyl-tests-report.md)"
+grep -q "forge test: 3 passed, 2 failed, 5 total" /tmp/turnstyl-tests-report.md && ok "report.md shows the run results" || bad "report.md shows the run results" "$(grep -n 'forge test' /tmp/turnstyl-tests-report.md | head -2)"
+grep -q "^## Step 3: tests" /tmp/turnstyl-tests-report.md && ok "report.md names the type's own steps" || bad "report.md step names"
+
 # ---------------------------------------------------------------- missing memory
 rm -f "$DB" "$DB-wal" "$DB-shm"
 sleep 1

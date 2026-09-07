@@ -6,20 +6,18 @@ produced it — which is exactly what the journal event records.
 """
 from __future__ import annotations
 
+from .jobtypes import JobType, StepSpec
 from .schema import (
-    BASE_PRICES,
     BLOCKED_MIN_DEFAULTS,
     BLOCKED_MIN_UNPAID_PRIOR_JOBS,
     EARN_BACK_PAID_STEPS,
     CACHED_MULTIPLIER,
     EXPENSIVE_MULTIPLIER,
     EXPENSIVE_TOKEN_THRESHOLD,
-    FIRST_STEP,
     REFUSE,
     RUN_FREE,
     RUN_ON_CREDIT,
     RUN_PAID,
-    STEP_NAMES,
     TRUST_BLOCKED,
     TRUST_NEW,
     TRUST_TRUSTED,
@@ -34,26 +32,25 @@ from .schema import (
 
 
 def price(
-    step: int,
+    step_spec: StepSpec,
     buyer_entity: BuyerLedger,
     step_cost_entity: StepCost,
     findings_cached: bool,
 ) -> tuple[float, str]:
     """Price one step in USDC.
 
-    base * 0.5 when this contract's output for this step is already in memory,
-    * 1.5 when the recorded average token cost for this step exceeds the
-    threshold. Rounded to 2 decimals.
+    The base price comes from the job type's spec; the multipliers are the
+    agent's, and are the same for every service it sells: base * 0.5 when this
+    contract's output for this step is already in memory, * 1.5 when the
+    recorded average token cost for this step exceeds the threshold. Rounded to
+    2 decimals.
 
     Returns (amount_usdc, reason).
     """
-    if step not in BASE_PRICES:
-        raise ValueError(
-            f"turnstyl: no base price for step {step!r}; steps are {sorted(BASE_PRICES)}"
-        )
-    base = BASE_PRICES[step]
+    step = step_spec.n
+    base = step_spec.base_price_usdc
     amount = base
-    parts = [f"base {base:.2f} for step {step} ({STEP_NAMES[step]})"]
+    parts = [f"base {base:.2f} for step {step} ({step_spec.name})"]
 
     if findings_cached:
         amount *= CACHED_MULTIPLIER
@@ -136,12 +133,13 @@ def decide(
     step: int,
     buyer_entity: BuyerLedger,
     job_state: JobState,
+    job_type: JobType,
 ) -> tuple[Decision, str]:
     """Decide whether to run ``step`` for this buyer, and say why.
 
     Precedence, in order:
-      1. step 1 is free and is never gated — it costs the agent nothing to
-         quote and it is how a new buyer is won.
+      1. a free step is never gated — it costs the agent nothing to quote and
+         it is how a new buyer is won. Every service so far makes step 1 free.
       2. REFUSE  a buyer carrying unpaid work from a completed job, or blocked.
       3. RUN_PAID       the invoice for this step is settled.
       4. RUN_ON_CREDIT  unpaid, but the buyer has earned the trusted tier.
@@ -161,9 +159,10 @@ def decide(
         f"trust_tier={buyer_entity.trust_tier}"
     )
 
-    if step == FIRST_STEP:
+    spec = job_type.step(step)
+    if spec.base_price_usdc == 0:
         return RUN_FREE, (
-            f"step {step} ({STEP_NAMES[step]}) is free at base 0.00 USDC, so no "
+            f"step {step} ({spec.name}) is free at base 0.00 USDC, so no "
             f"payment check applies; {facts}"
         )
 
@@ -201,7 +200,7 @@ def decide(
             f"{earn_back}"
         )
 
-    amount = invoice.amount_usdc if invoice is not None else BASE_PRICES.get(step, 0.0)
+    amount = invoice.amount_usdc if invoice is not None else spec.base_price_usdc
     if buyer_entity.defaults > 0:
         jobs_note = (
             f"; also credit after {TRUSTED_MIN_PAID_JOBS} fully paid jobs, "

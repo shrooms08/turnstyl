@@ -10,12 +10,18 @@ HOT   state "job:<job_id>"      -> JobState
 HOT   state "active_jobs"       -> list[str] of job_ids that are not complete
 HOT   state "fake_payments"     -> {"<job_id>:<step>": tx_hash}  (FakePayments only)
 REF   "contract:<hash>"         -> the contract source text
-WARM  entity ("buyer", <addr>)  -> BuyerLedger
+WARM  entity ("buyer", <addr>)  -> BuyerLedger            (shared across job types)
 WARM  entity ("job", <job_id>)  -> JobEntity
-WARM  entity ("step_cost", "n") -> StepCost
-WARM  entity ("findings", <hash>) -> FindingsEntity
+WARM  entity ("step_cost", "<type>/<n>")   -> StepCost
+WARM  entity ("findings", "<type>/<hash>") -> FindingsEntity
 REF   "pricing_rules"           -> PricingRules
 COLD  journal                   -> one event per decision
+
+Work products and cost history are per job type: a test suite for a contract is
+not an audit of it, and step 3 of one is not priced by step 3 of the other. The
+buyer ledger is deliberately NOT namespaced: trust belongs to the buyer, so
+paying for audits earns credit on test suites. Rows written before job types
+existed carry no type and are read as "audit", which is what they were.
 """
 from __future__ import annotations
 
@@ -27,33 +33,16 @@ from pydantic import BaseModel, ConfigDict, Field
 # ----------------------------------------------------------------------
 # Steps
 # ----------------------------------------------------------------------
-STEP_SCOPE = 1
-STEP_FINDINGS = 2
-STEP_PATCH = 3
-STEP_VERIFY = 4
-FIRST_STEP = STEP_SCOPE
-LAST_STEP = STEP_VERIFY
-ALL_STEPS = (STEP_SCOPE, STEP_FINDINGS, STEP_PATCH, STEP_VERIFY)
-
-STEP_NAMES: dict[int, str] = {
-    STEP_SCOPE: "scope",
-    STEP_FINDINGS: "findings",
-    STEP_PATCH: "patch",
-    STEP_VERIFY: "verify",
-}
-
-# The findings entity stores one output slot per step, keyed by the step's name.
-STEP_SLOTS: dict[int, str] = dict(STEP_NAMES)
+# What a step is called and what it costs belongs to the job type, not here:
+# see turnstyl.jobtypes. Every service so far runs four steps with the first
+# one free, and these two constants are the only thing the rest of turnstyl
+# assumes about shape.
+FIRST_STEP = 1
+DEFAULT_JOB_TYPE = "audit"
 
 # ----------------------------------------------------------------------
-# Pricing (USDC). Step 1 is free; 2-4 are metered.
+# Pricing (USDC)
 # ----------------------------------------------------------------------
-BASE_PRICES: dict[int, float] = {
-    STEP_SCOPE: 0.00,
-    STEP_FINDINGS: 0.50,
-    STEP_PATCH: 0.75,
-    STEP_VERIFY: 0.25,
-}
 USDC_DECIMALS = 6
 USDC_UNITS = 10**USDC_DECIMALS
 
@@ -116,6 +105,20 @@ CAT_BUYER = "buyer"
 CAT_JOB = "job"
 CAT_STEP_COST = "step_cost"
 CAT_FINDINGS = "findings"
+
+
+def findings_name(job_type: str, contract_hash: str) -> str:
+    """Entity name for a contract's work product under one job type.
+
+    Slashes are permitted in SDK identifiers (only ".." and shell metacharacters
+    are rejected), so the type is a path segment rather than a separate category.
+    """
+    return f"{job_type}/{contract_hash}"
+
+
+def step_cost_name(job_type: str, step: int) -> str:
+    """Entity name for one step's rolling cost under one job type."""
+    return f"{job_type}/{step}"
 
 
 def job_state_key(job_id: str) -> str:
@@ -186,6 +189,9 @@ class JobState(_Model):
     job_id: str
     buyer: str
     contract_hash: str
+    # Which service this job is. Absent on rows written before job types, and
+    # those were all audits.
+    job_type: str = DEFAULT_JOB_TYPE
     current_step: int = FIRST_STEP
     status: JobStatus = STATUS_NEW
     open_invoice: OpenInvoice | None = None
@@ -216,6 +222,13 @@ class StepRecord(_Model):
     generated_diff: str | None = None
     compiles: bool | None = None
     compiler_output: str | None = None
+    # forge_test gate only (the test-suite type's step 3). A suite that compiles
+    # and runs passes the gate even when tests fail: a failing test may be
+    # documenting a real defect, which is the product working.
+    tests_total: int | None = None
+    tests_passed: int | None = None
+    tests_failed: int | None = None
+    test_output: str | None = None
 
 
 class JobEntity(_Model):
@@ -223,6 +236,7 @@ class JobEntity(_Model):
 
     buyer: str
     contract_hash: str
+    job_type: str = DEFAULT_JOB_TYPE
     steps: dict[str, StepRecord] = Field(default_factory=dict)
 
 
@@ -284,34 +298,55 @@ class StepCost(_Model):
 
 
 class FindingsEntity(_Model):
-    """WARM: entity ("findings", <contract_hash>). Serves repeat contracts."""
+    """WARM: entity ("findings", "<type>/<contract_hash>").
 
-    scope: str | None = None
-    findings: str | None = None
-    patch: str | None = None
-    verify: str | None = None
+    One slot per step, keyed by the step's name in its job type, so a type can
+    have any steps it likes. Serves repeat work for the same contract.
+    """
 
-    def slot(self, step: int) -> str | None:
-        return getattr(self, STEP_SLOTS[step])
+    slots: dict[str, str] = Field(default_factory=dict)
 
-    def with_step(self, step: int, output: str) -> "FindingsEntity":
-        return self.model_copy(update={STEP_SLOTS[step]: output})
+    def slot(self, step_name: str) -> str | None:
+        return self.slots.get(step_name)
+
+    def with_step(self, step_name: str, output: str) -> "FindingsEntity":
+        merged = dict(self.slots)
+        merged[step_name] = output
+        return self.model_copy(update={"slots": merged})
+
+    @property
+    def filled(self) -> list[str]:
+        return sorted(k for k, v in self.slots.items() if v)
+
+    @classmethod
+    def from_body(cls, body: dict[str, Any]) -> "FindingsEntity":
+        """Read a stored row, including one written before job types.
+
+        The old audit shape put the four outputs at the top level
+        (scope/findings/patch/verify). Those are read as slots rather than
+        migrated: nothing rewrites them, and they keep serving repeat audits.
+        """
+        if "slots" in body:
+            return cls.model_validate(body)
+        legacy = {k: v for k, v in body.items() if isinstance(v, str) and v}
+        return cls(slots=legacy)
 
 
 class PricingRules(_Model):
-    """REFERENCE: "pricing_rules". Written once, on first run."""
+    """REFERENCE: "pricing_rules". Written once, on first run.
 
-    base_prices: dict[str, float] = Field(
-        default_factory=lambda: {str(k): v for k, v in BASE_PRICES.items()}
-    )
+    ``base_prices`` is per job type: {"<type>": {"<step>": price}}.
+    """
+
+    base_prices: dict[str, dict[str, float]] = Field(default_factory=dict)
     cached_multiplier: float = CACHED_MULTIPLIER
     expensive_multiplier: float = EXPENSIVE_MULTIPLIER
     expensive_token_threshold: int = EXPENSIVE_TOKEN_THRESHOLD
     note: str = (
-        "Base price per step in USDC. A step whose output is already in the "
-        "findings entity for this contract costs cached_multiplier of base. A "
-        "step whose recorded avg_tokens exceeds expensive_token_threshold costs "
-        "expensive_multiplier of base."
+        "Base price per step in USDC, per job type. A step whose output is "
+        "already in the findings entity for this contract and type costs "
+        "cached_multiplier of base. A step whose recorded avg_tokens exceeds "
+        "expensive_token_threshold costs expensive_multiplier of base."
     )
 
 

@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 from . import policy
 from . import schema as S
 from .engine import Engine
+from . import jobtypes
+from .jobtypes import GATE_COMPILE, GATE_FORGE_TEST
 from .memory import TENANT_ID, TurnstylMemory, TurnstylStore, count_records, default_db_path
 from .payments import ERC20_ABI, RECEIPTS_ABI, get_backend, hex0x, memo_bytes32
 
@@ -212,7 +214,23 @@ def api_status() -> dict[str, Any]:
         "usdc_abi": PAGE_USDC_ABI,
         "max_jobs_per_day": MAX_JOBS_PER_DAY,
         "remaining_today": daily_remaining(),
+        "job_types": [t.to_public() for t in jobtypes.all_types()],
+        "default_job_type": jobtypes.DEFAULT_TYPE_ID,
         "memory_missing": not exists,
+    }
+
+
+@app.get("/api/job_types")
+def api_job_types() -> dict[str, Any]:
+    """The services on offer, with their steps, prices and gates.
+
+    A job type is a spec; the engine, memory, payments, credit and verify
+    underneath are shared, so this is the whole of what differs between them.
+    """
+    return {
+        "memory_missing": not db_path().is_file(),
+        "default": jobtypes.DEFAULT_TYPE_ID,
+        "job_types": [t.to_public() for t in jobtypes.all_types()],
     }
 
 
@@ -299,10 +317,11 @@ def api_jobs(
 # ----------------------------------------------------------------------
 # /api/jobs/{job_id}
 # ----------------------------------------------------------------------
-def step_view(step: int, record: S.StepRecord) -> dict[str, Any]:
+def step_view(spec: jobtypes.JobType, step: int, record: S.StepRecord) -> dict[str, Any]:
+    step_spec = spec.step(step)
     view = {
         "step": step,
-        "name": S.STEP_NAMES.get(step, str(step)),
+        "name": step_spec.name,
         "status": "done",
         "price_usdc": record.price_usdc,
         "paid": record.paid,
@@ -315,19 +334,25 @@ def step_view(step: int, record: S.StepRecord) -> dict[str, Any]:
         "pay_tx": record.tx_hash,
         "output": record.output,
     }
-    if step == S.STEP_PATCH:
+    if step_spec.gate == GATE_COMPILE:
         view["compiles"] = record.compiles
+    if step_spec.gate == GATE_FORGE_TEST:
+        view["compiles"] = record.compiles
+        view["tests_total"] = record.tests_total
+        view["tests_passed"] = record.tests_passed
+        view["tests_failed"] = record.tests_failed
     return view
 
 
-def not_started_view(step: int) -> dict[str, Any]:
+def not_started_view(spec: jobtypes.JobType, step: int) -> dict[str, Any]:
     """A step the job has not reached. Same keys as a recorded step, so a
-    consumer can render the four cards from one shape."""
+    consumer can render the cards from one shape."""
+    step_spec = spec.step(step)
     view = {
         "step": step,
-        "name": S.STEP_NAMES.get(step, str(step)),
+        "name": step_spec.name,
         "status": "not_started",
-        "price_usdc": S.BASE_PRICES.get(step, 0.0),
+        "price_usdc": step_spec.base_price_usdc,
         "paid": False,
         "cached": False,
         "tokens_in": None,
@@ -338,8 +363,12 @@ def not_started_view(step: int) -> dict[str, Any]:
         "pay_tx": None,
         "output": None,
     }
-    if step == S.STEP_PATCH:
+    if step_spec.gate in (GATE_COMPILE, GATE_FORGE_TEST):
         view["compiles"] = None
+    if step_spec.gate == GATE_FORGE_TEST:
+        view["tests_total"] = None
+        view["tests_passed"] = None
+        view["tests_failed"] = None
     return view
 
 
@@ -355,6 +384,7 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
             ),
         )
 
+    spec = jobtypes.get(state.job_type)
     entity = store.get_job_entity(job_id)
     entity_source = "entity job/<id>"
     archived_at = None
@@ -371,8 +401,11 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
     # not run yet says so and carries its base price from the pricing rules.
     recorded = {}
     if entity is not None:
-        recorded = {int(k): step_view(int(k), record) for k, record in entity.steps.items()}
-    steps = [recorded.get(n) or not_started_view(n) for n in S.ALL_STEPS]
+        recorded = {
+            int(k): step_view(spec, int(k), record)
+            for k, record in entity.steps.items()
+        }
+    steps = [recorded.get(n) or not_started_view(spec, n) for n in spec.all_steps]
 
     invoice = state.open_invoice
     return {
@@ -380,6 +413,10 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
         "job_id": state.job_id,
         "buyer": state.buyer,
         "contract_hash": state.contract_hash,
+        "job_type": spec.id,
+        "job_type_name": spec.name,
+        "job_type_description": spec.description,
+        "last_step": spec.last_step,
         "status": state.status,
         "current_step": state.current_step,
         "created_at": state.created_at,
@@ -441,6 +478,9 @@ class NewJobRequest(BaseModel):
     buyer: str = Field(description="Buyer wallet, 0x + 40 hex.")
     source: str = Field(description="Solidity source text, 1 to 65536 bytes.")
     filename: str | None = Field(default="Vault.sol", description="Display name only.")
+    job_type: str | None = Field(
+        default=None, description="Service id from GET /api/job_types; default audit."
+    )
 
 
 # ----------------------------------------------------------------------
@@ -475,12 +515,18 @@ def report_data(store: TurnstylStore, job_id: str) -> dict[str, Any]:
                 "commit_tx_url": f"{EXPLORER}/tx/{st['commit_tx']}" if st.get("commit_tx") else None,
                 "output_sha256": st.get("output_sha256"),
                 "output": st.get("output"),
+                "compiles": st.get("compiles"),
+                "tests_total": st.get("tests_total"),
+                "tests_passed": st.get("tests_passed"),
+                "tests_failed": st.get("tests_failed"),
             }
         )
     return {
         "job_id": detail["job_id"],
         "contract_hash": detail["contract_hash"],
         "buyer": detail["buyer"],
+        "job_type": detail["job_type"],
+        "job_type_name": detail["job_type_name"],
         "status": detail["status"],
         "created_at": detail["created_at"],
         "updated_at": detail["updated_at"],
@@ -503,8 +549,9 @@ def report_markdown(r: dict[str, Any]) -> str:
     """The report as Markdown. Outputs go in tilde fences: model output for the
     patch step contains backtick fences of its own."""
     lines = [
-        f"# turnstyl audit report: job {r['job_id']}",
+        f"# turnstyl {r['job_type_name'].lower()} report: job {r['job_id']}",
         "",
+        f"- service: {r['job_type_name']} (`{r['job_type']}`)",
         f"- contract sha256: `{r['contract_hash']}`",
         f"- buyer: `{r['buyer']}`",
         f"- job status: {r['status']}" + (" (archived)" if r["archived"] else ""),
@@ -523,6 +570,13 @@ def report_markdown(r: dict[str, Any]) -> str:
             lines.append(f"- payment: [{st['pay_tx']}]({st['pay_tx_url']})" if st["pay_tx_url"] else f"- payment: `{st['pay_tx']}` (fake backend)")
         if st["commit_tx"]:
             lines.append(f"- commit: [{st['commit_tx']}]({st['commit_tx_url']})")
+        if st.get("tests_total") is not None:
+            lines.append(
+                f"- forge test: {st['tests_passed']} passed, "
+                f"{st['tests_failed']} failed, {st['tests_total']} total"
+            )
+        elif st.get("compiles") is not None:
+            lines.append(f"- compiles: {'yes' if st['compiles'] else 'no'}")
         if st["output_sha256"]:
             lines.append(f"- output sha256: `{st['output_sha256']}`")
         lines.append("")
@@ -596,12 +650,14 @@ def _rpc_retry(fn, *args):
     raise RuntimeError(f"{type(last).__name__}: {last}")
 
 
-def verify_step(job_id: str, step: int, record: S.StepRecord) -> dict[str, Any]:
+def verify_step(
+    spec: jobtypes.JobType, job_id: str, step: int, record: S.StepRecord
+) -> dict[str, Any]:
     recomputed = S.sha256_text(record.output)
     memo = hex0x(memo_bytes32(job_id, step))
     result: dict[str, Any] = {
         "step": step,
-        "name": S.STEP_NAMES.get(step, str(step)),
+        "name": spec.step_name(step),
         "memo": memo,
         "cached": record.cached,
         "output_sha256_stored": record.output_sha256,
@@ -697,10 +753,15 @@ def api_verify(job_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail=f"job {job_id!r} has no step records to verify")
         entity = S.JobEntity.model_validate(archive["body"])
         source = "archived_entities (read-only)"
-    steps = [verify_step(job_id, int(k), rec) for k, rec in sorted(entity.steps.items(), key=lambda kv: int(kv[0]))]
+    spec = jobtypes.get(state.job_type)
+    steps = [
+        verify_step(spec, job_id, int(k), rec)
+        for k, rec in sorted(entity.steps.items(), key=lambda kv: int(kv[0]))
+    ]
     return {
         "memory_missing": False,
         "job_id": job_id,
+        "job_type": state.job_type,
         "contract_hash": state.contract_hash,
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "cache_ttl_seconds": int(VERIFY_TTL_SECONDS),
@@ -761,13 +822,22 @@ def api_create_job(body: NewJobRequest) -> dict[str, Any]:
                 f"(UTC); the cap resets at 00:00 UTC"
             ),
         )
+    requested_type = (body.job_type or "").strip() or None
+    if requested_type is not None and not jobtypes.is_known(requested_type):
+        known = ", ".join(t.id for t in jobtypes.all_types())
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown job_type {requested_type!r}; known types are {known}",
+        )
     filename = (body.filename or "contract.sol").strip() or "contract.sol"
     filename = os.path.basename(filename)[:80]
 
     store = TurnstylStore(TurnstylMemory(db_path()))
     engine = Engine(store=store, payments=get_backend(store.memory))
     try:
-        outcome = engine.new_job_from_source(source, buyer, filename=filename)
+        outcome = engine.new_job_from_source(
+            source, buyer, filename=filename, job_type=requested_type
+        )
     except RuntimeError as e:
         daily_give_back()
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -836,10 +906,13 @@ def api_buyer(address: str) -> dict[str, Any]:
         job_id="probe",
         buyer=key,
         contract_hash="0" * 64,
-        current_step=S.STEP_FINDINGS,
+        current_step=2,
         status=S.STATUS_AWAITING_PAYMENT,
     )
-    decision, reason = policy.decide(S.STEP_FINDINGS, ledger, probe)
+    # The trust question is about the buyer, not the service: any type's first
+    # paid step gives the same answer, so the default type asks it.
+    default_spec = jobtypes.get(None)
+    decision, reason = policy.decide(2, ledger, probe, default_spec)
 
     return {
         "memory_missing": False,

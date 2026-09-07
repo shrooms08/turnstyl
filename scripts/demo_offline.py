@@ -22,6 +22,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from turnstyl import jobtypes  # noqa: E402
 from turnstyl import schema as S  # noqa: E402
 from turnstyl.memory import TurnstylMemory, TurnstylStore  # noqa: E402
 
@@ -105,6 +106,22 @@ def decision_line(raw: str) -> str:
     return ""
 
 
+def active_job_of_type(job_type: str) -> str:
+    """The active job of one type. Beat g leaves an audit job open, so from
+    there on "the only active job" is no longer a safe way to find one."""
+    st = store()
+    matches = [
+        j for j in st.get_active_jobs()
+        if (st.get_job_state(j) or None) and st.get_job_state(j).job_type == job_type
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"turnstyl demo: expected exactly 1 active {job_type} job, found "
+            f"{len(matches)}: {matches}"
+        )
+    return matches[0]
+
+
 def only_job_id() -> str:
     active = store().get_active_jobs()
     if len(active) != 1:
@@ -118,9 +135,13 @@ def only_job_id() -> str:
 # ----------------------------------------------------------------------
 # Beats
 # ----------------------------------------------------------------------
+AUDIT = jobtypes.get("audit")
+
+
 def price_str(step: int, cached: bool) -> str:
-    """The invoice amount the CLI prints for a step, from the pricing rules."""
-    amount = round(S.BASE_PRICES[step] * (S.CACHED_MULTIPLIER if cached else 1.0), 2)
+    """The invoice amount the CLI prints for an audit step, from the spec."""
+    base = AUDIT.step(step).base_price_usdc
+    amount = round(base * (S.CACHED_MULTIPLIER if cached else 1.0), 2)
     return f"amount {amount:.2f} USDC"
 
 
@@ -224,13 +245,16 @@ def beat_d(job_id: str) -> None:
     ]
     st = store()
     state = st.get_job_state(job_id)
-    findings = st.get_findings(state.contract_hash)
-    same = {step: S.sha256_text(findings.slot(step)) == prior_sha[step] for step in (1, 2, 3)}
+    findings = st.get_findings("audit", state.contract_hash)
+    same = {
+        step: S.sha256_text(findings.slot(AUDIT.step_name(step))) == prior_sha[step]
+        for step in (1, 2, 3)
+    }
     ledger = st.get_buyer(BUYER)
     r.append(check("d", "steps 1-3 sha256 unchanged", all(same.values()), f"{same}"))
     r.append(check("d", "job complete, entity archived, findings cached",
                    state.status == S.STATUS_COMPLETE and st.get_job_entity(job_id) is None
-                   and all(findings.slot(n) for n in S.ALL_STEPS)))
+                   and all(findings.slot(AUDIT.step_name(n)) for n in AUDIT.all_steps)))
     r.append(check("d", "first fully paid job counted: completed_paid_jobs == 1",
                    ledger.completed_paid_jobs == 1, f"completed_paid_jobs={ledger.completed_paid_jobs}"))
     r.append(check("d", "nothing outstanding, trust still new",
@@ -326,8 +350,89 @@ def beat_g(credit_job: str) -> str:
     return sixth
 
 
-def beat_h(prior_jobs: set[str]) -> str:
-    print("BEAT h: DELETE TEST. Wipe the database and watch the agent forget")
+def beat_h(credit_job: str) -> str:
+    """The second service. Same engine, same ledger, a different spec."""
+    print("BEAT h: SECOND SERVICE. A Foundry test suite, priced and gated on its own terms")
+    r: list[bool] = []
+    # settle the credit step beat g left open, so the buyer is trusted again.
+    # Reconciliation runs at the start of the next engine call; `ledger` is one.
+    cli("pay", credit_job, "2")
+    cli("ledger", BUYER)
+    led = store().get_buyer(BUYER)
+    r.append(check("h", "the previous job's credit step is settled and trust is back",
+                   led.open_invoices == 0 and led.trust_tier == S.TRUST_TRUSTED,
+                   f"open_invoices={led.open_invoices}, trust={led.trust_tier}, "
+                   f"completed_paid_jobs={led.completed_paid_jobs}, defaults={led.defaults}, "
+                   f"consecutive={led.consecutive_paid_since_default}, "
+                   f"outstanding={[(o.job_id, o.step) for o in led.outstanding]}"))
+
+    _, flat = cli("job", "new", str(CONTRACT), "--buyer", BUYER, "--type", "tests")
+    job_id = active_job_of_type("tests")
+    st = store()
+    state = st.get_job_state(job_id)
+    r.append(check("h", "the job records its type", state is not None and state.job_type == "tests",
+                   f"job_type={state.job_type if state else None}"))
+    r.append(check("h", "step 1 is the tests scope, not the audit scope", "STEP 1: scope" in flat and "TEST SCOPE" in flat, flat[:300]))
+    r.append(check("h", "step 1 is NOT served from the audit's cached findings",
+                   "from memory (cached)" not in flat, flat[:400]))
+    r.append(check("h", "step 2 is invoiced at this type's own price, 0.40 USDC",
+                   "step 2 (plan)" in flat and "amount 0.40 USDC" in flat, flat[:500]))
+
+    # trust was earned on audits; it is spent here
+    raw, flat = cli("job", "run", job_id)
+    line = decision_line(raw)
+    r.append(check("h", "the tests job runs on credit, on trust earned from audits",
+                   "DECISION: RUN_ON_CREDIT" in flat, flat[:400]))
+    r.append(check("h", "step 2 (plan) executed", "STEP 2: plan" in flat, flat[:300]))
+
+    # step 3 goes through the forge_test gate
+    cli("pay", job_id, "2")          # settle the credit step
+    cli("pay", job_id, "3")
+    _, flat = cli("job", "run", job_id)
+    r.append(check("h", "step 3 ran as paid work", "DECISION: RUN_PAID" in flat, flat[:300]))
+    r.append(check("h", "step 3 (tests) executed", "STEP 3: tests" in flat, flat[:300]))
+    r.append(check("h", "the CLI panel reports the run", "TESTS:" in flat and "passed" in flat, flat[:600]))
+
+    entity = store().get_job_entity(job_id)
+    rec = entity.steps.get("3") if entity else None
+    r.append(check("h", "the suite compiled and ran", rec is not None and rec.compiles is True,
+                   f"compiles={getattr(rec, 'compiles', None)}: {getattr(rec, 'test_output', '')[:120]}"))
+    r.append(check("h", "at least 3 tests ran", rec is not None and (rec.tests_total or 0) >= 3,
+                   f"tests_total={getattr(rec, 'tests_total', None)}"))
+    r.append(check("h", "at least one test fails, documenting a real defect",
+                   rec is not None and (rec.tests_failed or 0) >= 1,
+                   f"tests_failed={getattr(rec, 'tests_failed', None)}"))
+    r.append(check("h", "a failing test is not a gate failure: the step was still delivered",
+                   rec is not None and bool(rec.output)))
+
+    cli("pay", job_id, "4")
+    _, flat = cli("job", "run", job_id)
+    r.append(check("h", "step 4 (report) executed and the job completed",
+                   "STEP 4: report" in flat and "COMPLETE" in flat, flat[:400]))
+
+    st = store()
+    tests_findings = st.get_findings("tests", state.contract_hash)
+    audit_findings = st.get_findings("audit", state.contract_hash)
+    r.append(check("h", "the tests work is cached under its own type",
+                   sorted(tests_findings.filled) == ["plan", "report", "scope", "tests"],
+                   f"tests slots={tests_findings.filled}"))
+    r.append(check("h", "the audit's cached work is untouched by it",
+                   sorted(audit_findings.filled) == ["findings", "patch", "scope", "verify"],
+                   f"audit slots={audit_findings.filled}"))
+    r.append(check("h", "cost history is kept per type",
+                   st.get_step_cost("tests", 3).runs >= 1 and st.get_step_cost("audit", 3).runs >= 1,
+                   f"tests/3 runs={st.get_step_cost('tests',3).runs}, audit/3 runs={st.get_step_cost('audit',3).runs}"))
+    ledger = st.get_buyer(BUYER)
+    r.append(check("h", "one shared ledger across services: no new default",
+                   ledger.defaults == 1 and not ledger.outstanding,
+                   f"defaults={ledger.defaults}, outstanding={len(ledger.outstanding)}"))
+    beat_result("h", "a second service on the same engine, memory and ledger", r)
+    notes.append(f"beat h RUN_ON_CREDIT line (trust across services):\n    {line}")
+    return job_id
+
+
+def beat_i(prior_jobs: set[str]) -> str:
+    print("BEAT i: DELETE TEST. Wipe the database and watch the agent forget")
     for suffix in ("", "-wal", "-shm"):
         target = Path(str(DB_PATH) + suffix)
         if target.exists():
@@ -340,20 +445,20 @@ def beat_h(prior_jobs: set[str]) -> str:
     new_job = only_job_id()
     ledger = store().get_buyer(BUYER)
     r = [
-        check("h", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
-        check("h", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
-        check("h", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
-        check("h", "step 2 is invoiced at 0.50 USDC again",
+        check("i", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
+        check("i", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
+        check("i", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
+        check("i", "step 2 is invoiced at 0.50 USDC again",
               "step 2 (findings)" in flat and "amount 0.50 USDC" in flat, flat[:500]),
-        check("h", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
+        check("i", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
               f"trust_tier={ledger.trust_tier}"),
-        check("h", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
+        check("i", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
               f"paid_steps={ledger.paid_steps}, completed_paid_jobs={ledger.completed_paid_jobs}"),
     ]
-    beat_result("h", "memory deleted, buyer treated as a stranger", r)
+    beat_result("i", "memory deleted, buyer treated as a stranger", r)
     if all(r):
         print("DOUBLE CHARGE REPRODUCED: memory deleted, buyer re-invoiced 0.50 for paid work\n")
-    notes.append(f"beat h DECISION line:\n    {line}")
+    notes.append(f"beat i DECISION line:\n    {line}")
     return line
 
 
@@ -371,9 +476,11 @@ def main() -> int:
     seen.update(beat_e())
     credit_job, _ = beat_f()
     seen.add(credit_job)
-    seen.add(beat_g(credit_job))
+    sixth = beat_g(credit_job)
+    seen.add(sixth)
+    seen.add(beat_h(sixth))
     seen.update(store().get_active_jobs())
-    beat_h(seen)
+    beat_i(seen)
 
     print("-" * 72)
     for note in notes:
@@ -384,7 +491,7 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: PASS — all 8 beats passed")
+    print("RESULT: PASS — all 9 beats passed")
     return 0
 
 

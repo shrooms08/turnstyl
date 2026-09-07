@@ -109,7 +109,7 @@ def main(argv: list[str]) -> int:
         )
 
     memo = memo_bytes32(job_id, step)
-    print(f"job {job_id} step {step} ({S.STEP_NAMES.get(step, '?')})")
+    print(f"job {job_id} step {step}")
     print(f"amount   {amount_usdc:.2f} USDC ({amount_units} base units)")
     print(f"memo     0x{memo.hex()}")
     print(f"receipts {receipts}")

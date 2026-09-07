@@ -236,15 +236,28 @@ class TurnstylStore:
 
     # ---------------- pricing rules (REFERENCE) ----------------
     def ensure_pricing_rules(self) -> S.PricingRules:
-        """Write the pricing rules once, on first run; return what memory holds."""
-        record = self.memory.get_reference(S.REF_PRICING_RULES)
-        if record is None:
-            rules = S.PricingRules()
-            self.memory.set_reference(S.REF_PRICING_RULES, rules.model_dump())
-            return rules
-        import json
+        """Write the pricing rules on first run, and again when a new service
+        ships. Prices are the offer; they belong on the record, not only in the
+        code, and a type added later must not leave the record stale."""
+        from . import jobtypes
 
-        return S.PricingRules.model_validate(json.loads(record["body"]))
+        current = {
+            t.id: {str(n): p for n, p in t.base_prices.items()}
+            for t in jobtypes.all_types()
+        }
+        record = self.memory.get_reference(S.REF_PRICING_RULES)
+        if record is not None:
+            import json
+
+            try:
+                stored = S.PricingRules.model_validate(json.loads(record["body"]))
+            except Exception:
+                stored = None                      # shape drifted: rewrite it
+            if stored is not None and stored.base_prices == current:
+                return stored
+        rules = S.PricingRules(base_prices=current)
+        self.memory.set_reference(S.REF_PRICING_RULES, rules.model_dump())
+        return rules
 
     # ---------------- contract source (REFERENCE) ----------------
     def put_contract_source(self, contract_hash: str, text: str) -> None:
@@ -333,34 +346,57 @@ class TurnstylStore:
         self.memory.archive_entity(S.CAT_JOB, job_id, reason)
         return True
 
-    # ---------------- step cost (WARM) ----------------
-    def get_step_cost(self, step: int) -> S.StepCost:
-        row = self.memory.get_entity(S.CAT_STEP_COST, str(step))
+    # ---------------- step cost (WARM), per job type ----------------
+    def _legacy_row(self, category: str, job_type: str, bare: str):
+        """An untyped row, readable only for the type that predates namespacing."""
+        if job_type != S.DEFAULT_JOB_TYPE:
+            return None
+        return self.memory.get_entity(category, bare)
+
+    def get_step_cost(self, job_type: str, step: int) -> S.StepCost:
+        row = self.memory.get_entity(
+            S.CAT_STEP_COST, S.step_cost_name(job_type, step)
+        ) or self._legacy_row(S.CAT_STEP_COST, job_type, str(step))
         if row is None:
             return S.StepCost()
         return S.StepCost.model_validate(row["body"])
 
-    def record_step_cost(self, step: int, tokens: int, seconds: float) -> S.StepCost:
-        """Fold one real execution into the rolling averages for this step."""
-        current = self.get_step_cost(step)
+    def record_step_cost(
+        self, job_type: str, step: int, tokens: int, seconds: float
+    ) -> S.StepCost:
+        """Fold one real execution into the rolling averages for this step.
+
+        Reads may fall back to an untyped row; writes always go to the
+        namespaced name, so nothing is migrated and nothing is lost.
+        """
+        current = self.get_step_cost(job_type, step)
         runs = current.runs + 1
         updated = S.StepCost(
             runs=runs,
             avg_tokens=(current.avg_tokens * current.runs + tokens) / runs,
             avg_seconds=(current.avg_seconds * current.runs + seconds) / runs,
         )
-        self.memory.set_entity(S.CAT_STEP_COST, str(step), updated.model_dump())
+        self.memory.set_entity(
+            S.CAT_STEP_COST, S.step_cost_name(job_type, step), updated.model_dump()
+        )
         return updated
 
-    # ---------------- findings (WARM) ----------------
-    def get_findings(self, contract_hash: str) -> S.FindingsEntity:
-        row = self.memory.get_entity(S.CAT_FINDINGS, contract_hash)
+    # ---------------- findings (WARM), per job type ----------------
+    def get_findings(self, job_type: str, contract_hash: str) -> S.FindingsEntity:
+        row = self.memory.get_entity(
+            S.CAT_FINDINGS, S.findings_name(job_type, contract_hash)
+        ) or self._legacy_row(S.CAT_FINDINGS, job_type, contract_hash)
         if row is None:
             return S.FindingsEntity()
-        return S.FindingsEntity.model_validate(row["body"])
+        return S.FindingsEntity.from_body(row["body"])
 
-    def findings_exist(self, contract_hash: str) -> bool:
-        return self.memory.get_entity(S.CAT_FINDINGS, contract_hash) is not None
+    def findings_exist(self, job_type: str, contract_hash: str) -> bool:
+        return (
+            self.memory.get_entity(
+                S.CAT_FINDINGS, S.findings_name(job_type, contract_hash)
+            )
+            or self._legacy_row(S.CAT_FINDINGS, job_type, contract_hash)
+        ) is not None
 
     def search_findings(self, query: str, *, limit: int = 3) -> list[dict[str, Any]]:
         """FTS5 over stored findings. Used for the "seen this before" hint.
@@ -375,10 +411,12 @@ class TurnstylStore:
         )
 
     def put_findings(
-        self, contract_hash: str, findings: S.FindingsEntity
+        self, job_type: str, contract_hash: str, findings: S.FindingsEntity
     ) -> S.FindingsEntity:
         self.memory.set_entity(
-            S.CAT_FINDINGS, contract_hash, findings.model_dump()
+            S.CAT_FINDINGS,
+            S.findings_name(job_type, contract_hash),
+            findings.model_dump(),
         )
         return findings
 

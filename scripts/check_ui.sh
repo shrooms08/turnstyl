@@ -274,6 +274,16 @@ has "timeline: summary from extra"    "e.extra.summary"
 has "timeline: fallback to first acted line" "e.acted[0]"
 has "timeline: details collapsed by default" "S.memTouched[key] || false"
 has "timeline: details disclosure"    "<summary>details<span"
+has "job type picker"                 'id="typePicker"'
+has "picker reads the API's job types" "function jobTypes("
+has "per-type step prices in the picker" "sp.base_price_usdc"
+has "new job panel, not new audit"    "<h3>new job</h3>"
+has "submit sends the chosen type"    "job_type:S.jobType"
+has "job page shows the service"      'class="k">service</div>'
+has "step card shows the test run"    "TESTS "
+has "step card: tests compile label"  "TESTS COMPILE "
+JT=$(curl -s "$BASE/api/job_types" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);print(len(d.get('job_types') or []), d.get('default'))" 2>/dev/null)
+[ "$JT" = "2 audit" ] && ok "GET /api/job_types returns both services" || bad "GET /api/job_types" "got: $JT"
 has "download report button"          'id="downloadReportBtn"'
 has "report link hits report.md"      '/report.md'
 has "verify all button"               'id="verifyAllBtn"'

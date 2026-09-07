@@ -13,11 +13,14 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import jobtypes
 from . import policy
 from . import schema as S
+from .jobtypes import GATE_COMPILE, GATE_FORGE_TEST, JobType
 from .llm import Usage as LLMUsage
 from .llm import mechanical_block as llm_mechanical_block
 from .llm import run_step as llm_run_step
+from .llm import test_mechanical_block as llm_test_mechanical_block
 from .memory import TurnstylMemory, TurnstylStore
 from .payments import PaymentBackend, get_backend
 
@@ -39,6 +42,7 @@ class Outcome:
 
     job_id: str
     status: str
+    job_type: str = S.DEFAULT_JOB_TYPE
     step: int | None = None
     step_name: str | None = None
     decision: str | None = None
@@ -53,6 +57,9 @@ class Outcome:
     price_reason: str = ""
     diff_applies: bool | None = None
     compiles: bool | None = None
+    tests_total: int | None = None
+    tests_passed: int | None = None
+    tests_failed: int | None = None
     memory_hints: list[str] = field(default_factory=list)
     commit_tx: str | None = None
     commit_hash: str | None = None
@@ -65,7 +72,18 @@ class Outcome:
 
 
 class Engine:
-    """One audit job at a time, resumable from memory at any point."""
+    """One job at a time, of any type, resumable from memory at any point.
+
+    What the steps are called, what they cost, what the model is told and what
+    gate their answer goes through is the job type's spec. Everything here is
+    shared across types: the resume, the pricing multipliers, the credit rules,
+    the invoice, the on-chain commit, and the journal.
+    """
+
+    @staticmethod
+    def spec_for(state: S.JobState) -> JobType:
+        """The job's type spec. An untyped row is an audit, which is what it was."""
+        return jobtypes.get(state.job_type)
 
     def __init__(
         self,
@@ -81,8 +99,10 @@ class Engine:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def new_job(self, contract_path: str | Path, buyer: str) -> Outcome:
-        """Start an audit from a .sol file, or resume the one already open."""
+    def new_job(
+        self, contract_path: str | Path, buyer: str, job_type: str | None = None
+    ) -> Outcome:
+        """Start a job from a .sol file, or resume the one already open."""
         path = Path(contract_path)
         if not path.is_file():
             raise RuntimeError(
@@ -92,12 +112,19 @@ class Engine:
         contract_text = path.read_text(encoding="utf-8")
         if not contract_text.strip():
             raise RuntimeError(f"turnstyl: contract file {path} is empty.")
-        return self.new_job_from_source(contract_text, buyer, filename=path.name)
+        return self.new_job_from_source(
+            contract_text, buyer, filename=path.name, job_type=job_type
+        )
 
     def new_job_from_source(
-        self, contract_text: str, buyer: str, *, filename: str = "contract.sol"
+        self,
+        contract_text: str,
+        buyer: str,
+        *,
+        filename: str = "contract.sol",
+        job_type: str | None = None,
     ) -> Outcome:
-        """Start an audit from contract text, or resume the one already open.
+        """Start a job from contract text, or resume the one already open.
 
         The path form above is a thin wrapper over this: the API hands in the
         text it was posted, the CLI hands in what it read from disk, and from
@@ -105,6 +132,10 @@ class Engine:
         """
         if not contract_text.strip():
             raise RuntimeError("turnstyl: the contract source is empty.")
+        try:
+            spec = jobtypes.get(job_type)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
         contract_hash = S.sha256_text(contract_text)
         buyer_key = self.store.buyer_key(buyer)
 
@@ -113,7 +144,7 @@ class Engine:
         read: list[str] = [S.STATE_ACTIVE_JOBS]
         if hints:
             read.append(f"fts5 findings/* for {filename} function names")
-        existing = self._find_open_job(buyer_key, contract_hash, read)
+        existing = self._find_open_job(buyer_key, contract_hash, spec.id, read)
         if existing is not None:
             resume_summary = (
                 f"Picked up the open job for this contract at step "
@@ -144,9 +175,10 @@ class Engine:
             return Outcome(
                 job_id=existing.job_id,
                 status=existing.status,
+                job_type=existing.job_type,
                 summary=resume_summary,
                 step=existing.current_step,
-                step_name=S.STEP_NAMES.get(existing.current_step),
+                step_name=spec.step_name(existing.current_step),
                 decision="RESUME_EXISTING",
                 reason=(
                     f"an open job for this buyer and contract_hash "
@@ -167,12 +199,16 @@ class Engine:
             job_id=job_id,
             buyer=buyer_key,
             contract_hash=contract_hash,
-            current_step=S.FIRST_STEP,
+            job_type=spec.id,
+            current_step=spec.first_step,
             status=S.STATUS_NEW,
         )
         self.store.put_job_state(state)
         self.store.put_job_entity(
-            job_id, S.JobEntity(buyer=buyer_key, contract_hash=contract_hash)
+            job_id,
+            S.JobEntity(
+                buyer=buyer_key, contract_hash=contract_hash, job_type=spec.id
+            ),
         )
         self.store.add_active_job(job_id)
         # The source itself goes to memory, so any later process can run a step
@@ -187,7 +223,7 @@ class Engine:
 
         outcome = self._advance(
             state, contract_text, extra_reads=read,
-            hint_note="Prior findings for this contract are in memory." if hints else "",
+            hint_note="Prior work on this contract is in memory." if hints else "",
         )
         outcome.reconciled = reconciled
         outcome.memory_hints = hints
@@ -203,6 +239,7 @@ class Engine:
                 f"  Run 'turnstyl status' to list the jobs this database knows about."
             )
 
+        spec = self.spec_for(state)
         if state.status == S.STATUS_COMPLETE:
             self.store.journal(
                 S.JournalEntry(
@@ -225,12 +262,13 @@ class Engine:
             return Outcome(
                 job_id=job_id,
                 status=state.status,
+                job_type=state.job_type,
                 summary="Nothing to do: this job is already complete.",
                 step=state.current_step,
                 decision="ALREADY_COMPLETE",
                 reason=(
                     f"{S.job_state_key(job_id)} says status=complete; all "
-                    f"{S.LAST_STEP} steps are recorded and the job entity is archived"
+                    f"{spec.last_step} steps are recorded and the job entity is archived"
                 ),
                 memory_read=_dedupe(read),
                 complete=True,
@@ -262,7 +300,9 @@ class Engine:
             return ("SKIP_ALREADY_DONE", "step already recorded", None, state)
         self._sync_invoice(state, [])
         ledger = self.store.get_buyer(state.buyer)
-        decision, reason = policy.decide(state.current_step, ledger, state)
+        decision, reason = policy.decide(
+            state.current_step, ledger, state, self.spec_for(state)
+        )
         inv = state.open_invoice
         signature = (inv.step, inv.paid, inv.amount_usdc) if inv is not None else None
         return decision, reason, signature, state
@@ -274,9 +314,11 @@ class Engine:
             raise RuntimeError(
                 f"turnstyl: no job {job_id!r} in memory at {self.store.db_path}."
             )
-        if step not in S.ALL_STEPS:
+        spec = self.spec_for(state)
+        if step not in spec.all_steps:
             raise RuntimeError(
-                f"turnstyl: step must be one of {list(S.ALL_STEPS)}, got {step!r}."
+                f"turnstyl: job {job_id} is a {spec.id} job; step must be one of "
+                f"{list(spec.all_steps)}, got {step!r}."
             )
         resolved = self.payments.mark_paid(job_id, step, tx_hash)
         # Reflect it in the job state immediately so a reader of the state
@@ -305,6 +347,7 @@ class Engine:
                     "status": state.status,
                     "current_step": state.current_step,
                     "contract_hash": state.contract_hash,
+                    "job_type": state.job_type,
                     "open_invoice": state.open_invoice,
                     "steps_recorded": sorted(entity.steps) if entity else [],
                     "archived": entity is None,
@@ -359,12 +402,15 @@ class Engine:
             return []  # a hint is never worth failing a job over
         hints = []
         for row in hits:
-            body = row.get("body") or {}
-            slots = [k for k in S.STEP_SLOTS.values() if body.get(k)]
-            same = " (this contract)" if row.get("name") == contract_hash else ""
+            name = str(row.get("name") or "")
+            # "<type>/<hash>", or a bare hash on a row written before job types
+            job_type, _, digest = name.rpartition("/")
+            job_type = job_type or S.DEFAULT_JOB_TYPE
+            filled = S.FindingsEntity.from_body(row.get("body") or {}).filled
+            same = " (this contract)" if digest == contract_hash else ""
             hints.append(
-                f"prior findings for contract {str(row.get('name'))[:12]}{same} "
-                f"hold {', '.join(slots) or 'nothing yet'}"
+                f"prior {job_type} work on contract {digest[:12]}{same} "
+                f"holds {', '.join(filled) or 'nothing yet'}"
             )
         return hints
 
@@ -399,7 +445,7 @@ class Engine:
             return []
 
     def _find_open_job(
-        self, buyer_key: str, contract_hash: str, read: list[str]
+        self, buyer_key: str, contract_hash: str, job_type: str, read: list[str]
     ) -> S.JobState | None:
         for job_id in self.store.get_active_jobs():
             state = self.store.get_job_state(job_id)
@@ -409,6 +455,7 @@ class Engine:
             if (
                 state.buyer == buyer_key
                 and state.contract_hash == contract_hash
+                and state.job_type == job_type
                 and state.status != S.STATUS_COMPLETE
             ):
                 return state
@@ -434,6 +481,7 @@ class Engine:
         """Decide and act on exactly one step. Writes exactly one journal event."""
         job_id = state.job_id
         step = state.current_step
+        spec = self.spec_for(state)
         read = list(extra_reads)
 
         entity = self.store.get_job_entity(job_id)
@@ -450,13 +498,13 @@ class Engine:
         if str(step) in entity.steps:
             done = entity.steps[str(step)]
             skip_acted = [f"skipped step {step}; it is already recorded"]
-            if step >= S.LAST_STEP:
+            if step >= spec.last_step:
                 # Crash between the last step's write and the completion write:
-                # finish closing the job rather than advancing past step 4.
+                # finish closing the job rather than advancing past the last step.
                 state.status = S.STATUS_COMPLETE
-                state.current_step = S.LAST_STEP
+                state.current_step = spec.last_step
                 ledger = self.store.get_buyer(state.buyer)
-                closing = self._complete(state, entity, ledger, skip_acted)
+                closing = self._complete(state, spec, entity, ledger, skip_acted)
                 ledger.trust_tier = policy.recompute_trust_tier(ledger)
                 self.store.put_buyer(state.buyer, ledger)
                 skip_summary = f"Step {step} was already done; skipped it. {closing}"
@@ -490,8 +538,9 @@ class Engine:
             return Outcome(
                 job_id=job_id,
                 status=state.status,
+                job_type=state.job_type,
                 step=step,
-                step_name=S.STEP_NAMES.get(step),
+                step_name=spec.step_name(step),
                 decision="SKIP_ALREADY_DONE",
                 summary=skip_summary,
                 reason=(
@@ -516,10 +565,14 @@ class Engine:
         ledger = self.store.get_buyer(buyer_key)
         read.append(f"entity buyer/{buyer_key}")
 
-        decision, reason = policy.decide(step, ledger, state)
+        decision, reason = policy.decide(step, ledger, state, spec)
 
         if decision in (S.WAIT_FOR_PAYMENT, S.REFUSE):
-            amount = state.open_invoice.amount_usdc if state.open_invoice else S.BASE_PRICES.get(step, 0.0)
+            amount = (
+                state.open_invoice.amount_usdc
+                if state.open_invoice
+                else spec.step(step).base_price_usdc
+            )
             if decision == S.REFUSE:
                 owed = ledger.outstanding[0] if ledger.outstanding else None
                 hold_summary = (
@@ -571,9 +624,10 @@ class Engine:
             return Outcome(
                 job_id=job_id,
                 status=state.status,
+                job_type=state.job_type,
                 summary=hold_summary,
                 step=step,
-                step_name=S.STEP_NAMES.get(step),
+                step_name=spec.step_name(step),
                 decision=decision,
                 reason=reason,
                 memory_read=_dedupe(read),
@@ -588,7 +642,10 @@ class Engine:
                 ),
             )
 
-        return self._execute(state, entity, ledger, step, decision, reason, contract_text, read, hint_note)
+        return self._execute(
+            state, spec, entity, ledger, step, decision, reason, contract_text,
+            read, hint_note,
+        )
 
     def _sync_invoice(self, state: S.JobState, read: list[str]) -> None:
         """Ask the backend whether the open invoice has been settled."""
@@ -605,6 +662,7 @@ class Engine:
     def _execute(
         self,
         state: S.JobState,
+        spec: JobType,
         entity: S.JobEntity,
         ledger: S.BuyerLedger,
         step: int,
@@ -615,24 +673,28 @@ class Engine:
         hint_note: str = "",
     ) -> Outcome:
         job_id = state.job_id
+        step_spec = spec.step(step)
+        step_name = step_spec.name
+        findings_key = S.findings_name(spec.id, state.contract_hash)
         evaluated = [
             f"entity buyer/{state.buyer} -> completed_paid_jobs={ledger.completed_paid_jobs}, "
             f"paid_steps={ledger.paid_steps}, "
             f"paid_usdc={ledger.paid_usdc:.2f}, open_invoices={ledger.open_invoices}, "
             f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}, "
             f"trust_tier={ledger.trust_tier}",
-            f"{S.job_state_key(job_id)} -> current_step={step}, status={state.status}",
+            f"{S.job_state_key(job_id)} -> current_step={step}, status={state.status}, "
+            f"job_type={spec.id}",
         ]
 
         state.status = S.STATUS_RUNNING
         self.store.put_job_state(state)
 
-        findings = self.store.get_findings(state.contract_hash)
-        read.append(f"entity findings/{state.contract_hash[:12]}...")
-        cached_output = findings.slot(step)
+        findings = self.store.get_findings(spec.id, state.contract_hash)
+        read.append(f"entity findings/{spec.id}/{state.contract_hash[:12]}...")
+        cached_output = findings.slot(step_name) if step_spec.cacheable else None
         evaluated.append(
-            f"entity findings/{state.contract_hash[:12]}... -> step {step} "
-            f"({S.STEP_SLOTS[step]}) {'is cached' if cached_output else 'is not cached'}"
+            f"entity findings/{spec.id}/{state.contract_hash[:12]}... -> step {step} "
+            f"({step_name}) {'is cached' if cached_output else 'is not cached'}"
         )
 
         started = time.monotonic()
@@ -644,7 +706,8 @@ class Engine:
             text = contract_text or self._require_contract_text(state)
             prior = {int(k): v.output for k, v in entity.steps.items()}
             result = llm_run_step(
-                step, text, prior, mechanical=self._mechanical_for(step, entity)
+                spec, step, text, prior,
+                mechanical=self._mechanical_for(spec, step, entity),
             )
             output, usage, diff_applies = (
                 result.output,
@@ -659,8 +722,8 @@ class Engine:
         if invoice is not None and invoice.step == step:
             price_usdc = invoice.amount_usdc
         else:
-            step_cost = self.store.get_step_cost(step)
-            price_usdc, _ = policy.price(step, ledger, step_cost, cached)
+            step_cost = self.store.get_step_cost(spec.id, step)
+            price_usdc, _ = policy.price(step_spec, ledger, step_cost, cached)
 
         record = S.StepRecord(
             output=output,
@@ -678,6 +741,10 @@ class Engine:
             generated_diff=result.generated_diff if result else None,
             compiles=result.compiles if result else None,
             compiler_output=result.compiler_output if result else None,
+            tests_total=result.tests_total if result else None,
+            tests_passed=result.tests_passed if result else None,
+            tests_failed=result.tests_failed if result else None,
+            test_output=result.test_output if result else None,
         )
         entity.steps[str(step)] = record
         self.store.put_job_entity(job_id, entity)
@@ -701,15 +768,22 @@ class Engine:
                 self.store.put_job_entity(job_id, entity)
 
         acted = [
-            f"{decision} step {step} ({S.STEP_NAMES[step]}) "
+            f"{decision} step {step} ({step_name}) "
             f"{'from memory (cached, no model call)' if cached else 'via the model'}; "
             f"output_sha256={record.output_sha256[:12]}..., tokens={tokens}, "
             f"seconds={seconds}"
         ]
 
-        if record.compiles is not None:
+        if record.tests_total is not None:
             acted.append(
-                f"mechanical check: the patched contract "
+                f"mechanical check: the suite compiled and ran; "
+                f"{record.tests_passed} passed, {record.tests_failed} failed, "
+                f"{record.tests_total} total"
+            )
+        elif record.compiles is not None:
+            noun = "test suite" if step_spec.gate == GATE_FORGE_TEST else "patched contract"
+            acted.append(
+                f"mechanical check: the {noun} "
                 f"{'compiles' if record.compiles else 'DOES NOT COMPILE'}"
             )
         if commit_tx:
@@ -723,9 +797,9 @@ class Engine:
         # Rolling cost averages only reflect real executions; a cached serve
         # costs no tokens and must not drag the average that sets the price.
         if not cached:
-            updated_cost = self.store.record_step_cost(step, tokens, seconds)
+            updated_cost = self.store.record_step_cost(spec.id, step, tokens, seconds)
             acted.append(
-                f"entity step_cost/{step} -> runs={updated_cost.runs}, "
+                f"entity step_cost/{spec.id}/{step} -> runs={updated_cost.runs}, "
                 f"avg_tokens={updated_cost.avg_tokens:.0f}, "
                 f"avg_seconds={updated_cost.avg_seconds:.2f}"
             )
@@ -768,15 +842,15 @@ class Engine:
         price_reason = ""
         complete = False
         closing = ""
-        if step >= S.LAST_STEP:
+        if step >= spec.last_step:
             complete = True
-            state.current_step = S.LAST_STEP
+            state.current_step = spec.last_step
             state.status = S.STATUS_COMPLETE
-            closing = self._complete(state, entity, ledger, acted)
+            closing = self._complete(state, spec, entity, ledger, acted)
         else:
             next_step = step + 1
             next_invoice, price_reason = self._issue_invoice(
-                state, next_step, ledger, evaluated, read
+                state, spec, next_step, ledger, evaluated, read
             )
             state.status = S.STATUS_AWAITING_PAYMENT
 
@@ -786,8 +860,8 @@ class Engine:
         self.store.put_job_state(state)
 
         forward = (
-            [f"job {job_id} is complete; findings cached under contract_hash "
-             f"{state.contract_hash[:12]}..."]
+            [f"job {job_id} is complete; {spec.id} work cached under "
+             f"{findings_key[:24]}..."]
             if complete
             else [
                 f"await {next_invoice.amount_usdc:.2f} USDC for step "
@@ -797,7 +871,7 @@ class Engine:
         # The decision as one plain sentence, written here with everything the
         # sentence needs still in scope. The evaluated / acted / forward lists
         # above stay exactly as they are; this is the readable line above them.
-        name = S.STEP_NAMES[step]
+        name = step_name
         if decision == S.RUN_PAID:
             summary = f"Ran step {step} ({name}) because the {price_usdc:.2f} USDC invoice was paid."
         elif decision == S.RUN_ON_CREDIT:
@@ -814,8 +888,24 @@ class Engine:
                 summary += " " + hint_note
         if cached:
             summary += " Served from memory, no model call."
-        if step == S.STEP_PATCH and record.compiles is not None:
-            summary += " The patched contract compiles." if record.compiles else " The patched contract does not compile."
+        if record.tests_total is not None:
+            summary += (
+                f" The suite ran: {record.tests_passed} of {record.tests_total} "
+                f"tests pass"
+                + (
+                    f", {record.tests_failed} fail."
+                    if record.tests_failed
+                    else "."
+                )
+            )
+        elif step_spec.gate == GATE_FORGE_TEST and record.compiles is False:
+            summary += " The test suite did not compile or could not be run."
+        elif step_spec.gate == GATE_COMPILE and record.compiles is not None:
+            summary += (
+                " The patched contract compiles."
+                if record.compiles
+                else " The patched contract does not compile."
+            )
         if commit_tx:
             summary += " Output committed on chain."
         if complete:
@@ -842,8 +932,9 @@ class Engine:
         return Outcome(
             job_id=job_id,
             status=state.status,
+            job_type=spec.id,
             step=step,
-            step_name=S.STEP_NAMES[step],
+            step_name=step_name,
             decision=decision,
             reason=reason,
             summary=summary,
@@ -855,6 +946,9 @@ class Engine:
             seconds=seconds,
             diff_applies=diff_applies,
             compiles=record.compiles,
+            tests_total=record.tests_total,
+            tests_passed=record.tests_passed,
+            tests_failed=record.tests_failed,
             invoice=next_invoice,
             price_reason=price_reason,
             commit_tx=commit_tx,
@@ -862,25 +956,29 @@ class Engine:
             commit_error=commit_error,
             complete=complete,
             note=(
-                f"Job {job_id} complete. All {S.LAST_STEP} outputs cached under this "
-                f"contract hash."
+                f"Job {job_id} complete. All {spec.last_step} outputs cached under "
+                f"{spec.id} for this contract hash."
                 if complete
                 else ""
             ),
         )
 
-    def _mechanical_for(self, step: int, entity: S.JobEntity) -> str:
-        """What the verifier is told about the checks already run.
+    def _mechanical_for(self, spec: JobType, step: int, entity: S.JobEntity) -> str:
+        """What a later step is told about the gate an earlier one went through.
 
-        Only step 4 gets one, and only from the patch step's recorded results —
-        the verifier judges a patch turnstyl has already diffed and compiled.
+        A step that follows a gated step judges an answer turnstyl has already
+        put through a tool, and it is told what the tool found. Nothing else
+        gets a block.
         """
-        if step != S.STEP_VERIFY:
+        gated = [x for x in spec.steps if x.gate != "none" and x.n < step]
+        if not gated:
             return ""
-        patch_record = entity.steps.get(str(S.STEP_PATCH))
-        if patch_record is None:
+        source = entity.steps.get(str(gated[-1].n))
+        if source is None:
             return ""
-        return llm_mechanical_block(patch_record.compiles, patch_record.compiler_output)
+        if gated[-1].gate == GATE_FORGE_TEST:
+            return llm_test_mechanical_block(source)
+        return llm_mechanical_block(source.compiles, source.compiler_output)
 
     def _require_contract_text(self, state: S.JobState) -> str:
         raise RuntimeError(
@@ -894,19 +992,21 @@ class Engine:
     def _issue_invoice(
         self,
         state: S.JobState,
+        spec: JobType,
         step: int,
         ledger: S.BuyerLedger,
         evaluated: list[str],
         read: list[str],
     ) -> tuple[S.OpenInvoice, str]:
         """Price the next step from memory and open an invoice for it."""
-        step_cost = self.store.get_step_cost(step)
-        read.append(f"entity step_cost/{step}")
-        findings = self.store.get_findings(state.contract_hash)
-        cached = findings.slot(step) is not None
-        amount, price_reason = policy.price(step, ledger, step_cost, cached)
+        step_spec = spec.step(step)
+        step_cost = self.store.get_step_cost(spec.id, step)
+        read.append(f"entity step_cost/{spec.id}/{step}")
+        findings = self.store.get_findings(spec.id, state.contract_hash)
+        cached = step_spec.cacheable and findings.slot(step_spec.name) is not None
+        amount, price_reason = policy.price(step_spec, ledger, step_cost, cached)
         evaluated.append(
-            f"entity step_cost/{step} -> runs={step_cost.runs}, "
+            f"entity step_cost/{spec.id}/{step} -> runs={step_cost.runs}, "
             f"avg_tokens={step_cost.avg_tokens:.0f}; priced step {step}: {price_reason}"
         )
         memo = self.payments.issue_invoice(state.job_id, step, amount, state.buyer)
@@ -923,19 +1023,22 @@ class Engine:
     def _complete(
         self,
         state: S.JobState,
+        spec: JobType,
         entity: S.JobEntity,
         ledger: S.BuyerLedger,
         acted: list[str],
     ) -> str:
         """Copy the outputs into the findings entity, archive the job, settle up.
         Returns the closing sentence for the decision summary."""
-        findings = self.store.get_findings(state.contract_hash)
+        findings = self.store.get_findings(spec.id, state.contract_hash)
         for step_str, record in entity.steps.items():
-            findings = findings.with_step(int(step_str), record.output)
-        self.store.put_findings(state.contract_hash, findings)
+            step_spec = spec.step(int(step_str))
+            if step_spec.cacheable:
+                findings = findings.with_step(step_spec.name, record.output)
+        self.store.put_findings(spec.id, state.contract_hash, findings)
         acted.append(
-            f"entity findings/{state.contract_hash[:12]}... -> filled "
-            f"{sorted(S.STEP_SLOTS[int(k)] for k in entity.steps)}"
+            f"entity findings/{spec.id}/{state.contract_hash[:12]}... -> filled "
+            f"{findings.filled}"
         )
 
         # A delivered-but-unpaid step on a job that is now closed stops being a
@@ -964,7 +1067,10 @@ class Engine:
                 f"entity buyer/{state.buyer} -> job closed fully paid; "
                 f"completed_paid_jobs={ledger.completed_paid_jobs}"
             )
-            closing = "Job complete, all steps paid. Findings cached for this contract."
+            closing = (
+                f"Job complete, all steps paid. The {spec.id} work is cached for "
+                f"this contract."
+            )
 
         if self.store.archive_job_entity(
             state.job_id, f"job complete, outputs cached under {state.contract_hash}"

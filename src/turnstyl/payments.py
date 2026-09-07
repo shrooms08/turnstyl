@@ -109,9 +109,18 @@ class PaymentBackend(ABC):
             ledger.paid_steps += 1
             ledger.consecutive_paid_since_default += 1
             ledger.paid_usdc = round(ledger.paid_usdc + item.amount_usdc, 2)
-            ledger.unpaid_from_prior_jobs = max(
-                0, ledger.unpaid_from_prior_jobs - 1
-            )
+            # The debt is counted in one of two places, and which one depends on
+            # whether the job it belongs to has closed: `_complete` moves a
+            # delivered-but-unpaid step out of open_invoices and into
+            # unpaid_from_prior_jobs. Decrementing the wrong one leaves a
+            # settled buyer permanently short of trusted.
+            item_state = store.get_job_state(item.job_id)
+            if item_state is not None and item_state.status == S.STATUS_COMPLETE:
+                ledger.unpaid_from_prior_jobs = max(
+                    0, ledger.unpaid_from_prior_jobs - 1
+                )
+            else:
+                ledger.open_invoices = max(0, ledger.open_invoices - 1)
 
         if not cleared:
             return []

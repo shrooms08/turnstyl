@@ -442,6 +442,16 @@ LOP=$(curl -s "${OPH[@]}" -o /dev/null -w "%{http_code}" "$BASE/api/jobs" 2>/dev
 curl -s "$BASE/api/jobs" 2>/dev/null | grep -q "the job list is an operator view" \
   && ok "the 403 says the job list is an operator view" || bad "job list 403 detail"
 
+# ---------------------------------------------------------------- untrusted source
+echo
+echo "untrusted source"
+hasapp "the job page has an untrusted-source panel" 'class="card warn"'
+hasapp "the panel says what the text tried to do" "text that tries to instruct the auditor"
+hasapp "the panel says the scan ran before any model" "before any model saw the file"
+hasapp "the panel lists line, rule and the matched text" 'class="ln">line '
+has   "the warning panel is styled"    ".warn{background:#0C0705"
+hasapp "a redacted flag says whose the passage is" "the passage is private to this job"
+
 # ---------------------------------------------------------------- public stats
 echo
 echo "public stats"

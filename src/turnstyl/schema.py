@@ -188,12 +188,30 @@ class OpenInvoice(_Model):
     price_reason: str = ""
 
 
+class InjectionFlag(_Model):
+    """One passage in the submitted source that reads like an instruction.
+
+    Produced by injection.scan before step 1 runs, so it is a fact about the
+    contract the buyer handed over, recorded once and never re-derived.
+    """
+
+    line: int
+    kind: str            # "comment" or "string"
+    rule: str            # which pattern fired
+    why: str             # why that pattern exists, in one phrase
+    text: str            # the passage, trimmed
+    matched: str = ""    # the part of it that matched
+
+
 class JobState(_Model):
     """HOT: state "job:<job_id>". The resume point."""
 
     job_id: str
     buyer: str
     contract_hash: str
+    # Instruction-like text found in the source before any model saw it. Empty
+    # for an ordinary contract.
+    injection_flags: list[InjectionFlag] = Field(default_factory=list)
     # Which service this job is. Absent on rows written before job types, and
     # those were all audits.
     job_type: str = DEFAULT_JOB_TYPE

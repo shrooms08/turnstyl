@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from . import injection
 from .jobtypes import GATE_COMPILE, GATE_FORGE_TEST, GATE_NONE, JobType
 from .schema import sha256_text
 
@@ -323,10 +324,21 @@ def _build_user_message(
     contract_text: str,
     prior_outputs: dict[int, str],
     mechanical: str = "",
+    injection_flags: list | None = None,
 ) -> str:
-    """The contract, plus whatever earlier steps produced."""
+    """The contract, plus whatever earlier steps produced.
+
+    The injection note goes in ahead of the contract so the model reads the
+    warning before the text it warns about.
+    """
     truncated = contract_text[:MAX_CONTRACT_CHARS]
-    parts = [f"CONTRACT:\n{truncated}"]
+    parts = []
+    note = injection.prompt_note(
+        injection_flags or [], findings_step=job_type.step_name(step) == "findings"
+    )
+    if note:
+        parts.append(note)
+    parts.append(f"CONTRACT:\n{truncated}")
     if len(contract_text) > MAX_CONTRACT_CHARS:
         # Loud, in-band, and visible to the model: never silently truncate.
         parts.append(
@@ -352,6 +364,7 @@ def run_step(
     contract_text: str,
     prior_outputs: dict[int, str] | None = None,
     mechanical: str = "",
+    injection_flags: list | None = None,
 ) -> StepResult:
     """Run one step of one job type.
 
@@ -373,7 +386,7 @@ def run_step(
             )
         output = job_type.mock(step, contract_text, prior_outputs)
         prompt = spec.system_prompt + _build_user_message(
-            job_type, step, contract_text, prior_outputs, mechanical
+            job_type, step, contract_text, prior_outputs, mechanical, injection_flags
         )
         usage = Usage(
             input_tokens=_estimate_tokens(prompt),
@@ -398,7 +411,7 @@ def run_step(
     model = os.environ.get("LLM_MODEL") or DEFAULT_MODEL
     client = anthropic.Anthropic(api_key=api_key)
     user_message = _build_user_message(
-        job_type, step, contract_text, prior_outputs, mechanical
+        job_type, step, contract_text, prior_outputs, mechanical, injection_flags
     )
     output, usage = _call_model(client, anthropic, spec, model, user_message)
 

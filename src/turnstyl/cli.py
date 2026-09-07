@@ -235,8 +235,38 @@ def render_reconciled(outcome_or_list) -> None:
         console.print(Text(explorer_tx(item["tx_hash"]), style="dim"))
 
 
+def render_injection(outcome: Outcome, engine: Engine | None = None) -> None:
+    """Say it before anything else if the source tried to instruct the auditor."""
+    if engine is None or not outcome.job_id:
+        return
+    state = engine.store.get_job_state(outcome.job_id)
+    flags = list(state.injection_flags) if state else []
+    if not flags:
+        return
+    lines = [
+        "This contract contains text that tries to instruct the auditor. Found "
+        "by a mechanical scan of its comments and strings before any model saw "
+        "it, recorded on the job, and handed to the audit as evidence.",
+        "",
+    ]
+    for flag in flags[:8]:
+        lines.append(f"line {flag.line:>4}  {flag.rule:<20} {flag.matched or flag.text[:70]}")
+    if len(flags) > 8:
+        lines.append(f"... and {len(flags) - 8} more")
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=f"UNTRUSTED SOURCE: {len(flags)} flagged passage(s)",
+            border_style="red",
+            padding=(1, 2),
+            width=panel_width(),
+        )
+    )
+
+
 def render_outcome(outcome: Outcome, engine: Engine | None = None) -> None:
     render_reconciled(outcome)
+    render_injection(outcome, engine)
     for hint in outcome.memory_hints:
         console.print(Text(f"memory hint: {hint}", style="dim"))
     render_step(outcome)

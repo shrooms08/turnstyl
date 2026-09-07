@@ -23,11 +23,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from turnstyl import jobtypes  # noqa: E402
+from turnstyl import injection  # noqa: E402
 from turnstyl import schema as S  # noqa: E402
 from turnstyl.memory import TurnstylMemory, TurnstylStore  # noqa: E402
 
 BUYER = "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8"
 CONTRACT = REPO_ROOT / "examples" / "Vault.sol"
+ADVERSARIAL = REPO_ROOT / "examples" / "Adversarial.sol"
 
 BOX_CHARS = "│┃|╭╮╰╯─━┌┐└┘═║╔╗╚╝┏┓┗┛┡┩╇┳┻╋┠┨"
 _BOX_RE = re.compile(f"[{re.escape(BOX_CHARS)}]")
@@ -431,8 +433,56 @@ def beat_h(credit_job: str) -> str:
     return job_id
 
 
-def beat_i(prior_jobs: set[str]) -> str:
-    print("BEAT i: DELETE TEST. Wipe the database and watch the agent forget")
+def beat_i() -> None:
+    """An untrusted source. The scan runs before any model does."""
+    print("BEAT i: UNTRUSTED SOURCE. A contract whose comments try to instruct the auditor")
+    r: list[bool] = []
+    raw, flat = cli("job", "new", str(ADVERSARIAL), "--buyer", BUYER)
+    # Other jobs are still open by now, so this one is found by its source hash
+    # rather than by being the only one.
+    adv_hash = S.sha256_text(ADVERSARIAL.read_text(encoding="utf-8"))
+    st = store()
+    job_id = next(
+        (j for j in st.get_active_jobs()
+         if (st.get_job_state(j) or None) and st.get_job_state(j).contract_hash == adv_hash),
+        "",
+    )
+    if not job_id:
+        raise SystemExit("turnstyl demo: the adversarial job was not created")
+    state = st.get_job_state(job_id)
+    flags = list(state.injection_flags) if state else []
+    rules = sorted({f.rule for f in flags})
+
+    r.append(check("i", "the flags are recorded on the job state", len(flags) >= 6,
+                   f"{len(flags)} flag(s): {rules}"))
+    r.append(check("i", "every rule class fires on this contract",
+                   set(rules) >= {"ignore-instructions", "suppress-findings", "role-assertion",
+                                  "chat-role-marker", "addresses-the-model"},
+                   f"rules={rules}"))
+    r.append(check("i", "the flags carry line numbers and the matched text",
+                   all(f.line > 0 and f.matched for f in flags),
+                   str([(f.line, f.matched) for f in flags[:3]])))
+    r.append(check("i", "the CLI shows the warning", "UNTRUSTED SOURCE" in flat and
+                   "text that tries to instruct the auditor" in flat, flat[:300]))
+    r.append(check("i", "the journal records one line for the scan",
+                   any((e.get("extra") or {}).get("decision") == "FLAGGED_UNTRUSTED_SOURCE"
+                       for e in store().read_journal(limit=40))))
+    r.append(check("i", "step 1 still ran and the job is priced as usual",
+                   "STEP 1: scope" in flat and "amount 0.50 USDC" in flat, flat[:400]))
+
+    # a clean contract of the same shape produces no flags at all
+    r.append(check("i", "the scan is quiet on the ordinary sample contract",
+                   not injection.scan(CONTRACT.read_text(encoding="utf-8")),
+                   str(injection.scan(CONTRACT.read_text(encoding="utf-8"))[:2])))
+    beat_result("i", "instruction-like text found, recorded and shown, never followed", r)
+    notes.append(
+        f"beat i: {len(flags)} flagged passage(s) on lines "
+        f"{sorted({f.line for f in flags})}, rules {rules}"
+    )
+
+
+def beat_j(prior_jobs: set[str]) -> str:
+    print("BEAT j: DELETE TEST. Wipe the database and watch the agent forget")
     for suffix in ("", "-wal", "-shm"):
         target = Path(str(DB_PATH) + suffix)
         if target.exists():
@@ -445,20 +495,20 @@ def beat_i(prior_jobs: set[str]) -> str:
     new_job = only_job_id()
     ledger = store().get_buyer(BUYER)
     r = [
-        check("i", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
-        check("i", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
-        check("i", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
-        check("i", "step 2 is invoiced at 0.50 USDC again",
+        check("j", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
+        check("j", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
+        check("j", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
+        check("j", "step 2 is invoiced at 0.50 USDC again",
               "step 2 (findings)" in flat and "amount 0.50 USDC" in flat, flat[:500]),
-        check("i", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
+        check("j", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
               f"trust_tier={ledger.trust_tier}"),
-        check("i", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
+        check("j", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
               f"paid_steps={ledger.paid_steps}, completed_paid_jobs={ledger.completed_paid_jobs}"),
     ]
-    beat_result("i", "memory deleted, buyer treated as a stranger", r)
+    beat_result("j", "memory deleted, buyer treated as a stranger", r)
     if all(r):
         print("DOUBLE CHARGE REPRODUCED: memory deleted, buyer re-invoiced 0.50 for paid work\n")
-    notes.append(f"beat i DECISION line:\n    {line}")
+    notes.append(f"beat j DECISION line:\n    {line}")
     return line
 
 
@@ -480,7 +530,9 @@ def main() -> int:
     seen.add(sixth)
     seen.add(beat_h(sixth))
     seen.update(store().get_active_jobs())
-    beat_i(seen)
+    beat_i()
+    seen.update(store().get_active_jobs())
+    beat_j(seen)
 
     print("-" * 72)
     for note in notes:
@@ -491,7 +543,7 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: PASS — all 9 beats passed")
+    print("RESULT: PASS — all 10 beats passed")
     return 0
 
 

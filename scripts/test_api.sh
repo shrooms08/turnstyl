@@ -259,6 +259,23 @@ CB=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H "Authori
 CC=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs/$JOB4/pay")
 [ "$CC" = "401" ] && ok "simulate a payment without a session -> 401" || bad "simulate without a session -> 401" "got $CC"
 
+# ---------------------------------------------------------------- untrusted source
+# A contract whose comments try to instruct the auditor. The scan runs before
+# any model sees the file, and its hits ride on the job like any other fact.
+ADV=$($PY -c "import json;print(json.dumps(open('examples/Adversarial.sol').read()))")
+AR=$(curl -s "${AUTH[@]}" -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$ADV,\"filename\":\"Adversarial.sol\"}")
+AJOB=$(echo "$AR" | jq_ "d['job_id']")
+[ -n "$AJOB" ] && ok "the adversarial contract was accepted like any other: $AJOB" || bad "adversarial job created" "$(echo "$AR" | head -c 200)"
+AD=$(jget "/api/jobs/$AJOB")
+[ "$(echo "$AD" | jq_ "len(d['injection_flags']) >= 6")" = "True" ] && ok "the job carries the injection flags ($(echo "$AD" | jq_ "len(d['injection_flags'])") passages)" || bad "injection flags on the job" "$(echo "$AD" | jq_ "d['injection_flags']" | head -c 200)"
+[ "$(echo "$AD" | jq_ "sorted({f['rule'] for f in d['injection_flags']}) == ['addresses-the-model', 'approve-patch', 'chat-role-marker', 'ignore-instructions', 'role-assertion', 'suppress-findings']")" = "True" ] && ok "every rule class fired on it" || bad "injection rule classes" "$(echo "$AD" | jq_ "sorted({f['rule'] for f in d['injection_flags']})")"
+[ "$(echo "$AD" | jq_ "all(f['line'] > 0 and f['text'] and f['matched'] for f in d['injection_flags'])")" = "True" ] && ok "each flag carries a line number and the matched text" || bad "flag shape" "$(echo "$AD" | jq_ "d['injection_flags'][0]")"
+APUB=$(jpub "/api/jobs/$AJOB")
+[ "$(echo "$APUB" | jq_ "len(d['injection_flags']) >= 6, all(f['text'] is None for f in d['injection_flags']), all(f['line'] > 0 and f['rule'] for f in d['injection_flags'])")" = "True True True" ] && ok "a stranger sees that the source tried to instruct the auditor, not what it said" || bad "public injection flags" "$(echo "$APUB" | jq_ "d['injection_flags'][:2]")"
+[ "$(jget "/api/jobs/$JOB4" | jq_ "d['injection_flags']")" = "[]" ] && ok "an ordinary contract carries no flags" || bad "ordinary contract has no flags" "$(jget "/api/jobs/$JOB4" | jq_ "d['injection_flags']")"
+AJ=$(jget "/api/journal?job=$AJOB&limit=20")
+[ "$(echo "$AJ" | jq_ "any(e['decision']=='FLAGGED_UNTRUSTED_SOURCE' for e in d['events'])")" = "True" ] && ok "the journal records the scan as one decision" || bad "journal records the scan" "$(echo "$AJ" | jq_ "[e['decision'] for e in d['events']]")"
+
 # ---------------------------------------------------------------- outstanding on a closed job
 B=$(jget "/api/buyers/$BUYER")
 [ "$(echo "$B" | jq_ "len(d['outstanding']), d['outstanding'][0]['job_id'], d['outstanding'][0]['step']")" = "1 $JOB 2" ] && ok "ledger carries the credit step as outstanding" || bad "ledger carries the credit step as outstanding" "$(echo "$B" | jq_ "d['outstanding']")"
@@ -345,11 +362,11 @@ C=$(curl -s "${AUTH[@]}" -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs"
 
 # ---------------------------------------------------------------- buyer filter
 OTHER=0x000000000000000000000000000000000000dead
-[ "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs?buyer= lists this buyer's 5 jobs" || bad "GET /api/jobs?buyer= lists this buyer's 5 jobs" "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")"
-[ "$(jget "/api/jobs?buyer=$(echo $BUYER | tr a-f A-F)" | jq_ "len(d['jobs'])")" = "5" ] && ok "buyer filter is case-insensitive" || bad "buyer filter is case-insensitive"
+[ "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")" = "6" ] && ok "GET /api/jobs?buyer= lists this buyer's 6 jobs (five audits plus the adversarial one)" || bad "GET /api/jobs?buyer= lists this buyer's 6 jobs" "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")"
+[ "$(jget "/api/jobs?buyer=$(echo $BUYER | tr a-f A-F)" | jq_ "len(d['jobs'])")" = "6" ] && ok "buyer filter is case-insensitive" || bad "buyer filter is case-insensitive" "$(jget "/api/jobs?buyer=$(echo $BUYER | tr a-f A-F)" | jq_ "len(d['jobs'])")"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/api/jobs?buyer=$OTHER")" = "403" ] && ok "a buyer cannot list another address's jobs -> 403" || bad "buyer filter refuses other buyers" "got $(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/api/jobs?buyer=$OTHER")"
 [ "$(jop "/api/jobs?buyer=$OTHER" | jq_ "len(d['jobs'])")" = "0" ] && ok "the operator may ask for any address (none for a stranger)" || bad "operator buyer filter" "$(jop "/api/jobs?buyer=$OTHER" | head -c 160)"
-[ "$(jop "/api/jobs" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs without the param lists all, to the operator" || bad "GET /api/jobs without the param lists all" "$(jop "/api/jobs" | jq_ "len(d['jobs'])")"
+[ "$(jop "/api/jobs" | jq_ "len(d['jobs'])")" = "6" ] && ok "GET /api/jobs without the param lists all six, to the operator" || bad "GET /api/jobs without the param lists all" "$(jop "/api/jobs" | jq_ "len(d['jobs'])")"
 
 # ---------------------------------------------------------------- job types
 JT=$(jget "/api/job_types")

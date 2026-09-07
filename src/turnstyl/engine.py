@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import jobtypes
+from . import injection
 from . import policy
 from . import schema as S
 from .jobtypes import GATE_COMPILE, GATE_FORGE_TEST, JobType
@@ -214,6 +215,42 @@ class Engine:
         # The source itself goes to memory, so any later process can run a step
         # of this job without being handed the file again.
         self.store.put_contract_source(contract_hash, contract_text)
+
+        # Before any model sees it: a mechanical read of the comments and
+        # strings for text aimed at the auditor rather than at the compiler.
+        # Recorded on the job, so the flags are part of the job's history and
+        # not something re-derived differently on a later pass.
+        flags = injection.scan(contract_text)
+        if flags:
+            state.injection_flags = [S.InjectionFlag(**f) for f in flags]
+            self.store.put_job_state(state)
+            read.append(f"{S.job_state_key(job_id)} -> injection_flags")
+            self.store.journal(
+                S.JournalEntry(
+                    evaluated=[
+                        f"source sha256={contract_hash[:12]}... -> "
+                        f"{injection.summary(flags)}"
+                    ],
+                    acted=[
+                        f"flagged {len(flags)} instruction-like passage(s) in the "
+                        f"submitted source of job {job_id}; the findings step is "
+                        f"told about them and asked to report the real ones"
+                    ],
+                    forward=["run step 1; nothing in the source is followed as an instruction"],
+                    extra={
+                        "job_id": job_id,
+                        "buyer": buyer_key,
+                        "step": spec.first_step,
+                        "decision": "FLAGGED_UNTRUSTED_SOURCE",
+                        "injection_flags": len(flags),
+                        "summary": (
+                            f"The submitted contract contains {len(flags)} passage(s) "
+                            f"that read like instructions to the auditor rather than "
+                            f"documentation. They were recorded, not followed."
+                        ),
+                    },
+                )
+            )
 
         ledger = self.store.get_buyer(buyer_key)
         if job_id not in ledger.jobs:
@@ -708,6 +745,10 @@ class Engine:
             result = llm_run_step(
                 spec, step, text, prior,
                 mechanical=self._mechanical_for(spec, step, entity),
+                # Recorded once, before step 1, and handed to every step since:
+                # the flags are evidence about the source, and the findings
+                # step is asked to report the real ones.
+                injection_flags=[f.model_dump() for f in state.injection_flags],
             )
             output, usage, diff_applies = (
                 result.output,

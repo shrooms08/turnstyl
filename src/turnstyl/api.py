@@ -260,6 +260,11 @@ def redact_job_detail(detail: dict[str, Any], ident: auth.Identity) -> dict[str,
     out["buyer"] = auth.trunc_address(detail.get("buyer"))
     out["contract_hash"] = None
     out["steps"] = [dict(s, output=None) for s in (detail.get("steps") or [])]
+    # That a contract tried to instruct the auditor is worth showing to anyone
+    # holding the receipt; the passage itself is a quote from a private source.
+    out["injection_flags"] = [
+        dict(f, text=None, matched=None) for f in (detail.get("injection_flags") or [])
+    ]
     out["redacted"] = True
     out["private"] = (
         "step outputs and the contract are visible to the buyer who paid for "
@@ -774,6 +779,9 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
             else None
         ),
         "steps": steps,
+        # Instruction-like text the pre-pass found in the submitted source,
+        # before any model saw it. Empty for an ordinary contract.
+        "injection_flags": [f.model_dump() for f in state.injection_flags],
         "source": entity_source,
     }
 

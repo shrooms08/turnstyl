@@ -33,6 +33,39 @@ RUNNING_GRACE_SECONDS = 120.0   # a job mid-step in another process is left alon
 REFLECT_EVERY_SECONDS = 3600.0  # the agent reads its own journal once an hour
 
 
+# One process-wide heartbeat, written by whichever worker is running in it and
+# read by /api/status. A watchdog outside the process cannot see a thread, so
+# "the worker is alive" has to be something the process says out loud.
+HEARTBEAT: dict[str, object] = {"running": False, "last_pass_at": None, "passes": 0}
+
+
+def heartbeat() -> dict[str, object]:
+    """What /api/status reports about the worker in this process."""
+    from datetime import datetime, timezone
+
+    last = HEARTBEAT.get("last_pass_at")
+    age = None
+    if isinstance(last, str):
+        try:
+            then = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            age = round((datetime.now(timezone.utc) - then).total_seconds(), 1)
+        except ValueError:
+            age = None
+    return {
+        "running": bool(HEARTBEAT.get("running")),
+        "last_pass_at": last,
+        "seconds_since_pass": age,
+        "passes": HEARTBEAT.get("passes", 0),
+    }
+
+
+def _beat() -> None:
+    from datetime import datetime, timezone
+
+    HEARTBEAT["last_pass_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    HEARTBEAT["passes"] = int(HEARTBEAT.get("passes") or 0) + 1
+
+
 def _log(line: str) -> None:
     print(line, flush=True)
 
@@ -205,9 +238,11 @@ class Worker:
             f"(payments={os.environ.get('PAYMENTS') or 'fake'}, "
             f"model={'mock' if os.environ.get('MOCK_LLM') == '1' else 'real'})"
         )
+        HEARTBEAT["running"] = True
         while not self.stop.is_set():
             try:
                 self.pass_once()
+                _beat()
             except Exception as e:  # noqa: BLE001 - one bad pass must not kill the loop
                 _log(f"worker: pass failed: {type(e).__name__}: {e}")
             self.stop.wait(self.interval)

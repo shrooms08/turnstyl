@@ -16,6 +16,7 @@ BUYER=0x0964dc1e37aca77c6df395db7c0eec848b1ceff8
 INTERVAL=2
 export TURNSTYL_DB="$DB" PAYMENTS=fake MOCK_LLM=1 NO_COLOR=1
 PY=.venv/bin/python
+CLI_ENV=""
 FAILS=0
 
 ok(){ echo "  PASS $1"; }
@@ -295,6 +296,43 @@ APUB=$(jpub "/api/jobs/$AJOB")
 [ "$(jget "/api/jobs/$JOB4" | jq_ "d['injection_flags']")" = "[]" ] && ok "an ordinary contract carries no flags" || bad "ordinary contract has no flags" "$(jget "/api/jobs/$JOB4" | jq_ "d['injection_flags']")"
 AJ=$(jget "/api/journal?job=$AJOB&limit=20")
 [ "$(echo "$AJ" | jq_ "any(e['decision']=='FLAGGED_UNTRUSTED_SOURCE' for e in d['events'])")" = "True" ] && ok "the journal records the scan as one decision" || bad "journal records the scan" "$(echo "$AJ" | jq_ "[e['decision'] for e in d['events']]")"
+
+# ---------------------------------------------------------------- schema guard
+# A row this build cannot read must be a 503 saying so, not a 500 traceback,
+# and the status endpoint must stop claiming the store is fine.
+GDB=./data/guard_$$.db
+rm -f "$GDB" "$GDB-wal" "$GDB-shm"
+GPORT=8796; GBASE="http://127.0.0.1:$GPORT"
+TURNSTYL_DB="$GDB" $CLI_ENV .venv/bin/turnstyl serve --port $GPORT --db "$GDB" > /tmp/turnstyl-test-guard.log 2>&1 &
+GSRV=$!; disown $GSRV 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "$GBASE/api/status" && break; sleep 0.5; done
+GTOK=$(signin "$GBASE") && GAUTH=(-H "Authorization: Bearer $GTOK") || GAUTH=()
+GSRC=$($PY -c "import json;print(json.dumps(open('examples/Vault.sol').read()))")
+curl -s -o /dev/null "${GAUTH[@]}" -X POST "$GBASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$GSRC}"
+[ "$(curl -s "$GBASE/api/status" | jq_ "d['schema']['ok'], d['schema']['problem']")" = "True None" ] && ok "a store this build can read reports schema ok" || bad "schema ok on a clean store" "$(curl -s "$GBASE/api/status" | jq_ "d['schema']")"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${GAUTH[@]}" "$GBASE/api/buyers/$BUYER")" = "200" ] && ok "and the ledger reads normally" || bad "clean ledger read"
+# a field a later build added, written under the running server
+$PY -c "
+import sys; sys.path.insert(0,'src')
+from turnstyl.memory import TurnstylStore, TurnstylMemory
+from turnstyl import schema as S
+st = TurnstylStore(TurnstylMemory('$GDB'))
+body = dict(st.memory.get_entity(S.CAT_BUYER, '$BUYER')['body']); body['loyalty_points'] = 42
+st.memory.set_entity(S.CAT_BUYER, '$BUYER', body)"
+GR=$(curl -s -w '\n%{http_code}' "${GAUTH[@]}" "$GBASE/api/buyers/$BUYER"); GC=$(echo "$GR" | tail -1); GB=$(echo "$GR" | sed '$d')
+[ "$GC" = "503" ] && ok "a row this build cannot read answers 503, not 500" || bad "drifted read -> 503" "got $GC: $(echo "$GB" | head -c 200)"
+[ "$(echo "$GB" | jq_ "d['needs_restart'], d['schema_ok']")" = "True False" ] && ok "the 503 says the agent needs a restart" || bad "503 shape" "$(echo "$GB" | head -c 200)"
+grep -q "loyalty_points" <<< "$GB" && grep -q "extra_forbidden" <<< "$GB" && ok "and names the field and the reason" || bad "503 names the field" "$(echo "$GB" | head -c 240)"
+grep -q "Restart the agent on the code that wrote this store" <<< "$GB" && ok "and tells the operator what to do" || bad "503 says what to do" "$(echo "$GB" | head -c 240)"
+grep -qi "traceback" <<< "$GB" && bad "the 503 carries no traceback" "$(echo "$GB" | head -c 200)" || ok "the 503 carries no traceback"
+[ "$(curl -s "$GBASE/api/status" | jq_ "d['schema']['ok']")" = "False" ] && ok "status stops claiming the store is fine" || bad "status after drift" "$(curl -s "$GBASE/api/status" | jq_ "d['schema']")"
+kill $GSRV 2>/dev/null
+# and a fresh server refuses to start on it at all
+GOUT=$(TURNSTYL_DB="$GDB" .venv/bin/turnstyl serve --port $GPORT --db "$GDB" 2>&1); GRC=$?
+[ "$GRC" != "0" ] && ok "a server refuses to start on a store it cannot read (exit $GRC)" || bad "startup guard refuses" "it started anyway"
+grep -q "refusing to serve" <<< "$GOUT" && grep -q "loyalty_points" <<< "$GOUT" && ok "saying which entity and field" || bad "startup guard message" "$(echo "$GOUT" | head -c 240)"
+grep -q "Nothing was served" <<< "$GOUT" && ok "and that nothing was served" || bad "startup guard reassurance" "$(echo "$GOUT" | head -c 240)"
+rm -f "$GDB" "$GDB-wal" "$GDB-shm"
 
 # ---------------------------------------------------------------- arrears before default
 # A job that closes with delivered work unpaid puts the buyer in arrears. It

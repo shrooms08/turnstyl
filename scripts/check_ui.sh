@@ -573,6 +573,25 @@ hasapp "and it says why it is never reused"    "never reused after a failure"
 hasapp "the facilitator's own reason comes first" "receipt.reason || receipt.errorMessage"
 hasapp "a failed settlement is a failure even on a 200" "receipt.success === false"
 
+# ---------------------------------------------------------------- schema drift
+echo
+echo "needs a restart"
+hasapp "the page knows when the agent cannot read its store" "function needsRestart("
+hasapp "it reads the verdict from /api/status"  "(S.status || {}).schema"
+hasapp "the banner says the agent needs a restart" "the agent needs a restart: it cannot read its own store"
+hasapp "the card says it too"                   ">the agent needs a restart</h3>"
+hasapp "and that this is not an empty store"    "This is not an empty store: your jobs"
+hasapp "it shows the reason the agent gave"     "function restartReason("
+hasapp "the job list says it instead of nothing" "if(needsRestart() && !S.missing) return restartCard();"
+hasapp "and so does a job page"                 "if(needsRestart() && !S.missing && !job) return restartCard();"
+has   "the restart card is styled"              ".restart h3{font-family:var(--mono)"
+[ "$(curl -s "$BASE/api/status" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin)['schema'];print(d['ok'])" 2>/dev/null)" = "True" ] && ok "/api/status reports the schema verdict, and this store is readable" || bad "/api/status schema verdict" "$(curl -s "$BASE/api/status" | .venv/bin/python -c "import json,sys;print(json.load(sys.stdin).get('schema'))" 2>/dev/null)"
+WK=$(curl -s "$BASE/api/status" 2>/dev/null | .venv/bin/python -c "
+import json,sys
+w=(json.load(sys.stdin) or {}).get('worker') or {}
+print('ok' if 'running' in w and 'seconds_since_pass' in w else 'bad')" 2>/dev/null)
+[ "$WK" = "ok" ] && ok "/api/status carries a worker heartbeat for the tunnel watchdog" || bad "worker heartbeat" "got: $WK"
+
 # ---------------------------------------------------------------- arrears countdown
 echo
 echo "arrears"

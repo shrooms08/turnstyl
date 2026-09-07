@@ -28,6 +28,8 @@ case "$MODE" in
       echo "turnstyl tunnel: running (supervisor $SUP)"
       echo "  url    $(pid_of url)"
       echo "  serve  $(pid_of serve)   cloudflared $(pid_of cloudflared)   caffeinate $(pid_of caffeinate)"
+      LAST=$(pid_of lastcheck); RESULT=$(pid_of lastresult)
+      echo "  check  ${LAST:-not yet}   ${RESULT:-not checked yet}"
       echo "  log    $DAEMON_LOG"
       exit 0
     fi
@@ -103,9 +105,27 @@ unset MOCK_LLM
 export TURNSTYL_DB="${TURNSTYL_DB:-./data/turnstyl.db}"
 export LLM_MODEL="${LLM_MODEL:-claude-haiku-4-5}"
 LOGDIR=./data; mkdir -p "$LOGDIR"
+WATCH_SECONDS="${WATCH_SECONDS:-30}"
+PY_BIN=.venv/bin/python
 
 CAFF=""; SERVE=""; CF=""
+LASTCHECK=""; LASTRESULT="not checked yet"
+PUBLIC_FAILS=0
 mkdir -p ./data
+
+# Every action this script takes, with a timestamp, in one file. In --supervise
+# mode stdout already goes there, so the line is written once either way.
+log(){
+  local line
+  line="$(date -u +%Y-%m-%dT%H:%M:%SZ)  $*"
+  if [ "$MODE" = "--supervise" ]; then
+    echo "$line"
+  else
+    echo "$line"
+    echo "$line" >> "$DAEMON_LOG"
+  fi
+}
+
 record_pids(){   # the pid file is how --status and --stop find this run
   {
     echo "supervisor=$$"
@@ -114,7 +134,70 @@ record_pids(){   # the pid file is how --status and --stop find this run
     echo "cloudflared=$CF"
     echo "url=${URL:-}"
     echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "lastcheck=${LASTCHECK:-}"
+    echo "lastresult=${LASTRESULT:-}"
   } > "$PIDFILE"
+}
+
+local_ok(){ curl -s -m 5 -o /dev/null "http://127.0.0.1:$PORT/api/status"; }
+
+worker_ok(){
+  # The worker is a thread inside serve, so the process says so out loud and
+  # this reads it. A pass older than four intervals is a stalled worker.
+  curl -s -m 5 "http://127.0.0.1:$PORT/api/status" 2>/dev/null | "$PY_BIN" -c "
+import json, sys
+try:
+    w = (json.load(sys.stdin) or {}).get('worker') or {}
+except Exception:
+    sys.exit(1)
+if not w.get('running'):
+    sys.exit(1)
+age = w.get('seconds_since_pass')
+sys.exit(0 if age is None or age < 120 else 1)
+" 2>/dev/null
+}
+
+public_ok(){  # public_ok <url>
+  [ -n "${1:-}" ] || return 1
+  curl -s -m 15 -o /dev/null -H "ngrok-skip-browser-warning: true" "$1/api/status"
+}
+
+wait_public(){  # wait_public <url> <seconds> : does the hostname actually serve?
+  local url="$1" limit="${2:-90}" waited=0
+  while [ "$waited" -lt "$limit" ]; do
+    public_ok "$url" && return 0
+    sleep 3; waited=$((waited + 3))
+  done
+  return 1
+}
+
+start_cloudflared(){   # sets CF and URL, or returns 1
+  CF=""; URL=""
+  cloudflared tunnel --url "http://127.0.0.1:$PORT" > "$LOGDIR/cloudflared.log" 2>&1 & CF=$!
+  local i
+  for i in $(seq 1 60); do
+    URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOGDIR/cloudflared.log" | tail -1)
+    [ -n "$URL" ] && break
+    kill -0 "$CF" 2>/dev/null || break
+    sleep 1
+  done
+  [ -n "$URL" ] || return 1
+  return 0
+}
+
+restart_serve(){
+  log "serve is not answering on 127.0.0.1:$PORT; restarting it"
+  [ -n "$SERVE" ] && kill "$SERVE" 2>/dev/null
+  .venv/bin/turnstyl serve --with-worker --port "$PORT" --db "$TURNSTYL_DB" \
+    >> "$LOGDIR/serve.log" 2>&1 & SERVE=$!
+  local i
+  for i in $(seq 1 40); do local_ok && break; sleep 0.5; done
+  if local_ok; then
+    log "serve is back (pid $SERVE)"
+  else
+    log "serve did NOT come back; see $LOGDIR/serve.log"
+  fi
+  record_pids
 }
 publish_config(){  # publish_config <url-or-empty>
   printf 'window.TURNSTYL_API = "%s";\n' "$1" > web/config.js
@@ -140,20 +223,35 @@ record_pids
 for i in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$PORT/api/status" && break; sleep 0.5; done
 curl -s -o /dev/null "http://127.0.0.1:$PORT/api/status" || { echo "turnstyl tunnel: serve did not come up; see $LOGDIR/serve.log" >&2; cleanup; }
 
-cloudflared tunnel --url "http://127.0.0.1:$PORT" > "$LOGDIR/cloudflared.log" 2>&1 & CF=$!
-record_pids
-URL=""
-for i in $(seq 1 60); do
-  URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOGDIR/cloudflared.log" | head -1)
-  [ -n "$URL" ] && break
-  kill -0 "$CF" 2>/dev/null || break
-  sleep 1
+# A hostname is published only once it has actually served a request through
+# the public internet. Publishing one that merely got printed is how the page
+# ended up pointing at a tunnel that never finished registering.
+ATTEMPT=0
+while : ; do
+  ATTEMPT=$((ATTEMPT + 1))
+  if ! start_cloudflared; then
+    log "cloudflared printed no trycloudflare.com URL (attempt $ATTEMPT); see $LOGDIR/cloudflared.log"
+    [ -n "$CF" ] && kill "$CF" 2>/dev/null
+    [ "$ATTEMPT" -ge 3 ] && { log "giving up after $ATTEMPT attempts"; cleanup; }
+    sleep 5; continue
+  fi
+  record_pids
+  log "cloudflared says $URL (attempt $ATTEMPT); checking it answers before publishing"
+  if wait_public "$URL" 90; then
+    log "$URL answers /api/status; publishing"
+    break
+  fi
+  log "$URL never answered in 90s; killing that cloudflared and starting another"
+  kill "$CF" 2>/dev/null
+  [ "$ATTEMPT" -ge 3 ] && {
+    log "three tunnels in a row failed to serve; not publishing a dead URL"
+    cleanup
+  }
+  sleep 5
 done
-[ -n "$URL" ] || { echo "turnstyl tunnel: cloudflared did not print a trycloudflare.com URL; see $LOGDIR/cloudflared.log" >&2; cleanup; }
-for i in $(seq 1 20); do curl -s -o /dev/null -H "ngrok-skip-browser-warning: true" "$URL/api/status" && break; sleep 1; done
 
+LASTCHECK=$(date -u +%Y-%m-%dT%H:%M:%SZ); LASTRESULT="ok (published)"
 record_pids
-echo "turnstyl tunnel: publishing config.js -> $URL"
 publish_config "$URL"
 
 PAGES=$(scripts/pages.sh --config-only 2>/dev/null | grep -o 'https://[^ ]*github.io/[^ ]*' | tail -1)
@@ -168,6 +266,47 @@ cat <<STATUS
   logs   $LOGDIR/serve.log   $LOGDIR/cloudflared.log
 
   Ctrl-C (or scripts/tunnel.sh --stop) stops everything and publishes an
-  empty config.js.
+  empty config.js. A watchdog checks serve, the worker and the public
+  hostname every ${WATCH_SECONDS}s and repairs what it can.
 STATUS
-wait
+
+log "watchdog running every ${WATCH_SECONDS}s"
+while : ; do
+  sleep "$WATCH_SECONDS"
+  LASTCHECK=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  if ! local_ok; then
+    LASTRESULT="serve down, restarting"; record_pids
+    restart_serve
+  elif ! worker_ok; then
+    LASTRESULT="worker stalled, restarting serve"; record_pids
+    log "the worker has not completed a pass recently; restarting serve to revive it"
+    restart_serve
+  fi
+
+  if public_ok "$URL"; then
+    [ "$PUBLIC_FAILS" -gt 0 ] && log "$URL is answering again after $PUBLIC_FAILS failure(s)"
+    PUBLIC_FAILS=0
+    LASTRESULT="ok"
+  else
+    PUBLIC_FAILS=$((PUBLIC_FAILS + 1))
+    LASTRESULT="public unreachable ($PUBLIC_FAILS/3)"
+    log "$URL did not answer ($PUBLIC_FAILS of 3 before a rebuild)"
+    if [ "$PUBLIC_FAILS" -ge 3 ]; then
+      log "three consecutive public failures; rebuilding the tunnel"
+      kill "$CF" 2>/dev/null
+      OLD_URL="$URL"
+      if start_cloudflared && wait_public "$URL" 90; then
+        log "new tunnel $URL answers; republishing config.js (was $OLD_URL)"
+        publish_config "$URL"
+        PUBLIC_FAILS=0
+        LASTRESULT="ok (rebuilt)"
+      else
+        log "the replacement tunnel did not answer either; leaving config.js at $OLD_URL and retrying"
+        URL="$OLD_URL"
+        LASTRESULT="rebuild failed"
+      fi
+    fi
+  fi
+  record_pids
+done

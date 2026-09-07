@@ -32,12 +32,13 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from . import auth
 from . import digest
 from . import events
 from . import policy
+from . import schema_guard
 from . import schema as S
 from .engine import Engine
 from . import jobtypes
@@ -328,6 +329,52 @@ def redact_buyer(payload: dict[str, Any], ident: auth.Identity) -> dict[str, Any
 # ----------------------------------------------------------------------
 # /api/status
 # ----------------------------------------------------------------------
+# What the startup check found. Filled in by cli.serve before uvicorn starts,
+# and by the first request otherwise, so a server started any other way still
+# answers honestly.
+schema_state: dict[str, Any] = {"ok": True, "problem": None, "checked": False}
+
+
+def worker_heartbeat() -> dict[str, Any]:
+    from .worker import heartbeat
+
+    return heartbeat()
+
+
+def schema_report() -> dict[str, Any]:
+    """The verdict, checking once if nobody has."""
+    if not schema_state["checked"]:
+        store = open_store()
+        schema_state["checked"] = True
+        if store is not None:
+            problems = schema_guard.check(store)
+            schema_state["ok"] = not problems
+            schema_state["problem"] = schema_guard.message(problems) or None
+    return {"ok": bool(schema_state["ok"]), "problem": schema_state["problem"]}
+
+
+@app.exception_handler(ValidationError)
+async def schema_drift(request: Request, error: ValidationError) -> JSONResponse:
+    """A row this build cannot read is a 503, not a 500.
+
+    503 because it is the server that is wrong, not the request, and it is
+    fixable by restarting on the right code. The detail is the same sentence
+    the startup check prints, so an operator sees one message wherever they
+    meet the problem.
+    """
+    detail = schema_guard.read_error_message(error)
+    schema_state.update({"ok": False, "problem": detail, "checked": True})
+    logger.error("schema drift while serving %s: %s", request.url.path, detail)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": detail,
+            "schema_ok": False,
+            "needs_restart": True,
+        },
+    )
+
+
 @app.get("/api/status")
 def api_status() -> dict[str, Any]:
     path = db_path()
@@ -356,6 +403,12 @@ def api_status() -> dict[str, Any]:
             "facilitator": X402_FACILITATOR,
             "reason": x402_status["reason"],
         },
+        # False means this build cannot read rows the store holds. The page
+        # says the agent needs a restart rather than showing an empty list.
+        "schema": schema_report(),
+        # Only meaningful when this process was started with --with-worker; a
+        # watchdog outside it has no other way to see a thread.
+        "worker": worker_heartbeat(),
         "memory_missing": not exists,
     }
 

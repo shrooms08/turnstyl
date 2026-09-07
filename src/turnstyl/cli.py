@@ -580,6 +580,39 @@ def worker(
     raise typer.Exit(code=worker_main(None, interval, once))
 
 
+def guard_schema() -> None:
+    """Refuse to serve a store this build cannot read.
+
+    Serving anyway is worse than not serving: every read raises, the API
+    answers an error, and a page that treats a failed fetch as "no data" shows
+    a store full of jobs as empty. That happened. One line, and a non-zero
+    exit.
+    """
+    from . import schema_guard
+    from .api import schema_state
+    from .memory import TurnstylMemory, TurnstylStore, default_db_path
+
+    path = default_db_path()
+    if not path.is_file():
+        return                        # nothing to disagree with yet
+    try:
+        problems = schema_guard.check(TurnstylStore(TurnstylMemory(path)))
+    except Exception as e:  # noqa: BLE001 - an unreadable store is its own message
+        fail(f"turnstyl: could not read {path} to check its layout: {type(e).__name__}: {e}")
+        raise
+    schema_state.update(
+        {"ok": not problems, "problem": schema_guard.message(problems) or None,
+         "checked": True}
+    )
+    if not problems:
+        return
+    fail(
+        f"turnstyl: refusing to serve {path}.\n"
+        f"  {schema_guard.message(problems)}\n"
+        f"  Nothing was served, so no request saw a half-read row."
+    )
+
+
 def announce_memory() -> None:
     """Create the store if it is absent and say which one is in use.
 
@@ -651,6 +684,7 @@ def serve(
         Text(f"turnstyl serving http://{host}:{port}", style="bold"), soft_wrap=True
     )
     announce_memory()
+    guard_schema()
     if with_worker:
         from .worker import start_in_thread
 

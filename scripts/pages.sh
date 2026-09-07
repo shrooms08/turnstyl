@@ -17,7 +17,7 @@ OWNER=${SLUG%%/*}; NAME=${SLUG##*/}
 PAGES_URL="https://${OWNER}.github.io/${NAME}/"
 WT=.gh-pages-worktree
 
-for f in web/index.html web/config.js; do
+for f in web/index.html web/app.html web/config.js; do
   [ -f "$f" ] || { echo "turnstyl pages: $f is missing; nothing to publish" >&2; exit 1; }
 done
 
@@ -34,6 +34,9 @@ if [ "$MODE" = "--config-only" ]; then
   cp web/config.js "$WT/config.js"
 else
   cp web/index.html "$WT/index.html"
+  # The app is a second page, not a route: Pages serves it at
+  # /turnstyl/app.html, and both pages use the same relative static/ paths.
+  cp web/app.html "$WT/app.html"
   # Never knock a live session offline: the local config.js is the empty
   # default unless tunnel.sh wrote it, so when gh-pages already publishes a
   # URL and the local file is empty, the published one is kept.

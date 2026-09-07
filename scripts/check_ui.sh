@@ -223,7 +223,7 @@ fi
 # four step cards always: the page merges, and the API fills the ladder in
 hasapp "page renders four step cards"     "function fourSteps("
 hasapp "unrun steps pill as not started"  'label:"not started"'
-FIRST_JOB=$(curl -s "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['job_id'] if j else '')" 2>/dev/null)
+FIRST_JOB=$(curl -s "${OPH[@]}" "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['job_id'] if j else '')" 2>/dev/null)
 if [ -n "$FIRST_JOB" ]; then
   NSTEPS=$(curl -s "${OPH[@]}" "$BASE/api/jobs/$FIRST_JOB" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);s=d.get('steps') or [];print(len(s), sum(1 for x in s if x.get('status')=='not_started'), all(x.get('price_usdc') is not None for x in s))" 2>/dev/null)
   case "$NSTEPS" in
@@ -249,7 +249,7 @@ hasapp "pay: then pay(memo, units)"      ".pay(memo, units)"
 hasapp "user rejection reads cancelled"  'return "cancelled"'
 hasapp "Simulate payment on fake backend" "Simulate payment"
 hasapp "simulate calls POST /api/jobs/{id}/pay" '"/pay"'
-hasapp "your jobs split from every job"  "j.redacted !== true"
+hasapp "your jobs and all jobs are separate reads" "S.mine = d;"
 hasapp "this is you pill"                "this is you"
 hasidx "story: credit after three paid jobs" "three fully paid jobs"
 hasapp "ledger: jobs until credit"       '"jobs until credit"'
@@ -340,7 +340,7 @@ hasapp "verify result: match"            "matches on-chain commit"
 hasapp "verify result: mismatch"         "does not match the on-chain commit"
 hasapp "verify result: no commit"        "no commit for this step"
 hasapp "verify calls the API, not the chain" '"/verify"'
-FIRST_JOB2=$(curl -s "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['job_id'] if j else '')" 2>/dev/null)
+FIRST_JOB2=$(curl -s "${OPH[@]}" "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);j=d.get('jobs') or [];print(j[0]['job_id'] if j else '')" 2>/dev/null)
 if [ -n "$FIRST_JOB2" ]; then
   RCODE=$(curl -s "${OPH[@]}" -D "$TMPDIR_RUN/rh" -o /dev/null -w "%{http_code}" "$BASE/api/jobs/$FIRST_JOB2/report.md" 2>/dev/null)
   [ "$RCODE" = "200" ] && grep -qi "content-disposition: attachment" "$TMPDIR_RUN/rh" && ok "GET report.md returns an attachment" || bad "GET report.md returns an attachment" "HTTP $RCODE"
@@ -379,7 +379,7 @@ hasidx "index links the app in the header" '<a class="navlink" href="app.html">A
 hasidx "index has the operator strip"      'class="opstrip wrap"'
 hasidx "strip: agent online or offline"    'id="agentState"'
 hasidx "strip: memory path"                'id="dbPath"'
-hasidx "strip: jobs in memory"             'id="jobCount"'
+hasidx "strip: the public figures"         'id="statsLine"'
 hasidx "strip: latest decision sentence"   'id="opSummary"'
 hasidx "strip: one button into the app"    '<a class="btn" href="app.html">Open the app</a>'
 noidx  "index no longer renders the console" 'id="consoleBody"'
@@ -411,14 +411,14 @@ hasapp "every API call goes through headers()" "function headers(extra)"
 hasapp "the operator token outranks the session" "return A.operator || A.token || null"
 hasapp "chip reads signed in"              '"signed in"'
 hasapp "chip offers sign in before it is"  '"sign in"'
-hasapp "connecting signs in straight away" "if(W.addr && A.kind !== \"buyer\") return signIn();"
+hasapp "connecting signs in straight away" "if(W.addr && !buyerSignedIn()) return signIn();"
 hasapp "settings drawer"                   'id="settingsDrawer"'
 hasapp "settings holds the operator token" 'id="opToken"'
 hasapp "operator token kept in sessionStorage only" 'sessionStorage.setItem("turnstylOperator"'
 hasapp "the drawer says sessionStorage only" "<b>sessionStorage</b>"
 hasapp "report link carries the session"   '"?token=" + encodeURIComponent(b)'
 hasapp "private outputs say whose they are" "This output belongs to"
-hasapp "public rows are marked private"    "the meter is public, the work is not"
+hasapp "the app says who bought what is not the meter" "Who bought what is not part of the meter"
 # the login message, exactly as auth.py builds it
 NONCE=$(curl -s "$BASE/api/auth/nonce?address=0x0000000000000000000000000000000000000001" 2>/dev/null)
 MSGOK=$(printf '%s' "$NONCE" | .venv/bin/python -c "
@@ -435,15 +435,48 @@ if [ -n "$OPTOK" ]; then
 else
   bad "GET /api/auth/me with OPERATOR_TOKEN" "OPERATOR_TOKEN is not in .env; start the server once to have it written"
 fi
-PUBJOB=$(curl -s "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "
-import json,sys
-j=(json.load(sys.stdin).get('jobs') or [])
-print('ok' if j and all(x.get('redacted') and '\u2026' in (x.get('buyer') or '') for x in j) else ('empty' if not j else 'bad'))" 2>/dev/null)
-case "$PUBJOB" in
-  ok) ok "public job rows come back redacted with a shortened buyer";;
-  empty) ok "public job rows redacted (no jobs in the store to check)";;
-  *) bad "public job rows are redacted" "got: $PUBJOB";;
-esac
+LPUB=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/jobs" 2>/dev/null)
+LOP=$(curl -s "${OPH[@]}" -o /dev/null -w "%{http_code}" "$BASE/api/jobs" 2>/dev/null)
+[ "$LPUB" = "403" ] && [ "$LOP" = "200" ] && ok "GET /api/jobs: 403 without the operator token, 200 with it" \
+  || bad "the job list is an operator view" "public=$LPUB operator=$LOP"
+curl -s "$BASE/api/jobs" 2>/dev/null | grep -q "the job list is an operator view" \
+  && ok "the 403 says the job list is an operator view" || bad "job list 403 detail"
+
+# ---------------------------------------------------------------- public stats
+echo
+echo "public stats"
+ST="$TMPDIR_RUN/stats.json"
+TCODE=$(curl -s -o "$ST" -w "%{http_code}" "$BASE/api/stats" 2>/dev/null)
+[ "$TCODE" = "200" ] && ok "GET /api/stats returns 200 without a credential" || bad "GET /api/stats" "HTTP ${TCODE:-no response}"
+SHAPE=$(.venv/bin/python -c "
+import json
+d=json.load(open('$ST'))
+want={'jobs','jobs_completed','buyers','usdc_settled','decisions','served_from_memory'}
+print('ok' if want <= set(d) else 'missing ' + ','.join(sorted(want - set(d))))" 2>/dev/null)
+[ "$SHAPE" = "ok" ] && ok "/api/stats carries the six public figures" || bad "/api/stats shape" "$SHAPE"
+if grep -qiE '0x[0-9a-f]{40}' "$ST"; then bad "/api/stats names nobody" "an address is in the body"; else ok "/api/stats carries no address"; fi
+[ "$(.venv/bin/python -c "import json;print(json.load(open('$ST'))['cache_seconds'])" 2>/dev/null)" = "10" ] && ok "/api/stats is cached for 10 seconds" || bad "/api/stats cache_seconds"
+hasidx "the story strip shows the stats line" 'id="statsLine"'
+hasapp "the app shows the stats line under the header" 'id="statsLine"'
+has   "stats line: jobs in memory"      "jobs in memory</span>"
+has   "stats line: completed"           "completed</span>"
+has   "stats line: buyers"              "buyers</span>"
+has   "stats line: USDC settled"        "USDC settled</span>"
+has   "stats line: decisions logged"    "decisions logged</span>"
+has   "stats line: served from memory"  "served from memory</span>"
+hasidx "the story page reads /api/stats, not the job list" 'api("/api/stats")'
+noidx  "the story page never asks for the job list" '/api/jobs'
+
+# ---------------------------------------------------------------- who sees which table
+echo
+echo "job tables"
+hasapp "your jobs asks for one address"   '"/api/jobs?buyer=" + encodeURIComponent(addr)'
+hasapp "all jobs is fetched only for the operator" "isOperator()"
+hasapp "the all-jobs section is labelled operator view" '<span class="pill gold">operator view</span>'
+hasapp "no table at all without a session" "Connect a wallet and sign in to see the jobs you paid for"
+hasapp "and it says there is no list of everyone else's" "There is no list of everyone"
+hasapp "the public receipt line on someone else's job" "you are viewing the public receipt for this job"
+if grep -qF 'every job</h3>' "$APP"; then bad "the every-job section is gone" "an 'every job' section is still rendered"; else ok "the every-job section is gone"; fi
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

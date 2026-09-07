@@ -426,6 +426,100 @@ def api_auth_me(authorization: str | None = Header(default=None)) -> dict[str, A
     }
 
 
+# ----------------------------------------------------------------------
+# /api/stats: the public figures, with nobody named
+# ----------------------------------------------------------------------
+# Six numbers about the whole store and not one fact about any single job or
+# buyer. This is what the story page's operator strip and the app's header
+# line read, so neither needs the job list, which is an operator view.
+STATS_TTL_SECONDS = 10.0
+_stats_cache: tuple[float, dict[str, Any]] | None = None
+_stats_lock = threading.Lock()
+
+
+def journal_count(path: Path) -> int:
+    """Journal events in the store, counted over a read-only connection.
+
+    The SDK's read_events clamps its limit and cannot report a true total, the
+    same reason memory.count_records goes to sqlite directly.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        total = conn.execute("SELECT count(*) FROM journal_events").fetchone()[0]
+        conn.close()
+    except sqlite3.Error:
+        return 0
+    return int(total)
+
+
+def compute_stats(store: TurnstylStore) -> dict[str, Any]:
+    """Count the store. Walks every job entity, hence the cache above."""
+    jobs = every_job(store)
+    buyers = {j["buyer"] for j in jobs if j.get("buyer")}
+    completed = sum(1 for j in jobs if j["status"] == S.STATUS_COMPLETE)
+
+    # USDC settled is the buyers' own ledgers added up, not a re-derivation
+    # from step records: paid_usdc is the number the policy itself acts on.
+    settled = 0.0
+    for address in buyers:
+        settled += store.get_buyer(store.buyer_key(address)).paid_usdc
+
+    cached_steps = 0
+    for j in jobs:
+        entity = store.get_job_entity(j["job_id"])
+        if entity is None:
+            archive = read_archived_job(db_path(), j["job_id"])
+            if archive is None:
+                continue
+            entity = S.JobEntity.model_validate(archive["body"])
+        cached_steps += sum(1 for rec in entity.steps.values() if rec.cached)
+
+    return {
+        "memory_missing": False,
+        "jobs": len(jobs),
+        "jobs_completed": completed,
+        "buyers": len(buyers),
+        "usdc_settled": round(settled, 2),
+        "decisions": journal_count(db_path()),
+        "served_from_memory": cached_steps,
+        "cache_seconds": int(STATS_TTL_SECONDS),
+        "computed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": (
+            "job states, each buyer's ledger, the job entities' step records, "
+            "and a count of the journal table. No job id, address or output "
+            "appears in this response."
+        ),
+    }
+
+
+@app.get("/api/stats")
+def api_stats() -> dict[str, Any]:
+    """The public figures. No auth, and nothing here identifies anyone."""
+    global _stats_cache
+    now = time.monotonic()
+    with _stats_lock:
+        if _stats_cache is not None and now - _stats_cache[0] < STATS_TTL_SECONDS:
+            return _stats_cache[1]
+
+    store = open_store()
+    if store is None:
+        # Not cached: the delete beat must show as soon as the file goes.
+        return missing(
+            {
+                "jobs": 0,
+                "jobs_completed": 0,
+                "buyers": 0,
+                "usdc_settled": 0.0,
+                "decisions": 0,
+                "served_from_memory": 0,
+            }
+        )
+    stats = compute_stats(store)
+    with _stats_lock:
+        _stats_cache = (time.monotonic(), stats)
+    return stats
+
+
 @app.get("/api/job_types")
 def api_job_types() -> dict[str, Any]:
     """The services on offer, with their steps, prices and gates.
@@ -458,16 +552,14 @@ def job_summary(state: S.JobState, archived: bool, source: str) -> dict[str, Any
     }
 
 
-@app.get("/api/jobs")
-def api_jobs(
-    buyer: str | None = Query(default=None, description="Only this buyer's jobs."),
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    store = open_store()
-    if store is None:
-        return missing({"jobs": [], "buyer": buyer, "source": "no database"})
-    buyer_key = buyer.strip().lower() if buyer else None
+def every_job(store: TurnstylStore) -> list[dict[str, Any]]:
+    """Every job this store can still name, newest first.
 
+    Three sources, in order, because a job id outlives its entity: the active
+    list, the read-only archive table, and each buyer's own jobs list. Shared
+    by the job list and by /api/stats so the two can never disagree about how
+    many jobs the agent is carrying.
+    """
     path = db_path()
     active = set(store.get_active_jobs())
     archived = set(archived_job_ids(path))
@@ -506,11 +598,43 @@ def api_jobs(
                 job_summary(state, archived=True, source="state + buyer.jobs")
             )
 
+    jobs.sort(key=lambda j: j["created_at"], reverse=True)
+    return jobs
+
+
+@app.get("/api/jobs")
+def api_jobs(
+    buyer: str | None = Query(default=None, description="Only this buyer's jobs."),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """One buyer's jobs, or every job for the operator.
+
+    An index of who has bought what is not part of the meter. The public
+    figures live at /api/stats, which counts without naming anyone; a buyer
+    asks for their own address; only the operator may ask for all of them.
+    """
+    ident = caller(authorization)
+    buyer_key = buyer.strip().lower() if buyer else None
+    if buyer_key is None:
+        if not ident.is_operator:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "the job list is an operator view. Ask for one buyer's jobs "
+                    "with ?buyer=<address> and a session for that address, or "
+                    "use GET /api/stats for the public figures."
+                ),
+            )
+    else:
+        require_visible(ident, buyer_key, f"the job list for {buyer_key}")
+
+    store = open_store()
+    if store is None:
+        return missing({"jobs": [], "buyer": buyer, "source": "no database"})
+
+    jobs = every_job(store)
     if buyer_key:
         jobs = [j for j in jobs if j["buyer"] == buyer_key]
-    jobs.sort(key=lambda j: j["created_at"], reverse=True)
-    # The list is public; each row is trimmed to what its own buyer allows.
-    ident = caller(authorization)
     jobs = [redact_job_summary(j, ident) for j in jobs]
     return {
         "memory_missing": False,
@@ -656,6 +780,16 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
 
 @app.get("/api/jobs/{job_id}")
 def api_job(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """One job by id, to anyone who has the id.
+
+    Deliberately not behind the same gate as the job list. A link to a job is a
+    receipt: the buyer may want to show someone what they paid for and what the
+    agent committed on chain, and that has to work without handing over a
+    session. So this stays the public meter shape for a stranger, with the
+    outputs and the contract hash removed, while the list of who has bought
+    what remains an operator view. Guessing an id is the only way in, and an id
+    reveals nothing the chain does not already carry.
+    """
     store = open_store()
     if store is None:
         return missing({"job": None})

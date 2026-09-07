@@ -211,7 +211,22 @@ PUBJ=$(jpub "/api/jobs/$JOB4"); OWNJ=$(jget "/api/jobs/$JOB4"); OPJ=$(jop "/api/
 [ "$(echo "$PUBJ" | jq_ "d['status'], d['current_step'], len(d['steps']), all(s['price_usdc'] is not None for s in d['steps']), all(s['output_sha256'] for s in d['steps'])")" = "complete 4 4 True True" ] && ok "public job detail keeps the meter: status, step, every price, every output hash" || bad "public job detail keeps the meter" "$(echo "$PUBJ" | head -c 240)"
 [ "$(echo "$OWNJ" | jq_ "sum(1 for s in d['steps'] if s['output']), d['buyer'], d.get('redacted')")" = "4 $BUYER None" ] && ok "the buyer sees all four outputs and the full address" || bad "buyer job detail" "$(echo "$OWNJ" | head -c 240)"
 [ "$(echo "$OPJ" | jq_ "sum(1 for s in d['steps'] if s['output']), d['buyer']")" = "4 $BUYER" ] && ok "the operator sees all four outputs" || bad "operator job detail" "$(echo "$OPJ" | head -c 240)"
-[ "$(jpub "/api/jobs" | jq_ "[j['buyer'] for j in d['jobs'] if j['job_id']=='$JOB4'][0], [j['job_type'] for j in d['jobs'] if j['job_id']=='$JOB4'][0]")" = "0x0964…eff8 audit" ] && ok "public job rows: truncated buyer, job type kept" || bad "public job rows" "$(jpub "/api/jobs" | head -c 200)"
+# the job list: who has bought what is an operator view
+LA=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/jobs")
+LB=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/api/jobs")
+LC=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $OPTOK" "$BASE/api/jobs")
+[ "$LA $LB $LC" = "403 403 200" ] && ok "GET /api/jobs: public 403, buyer 403, operator 200" || bad "job list is an operator view" "got public=$LA buyer=$LB operator=$LC"
+grep -q "the job list is an operator view" <<< "$(jpub "/api/jobs")" && ok "the 403 says the job list is an operator view" || bad "job list 403 detail" "$(jpub "/api/jobs" | head -c 200)"
+[ "$(jget "/api/jobs?buyer=$BUYER" | jq_ "all(j['buyer']=='$BUYER' for j in d['jobs']), len(d['jobs'])>0")" = "True True" ] && ok "a buyer may list their own jobs with ?buyer=" || bad "buyer lists own jobs" "$(jget "/api/jobs?buyer=$BUYER" | head -c 200)"
+[ "$(jop "/api/jobs" | jq_ "[j['buyer'] for j in d['jobs'] if j['job_id']=='$JOB4'][0], [j['job_type'] for j in d['jobs'] if j['job_id']=='$JOB4'][0]")" = "$BUYER audit" ] && ok "operator rows carry the full address and the job type" || bad "operator job rows" "$(jop "/api/jobs" | head -c 200)"
+
+# the public figures: six numbers, nobody named, no credential
+ST=$(jpub "/api/stats")
+[ "$(echo "$ST" | jq_ "sorted(k for k in d if k not in ('memory_missing','source','computed_at','cache_seconds'))")" = "['buyers', 'decisions', 'jobs', 'jobs_completed', 'served_from_memory', 'usdc_settled']" ] && ok "/api/stats carries the six public figures" || bad "/api/stats shape" "$(echo "$ST" | head -c 240)"
+[ "$(echo "$ST" | jq_ "d['jobs'] >= d['jobs_completed'] >= 1, d['buyers'] >= 1, d['decisions'] > 0, d['served_from_memory'] > 0, d['usdc_settled'] > 0")" = "True True True True True" ] && ok "/api/stats counts jobs, completions, buyers, decisions, cache hits and USDC" || bad "/api/stats values" "$(echo "$ST" | head -c 240)"
+[ "$(echo "$ST" | jq_ "d['cache_seconds']")" = "10" ] && ok "/api/stats says it is cached for 10 seconds" || bad "/api/stats cache_seconds" "$(echo "$ST" | jq_ "d['cache_seconds']")"
+grep -qiE "0x[0-9a-f]{40}|$JOB4" <<< "$ST" && bad "/api/stats names nobody" "an address or job id is in the body" || ok "/api/stats carries no address and no job id"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/stats")" = "200" ] && ok "/api/stats needs no credential" || bad "/api/stats needs no credential"
 
 # the journal
 PUBE=$(jpub "/api/journal?job=$JOB4&limit=5"); OWNE=$(jget "/api/journal?job=$JOB4&limit=5")
@@ -285,7 +300,7 @@ R2=$(curl -s "${AUTH2[@]}" -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/
 R3=$(curl -s "${AUTH2[@]}" -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/buyers/$BUYER/settle/$JOB/4"); C3=$(echo "$R3" | tail -1); B3=$(echo "$R3" | sed '$d')
 # x402 on the base backend: an unpaid POST must quote this invoice
 X4=$(curl -s "${AUTH2[@]}" "http://127.0.0.1:$PORT2/api/status" | jq_ "d['x402']['enabled'], d['x402']['network']")
-XJOB=$(jget "/api/jobs" | jq_ "[j['job_id'] for j in d['jobs'] if j['status']!='complete'][0] if [j for j in d['jobs'] if j['status']!='complete'] else ''")
+XJOB=$(jget "/api/jobs?buyer=$BUYER" | jq_ "[j['job_id'] for j in d['jobs'] if j['status']!='complete'][0] if [j for j in d['jobs'] if j['status']!='complete'] else ''")
 XSTEP=$(jget "/api/jobs/$XJOB" | jq_ "(d.get('open_invoice') or {}).get('step') or ''")
 XAMT=$(jget "/api/jobs/$XJOB" | jq_ "(d.get('open_invoice') or {}).get('amount_usdc') or ''")
 case "$X4" in
@@ -332,8 +347,9 @@ C=$(curl -s "${AUTH[@]}" -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs"
 OTHER=0x000000000000000000000000000000000000dead
 [ "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs?buyer= lists this buyer's 5 jobs" || bad "GET /api/jobs?buyer= lists this buyer's 5 jobs" "$(jget "/api/jobs?buyer=$BUYER" | jq_ "len(d['jobs'])")"
 [ "$(jget "/api/jobs?buyer=$(echo $BUYER | tr a-f A-F)" | jq_ "len(d['jobs'])")" = "5" ] && ok "buyer filter is case-insensitive" || bad "buyer filter is case-insensitive"
-[ "$(jget "/api/jobs?buyer=$OTHER" | jq_ "len(d['jobs'])")" = "0" ] && ok "buyer filter excludes other buyers" || bad "buyer filter excludes other buyers"
-[ "$(jget "/api/jobs" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs without the param lists all" || bad "GET /api/jobs without the param lists all"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/api/jobs?buyer=$OTHER")" = "403" ] && ok "a buyer cannot list another address's jobs -> 403" || bad "buyer filter refuses other buyers" "got $(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/api/jobs?buyer=$OTHER")"
+[ "$(jop "/api/jobs?buyer=$OTHER" | jq_ "len(d['jobs'])")" = "0" ] && ok "the operator may ask for any address (none for a stranger)" || bad "operator buyer filter" "$(jop "/api/jobs?buyer=$OTHER" | head -c 160)"
+[ "$(jop "/api/jobs" | jq_ "len(d['jobs'])")" = "5" ] && ok "GET /api/jobs without the param lists all, to the operator" || bad "GET /api/jobs without the param lists all" "$(jop "/api/jobs" | jq_ "len(d['jobs'])")"
 
 # ---------------------------------------------------------------- job types
 JT=$(jget "/api/job_types")

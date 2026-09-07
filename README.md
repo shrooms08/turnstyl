@@ -202,12 +202,22 @@ The meter stays public; the work does not.
 
 | | public | the job's buyer | the operator |
 | --- | --- | --- | --- |
-| job list | id, buyer as `0x1234…abcd`, service, status, step, timestamps | full addresses on their own rows | everything |
-| job detail | every step's price, status, payment and commit transactions, and output sha256 | plus the outputs and the contract hash | plus the outputs and the contract hash |
+| `/api/stats` | six figures, nobody named | same | same |
+| job list | 403 | their own address, with `?buyer=` | every job |
+| job detail, by id | every step's price, status, payment and commit transactions, and output sha256 | plus the outputs and the contract hash | plus the outputs and the contract hash |
 | journal | decision, time, step, the one-sentence summary | plus the memory reads and actions behind it | plus the memory reads and actions behind it |
 | ledger | trust tier, completed paid jobs | the whole ledger | the whole ledger |
 | report.md, report.json, verify | 401 | 200 | 200 |
 | creating a job, paying, settling | 401 | their own jobs | any job |
+
+Who has bought what is not part of the meter, so there is no public index of
+jobs: `GET /api/jobs` answers 403 unless you are the operator, a buyer asks for
+their own address with `?buyer=`, and the public figures live at `GET
+/api/stats` (jobs in memory, completed, distinct buyers, USDC settled, decisions
+logged, steps served from memory; cached ten seconds, and no job id or address
+appears in the response). A job fetched *by id* stays readable to anyone who has
+the id, in the public meter shape: a link to a job is a receipt a buyer may want
+to show someone, and that has to work without handing over a session.
 
 A buyer proves an address by signing this message, and nothing else:
 

@@ -93,6 +93,11 @@ JobStatus = Literal["new", "awaiting_payment", "running", "complete"]
 # ----------------------------------------------------------------------
 STATE_ACTIVE_JOBS = "active_jobs"
 STATE_FAKE_PAYMENTS = "fake_payments"
+# Settlements that arrived over x402: {"<job_id>:<step>": {"tx", "payer"}}.
+# A real USDC transfer on Base, but an EIP-3009 one submitted by a facilitator,
+# so it leaves no Paid event on the receipts contract and has to be recorded
+# here for check_paid to find it.
+STATE_X402_PAYMENTS = "x402_payments"
 REF_PRICING_RULES = "pricing_rules"
 
 
@@ -207,6 +212,10 @@ class StepRecord(_Model):
     price_usdc: float
     paid: bool = False
     tx_hash: str | None = None
+    # How the invoice for this step was settled: "receipts" (a Paid log on the
+    # receipts contract), "x402" (an EIP-3009 authorisation settled by a
+    # facilitator), or None for free and unsettled steps.
+    pay_method: str | None = None
     tokens: int = 0
     input_tokens: int = 0
     output_tokens: int = 0

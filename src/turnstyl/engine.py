@@ -22,7 +22,7 @@ from .llm import mechanical_block as llm_mechanical_block
 from .llm import run_step as llm_run_step
 from .llm import test_mechanical_block as llm_test_mechanical_block
 from .memory import TurnstylMemory, TurnstylStore
-from .payments import PaymentBackend, get_backend
+from .payments import PAY_METHOD_RECEIPTS, PAY_METHOD_X402, PaymentBackend, get_backend
 
 
 def _dedupe(keys: list[str]) -> list[str]:
@@ -725,12 +725,28 @@ class Engine:
             step_cost = self.store.get_step_cost(spec.id, step)
             price_usdc, _ = policy.price(step_spec, ledger, step_cost, cached)
 
+        # Which rail settled this step, if one did. The invoice was paid before
+        # the step ran, so the backend already holds the evidence; asking it here
+        # is what lets the report and the page show "x402" next to the tx.
+        pay_tx = invoice.tx_hash if invoice and invoice.step == step else None
+        pay_method = None
+        if pay_tx:
+            try:
+                pay_method = (
+                    PAY_METHOD_X402
+                    if self.payments.x402_paid(job_id, step)
+                    else PAY_METHOD_RECEIPTS
+                )
+            except Exception:  # noqa: BLE001 - a label is never worth a failed step
+                pay_method = PAY_METHOD_RECEIPTS
+
         record = S.StepRecord(
             output=output,
             output_sha256=S.sha256_text(output),
             price_usdc=price_usdc,
             paid=(decision == S.RUN_PAID) or price_usdc == 0.0,
-            tx_hash=invoice.tx_hash if invoice and invoice.step == step else None,
+            tx_hash=pay_tx,
+            pay_method=pay_method,
             tokens=tokens,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,

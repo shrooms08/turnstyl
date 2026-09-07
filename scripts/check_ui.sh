@@ -284,6 +284,22 @@ has "step card shows the test run"    "TESTS "
 has "step card: tests compile label"  "TESTS COMPILE "
 JT=$(curl -s "$BASE/api/job_types" 2>/dev/null | .venv/bin/python -c "import json,sys;d=json.load(sys.stdin);print(len(d.get('job_types') or []), d.get('default'))" 2>/dev/null)
 [ "$JT" = "2 audit" ] && ok "GET /api/job_types returns both services" || bad "GET /api/job_types" "got: $JT"
+has "x402 gasless pay button"         'id="payX402Btn"'
+has "x402 fallback: pay on chain"     ">Pay on chain<"
+has "x402 no-gas note"                'class="nogas">no gas needed<'
+has "x402 typed-data signing"         "signTypedData(domain, types, message)"
+has "x402 EIP-3009 type"              "TransferWithAuthorization: ["
+has "x402 domain read from USDC"      "usdcC.name()"
+has "x402 header construction"        '"PAYMENT-SIGNATURE": header'
+has "x402 payload carries accepted"   "accepted: signed.want"
+has "x402 endpoints"                  "/pay-x402/"
+has "x402 settle endpoint"            "/settle-x402/"
+has "x402 rail shown on the step"     'class="nogas">x402<'
+X4=$(curl -s "$BASE/api/status" 2>/dev/null | .venv/bin/python -c "import json,sys;x=(json.load(sys.stdin).get('x402') or {});print('enabled' if x.get('enabled') else 'disabled', x.get('network'))" 2>/dev/null)
+case "$X4" in
+  "enabled eip155:84532"|"disabled eip155:84532") ok "/api/status reports x402 ($X4)";;
+  *) bad "/api/status reports x402" "got: $X4";;
+esac
 has "download report button"          'id="downloadReportBtn"'
 has "report link hits report.md"      '/report.md'
 has "verify all button"               'id="verifyAllBtn"'

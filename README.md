@@ -228,6 +228,34 @@ Pages origin and localhost only, and takes at most `MAX_JOBS_PER_DAY` jobs
 (default 150) per UTC day; `/api/status` reports `remaining_today`.
 `scripts/pages.sh` republishes the whole page after a change to `web/`.
 
+## Paying
+
+There are two ways to settle an invoice, and the agent treats them as one.
+
+| | x402, gasless | receipts contract |
+| --- | --- | --- |
+| The buyer needs | USDC only | USDC and a little ETH |
+| The buyer signs | an EIP-3009 transfer authorisation | an `approve` (once) and a `pay` transaction |
+| Who submits it | a facilitator, which pays the gas | the buyer |
+| Evidence the agent keeps | the settlement transaction, recorded in memory | a `Paid` log on the receipts contract |
+| On the page | `Pay 0.50 USDC, no gas` | `Pay on chain` |
+
+Both move real USDC on Base Sepolia, and both end in the same place: the step is
+marked paid in the agent's memory with its settlement transaction, the worker
+runs it, and the agent commits the sha256 of what it delivered to the receipts
+contract exactly as before. `verify` checks that commit either way, and the
+report shows which rail paid each step.
+
+x402 is the default when the facilitator is reachable; the receipts contract is
+always there as the fallback, and is what the buyer uses if the facilitator is
+down. Protocol details, read from the package and observed on the wire, are in
+[docs/X402.md](docs/X402.md).
+
+```bash
+.venv/bin/python scripts/buyer_pay_x402.py <job_id> <step>     # gasless
+.venv/bin/python scripts/buyer_pay.py      <job_id> <step>     # on chain
+```
+
 ## Buyer side
 
 The page is also where a buyer does business with the agent. Nothing here needs
@@ -262,6 +290,42 @@ Serve with the worker so paid steps run themselves:
 export PAYMENTS=fake MOCK_LLM=1                          # or PAYMENTS=base, MOCK_LLM unset
 .venv/bin/turnstyl serve --with-worker --db ./data/turnstyl.db
 ```
+
+## What is real and what is simulated
+
+Everything the public site does is real. `MOCK_LLM` and `PAYMENTS=fake` are
+opt-in test switches for running the demo offline, and neither is on in
+anything served publicly.
+
+Real, always:
+
+- the model. The audits and test suites are written by `claude-haiku-4-5`; the
+  samples in `docs/` are verbatim output with their token counts and cost.
+- the memory. One Sibyl Memory SQLite file, and deleting it really does lose
+  everything, which is the point of the delete test.
+- the payments. Real USDC on Base Sepolia, on either rail, settled by real
+  wallet signatures. The commits are real transactions on a real contract.
+- the gates. `forge build` and `forge test` really run against the model's
+  answer, and a suite that fails to compile really is sent back.
+
+Simulated, and only when you ask for it:
+
+- `MOCK_LLM=1` serves canned step outputs so the offline demo needs no API key.
+- `PAYMENTS=fake` settles invoices in memory instead of on chain. Its
+  transaction hashes start with `0xfake` and are never rendered as explorer
+  links.
+- the `simulate payment` and `settle` endpoints exist only on the fake backend
+  and return 404 under `PAYMENTS=base`, as do the x402 endpoints, which have
+  nothing to settle when payments are fake.
+- the tamper test in the live demo edits a **copy** of the store, verifies the
+  copy, and discards it. The real store is never modified.
+- the rate and daily caps are in-process counters, so they reset when the
+  server restarts.
+
+Two things are worth saying plainly: the chain is Base Sepolia, a testnet, so
+the USDC has no value; and the agent runs on the operator's own machine behind
+a tunnel, so it is live only while that machine is on. When it is not, the page
+says so.
 
 ## Sample audit
 

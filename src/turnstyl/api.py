@@ -14,7 +14,9 @@ data and ``memory_missing: true``. The page stays up while the memory does not.
 """
 from __future__ import annotations
 
+import base64
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -25,9 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -37,7 +39,14 @@ from .engine import Engine
 from . import jobtypes
 from .jobtypes import GATE_COMPILE, GATE_FORGE_TEST
 from .memory import TENANT_ID, TurnstylMemory, TurnstylStore, count_records, default_db_path
-from .payments import ERC20_ABI, RECEIPTS_ABI, get_backend, hex0x, memo_bytes32
+from .payments import (
+    ERC20_ABI,
+    PAY_METHOD_X402,
+    RECEIPTS_ABI,
+    get_backend,
+    hex0x,
+    memo_bytes32,
+)
 
 CHAIN_ID = 84532
 EXPLORER = "https://sepolia.basescan.org"
@@ -52,7 +61,24 @@ PAGE_USDC_ABI = [e for e in ERC20_ABI if e.get("name") in ("approve", "allowance
         "outputs": [{"name": "", "type": "uint8"}],
         "stateMutability": "view",
         "type": "function",
-    }
+    },
+    # The EIP-712 domain the x402 authorisation is signed against. The 402's
+    # `extra` carries these too; the page reads them off the contract and uses
+    # extra only as a fallback, so a wrong domain cannot come from the server.
+    {
+        "inputs": [],
+        "name": "name",
+        "outputs": [{"name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "version",
+        "outputs": [{"name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
@@ -72,13 +98,8 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:8787",
     "http://localhost:8787",
 ]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Accept", "ngrok-skip-browser-warning"],
-    max_age=600,
-)
+
+logger = logging.getLogger("turnstyl.api")
 
 # Daily cap on job creation, on top of the per-minute limit below. In-process,
 # keyed by UTC date, so it resets at UTC midnight (and on restart, which is
@@ -216,6 +237,12 @@ def api_status() -> dict[str, Any]:
         "remaining_today": daily_remaining(),
         "job_types": [t.to_public() for t in jobtypes.all_types()],
         "default_job_type": jobtypes.DEFAULT_TYPE_ID,
+        "x402": {
+            "enabled": bool(x402_status["enabled"]),
+            "network": X402_NETWORK,
+            "facilitator": X402_FACILITATOR,
+            "reason": x402_status["reason"],
+        },
         "memory_missing": not exists,
     }
 
@@ -332,6 +359,7 @@ def step_view(spec: jobtypes.JobType, step: int, record: S.StepRecord) -> dict[s
         "output_sha256": record.output_sha256,
         "commit_tx": record.commit_tx,
         "pay_tx": record.tx_hash,
+        "pay_method": record.pay_method,
         "output": record.output,
     }
     if step_spec.gate == GATE_COMPILE:
@@ -361,6 +389,7 @@ def not_started_view(spec: jobtypes.JobType, step: int) -> dict[str, Any]:
         "output_sha256": None,
         "commit_tx": None,
         "pay_tx": None,
+        "pay_method": None,
         "output": None,
     }
     if step_spec.gate in (GATE_COMPILE, GATE_FORGE_TEST):
@@ -511,6 +540,7 @@ def report_data(store: TurnstylStore, job_id: str) -> dict[str, Any]:
                 "cached": st.get("cached", False),
                 "pay_tx": st.get("pay_tx"),
                 "pay_tx_url": f"{EXPLORER}/tx/{st['pay_tx']}" if st.get("pay_tx") and not str(st["pay_tx"]).startswith("0xfake") else None,
+                "pay_method": st.get("pay_method"),
                 "commit_tx": st.get("commit_tx"),
                 "commit_tx_url": f"{EXPLORER}/tx/{st['commit_tx']}" if st.get("commit_tx") else None,
                 "output_sha256": st.get("output_sha256"),
@@ -567,7 +597,14 @@ def report_markdown(r: dict[str, Any]) -> str:
         if st["cached"]:
             lines.append("- served from memory (a prior audit of this contract)")
         if st["pay_tx"]:
-            lines.append(f"- payment: [{st['pay_tx']}]({st['pay_tx_url']})" if st["pay_tx_url"] else f"- payment: `{st['pay_tx']}` (fake backend)")
+            rail = {"x402": " over x402, gasless", "receipts": " through the receipts contract"}.get(
+                st.get("pay_method") or "", ""
+            )
+            lines.append(
+                f"- payment{rail}: [{st['pay_tx']}]({st['pay_tx_url']})"
+                if st["pay_tx_url"]
+                else f"- payment: `{st['pay_tx']}` (fake backend)"
+            )
         if st["commit_tx"]:
             lines.append(f"- commit: [{st['commit_tx']}]({st['commit_tx_url']})")
         if st.get("tests_total") is not None:
@@ -1010,6 +1047,390 @@ def api_settle_outstanding(address: str, job_id: str, step: int) -> dict[str, An
 # ----------------------------------------------------------------------
 # /api/journal
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# x402: a second way to pay an invoice, with no gas and no approval
+# ----------------------------------------------------------------------
+# The buyer signs an EIP-3009 transferWithAuthorization over EIP-712 typed
+# data; a facilitator submits it and pays the gas. See docs/X402.md for the
+# wire formats, read from the package and observed live.
+#
+# The package's resource server speaks x402 v2 only, so the network is the
+# CAIP-2 name eip155:84532 rather than the v1 "base-sepolia", and the headers
+# are PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE. The middleware
+# still accepts X-PAYMENT as an inbound alias.
+X402_NETWORK = "eip155:84532"
+X402_FACILITATOR = (os.environ.get("X402_FACILITATOR") or "https://x402.org/facilitator").rstrip("/")
+X402_TIMEOUT_SECONDS = 600
+X402_PAY_PATH = re.compile(r"^/api/jobs/([^/]+)/pay-x402/(\d+)$")
+X402_SETTLE_PATH = re.compile(r"^/api/buyers/([^/]+)/settle-x402/([^/]+)/(\d+)$")
+
+x402_status: dict[str, Any] = {"enabled": False, "reason": "not checked"}
+
+
+def _x402_probe() -> tuple[bool, str]:
+    """Decide once, at startup, whether x402 is on. One line either way.
+
+    Off when explicitly disabled, when the payment backend is fake (x402 moves
+    real USDC, so there is nothing for it to do there), when the package is
+    absent, or when the facilitator does not answer with our network.
+    """
+    flag = (os.environ.get("X402_ENABLED") or "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False, "disabled by X402_ENABLED"
+    backend = (os.environ.get("PAYMENTS") or "fake").strip().lower()
+    if backend != "base":
+        return False, f"payments backend is {backend!r}; x402 settles real USDC"
+    if not os.environ.get("AGENT_ADDRESS") or not os.environ.get("USDC_ADDRESS"):
+        return False, "AGENT_ADDRESS or USDC_ADDRESS is not set"
+    try:
+        import x402  # noqa: F401
+        from x402.http import HTTPFacilitatorClient  # noqa: F401
+    except Exception as e:  # noqa: BLE001
+        return False, f"the x402 package is not importable: {type(e).__name__}: {e}"
+    try:
+        import httpx
+
+        r = httpx.get(f"{X402_FACILITATOR}/supported", timeout=8.0)
+        r.raise_for_status()
+        kinds = r.json().get("kinds") or []
+    except Exception as e:  # noqa: BLE001
+        return False, f"facilitator {X402_FACILITATOR} did not answer: {type(e).__name__}: {e}"
+    for k in kinds:
+        if k.get("scheme") == "exact" and k.get("network") == X402_NETWORK:
+            return True, f"facilitator {X402_FACILITATOR} supports exact on {X402_NETWORK}"
+    return False, f"facilitator {X402_FACILITATOR} does not list exact on {X402_NETWORK}"
+
+
+def _x402_invoice_amount(job_id: str, step: int) -> float | None:
+    """What this invoice costs, from memory. None when there is nothing owed."""
+    if not db_path().is_file():
+        return None
+    try:
+        store = TurnstylStore(TurnstylMemory(db_path()))
+        state = store.get_job_state(job_id)
+        if state is None:
+            return None
+        inv = state.open_invoice
+        if inv is not None and inv.step == step and not inv.paid:
+            return inv.amount_usdc
+        for item in store.get_buyer(state.buyer).outstanding:
+            if item.job_id == job_id and item.step == step:
+                return item.amount_usdc
+    except Exception:  # noqa: BLE001 - pricing must not raise inside the middleware
+        return None
+    return None
+
+
+def _x402_price(context) -> Any:
+    """Dynamic price: this invoice's amount, in USDC base units.
+
+    An AssetAmount rather than a dollar string, so the charge is exactly the
+    invoice and never a rounded conversion.
+    """
+    from x402.schemas import AssetAmount
+
+    path = context.path or ""
+    amount = None
+    m = X402_PAY_PATH.match(path)
+    if m:
+        amount = _x402_invoice_amount(m.group(1), int(m.group(2)))
+    else:
+        m = X402_SETTLE_PATH.match(path)
+        if m:
+            amount = _x402_invoice_amount(m.group(2), int(m.group(3)))
+    if amount is None:
+        # Nothing owed for this path. Quote a nominal amount so the 402 is
+        # well-formed; the handler refuses before anything is settled.
+        amount = 0.01
+    return AssetAmount(
+        amount=str(S.usdc_base_units(amount)),
+        asset=os.environ["USDC_ADDRESS"],
+        extra={"name": "USDC", "version": "2"},
+    )
+
+
+def _x402_payer(request: Request) -> str | None:
+    """The address that signed the authorisation on this request."""
+    payload = getattr(request.state, "payment_payload", None)
+    if payload is None:
+        return None
+    inner = getattr(payload, "payload", None)
+    if isinstance(inner, dict):
+        auth = inner.get("authorization") or {}
+        payer = auth.get("from")
+        if isinstance(payer, str):
+            return payer
+    return None
+
+
+def _x402_check(job_id: str, step: int, request: Request, address: str | None = None):
+    """Validate before the middleware settles. Returns (store, state, amount).
+
+    Raises HTTPException, which the middleware treats as a failed handler and
+    does not settle. That ordering is the whole safety property here: a payment
+    from the wrong wallet, or for an invoice that does not exist, never moves.
+    """
+    if not x402_status["enabled"]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"x402 is not available: {x402_status['reason']}",
+        )
+    if not db_path().is_file():
+        raise HTTPException(
+            status_code=409, detail="memory file missing; the agent cannot take payments"
+        )
+    store = TurnstylStore(TurnstylMemory(db_path()))
+    state = store.get_job_state(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    if address is not None and store.buyer_key(address) != state.buyer:
+        raise HTTPException(
+            status_code=400,
+            detail=f"job {job_id} belongs to {state.buyer}, not {store.buyer_key(address)}",
+        )
+    amount = _x402_invoice_amount(job_id, step)
+    if amount is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"job {job_id} has nothing owed for step {step}",
+        )
+    payer = _x402_payer(request)
+    if payer is None:
+        raise HTTPException(status_code=400, detail="no x402 payment payload on the request")
+    if payer.lower() != state.buyer.lower():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"the x402 payer {payer.lower()} is not this job's buyer "
+                f"{state.buyer}; nothing was settled"
+            ),
+        )
+    return store, state, amount
+
+
+def x402_record_settlement(job_id: str, step: int, tx_hash: str, payer: str) -> dict[str, Any]:
+    """Write a settled x402 payment into memory, exactly as a Paid log would.
+
+    Called once the facilitator has actually settled, so the recorded hash is
+    a real Base Sepolia transaction. The rest of turnstyl cannot tell the
+    difference: the worker runs the step, commit() still publishes the output
+    hash, and verify still checks it.
+    """
+    store = TurnstylStore(TurnstylMemory(db_path()))
+    state = store.get_job_state(job_id)
+    if state is None:
+        return {"recorded": False, "reason": f"job {job_id} vanished before settlement"}
+    payments = get_backend(store.memory)
+
+    # Mark the invoice settled BEFORE publishing the evidence, and re-read the
+    # state immediately before writing it. The worker wakes on the evidence, and
+    # a job state read before that and written after would put the job back on
+    # the step the worker has just finished, losing the invoice it issued next.
+    fresh = store.get_job_state(job_id)
+    if (
+        fresh is not None
+        and fresh.open_invoice is not None
+        and fresh.open_invoice.step == step
+        and not fresh.open_invoice.paid
+    ):
+        fresh.open_invoice.paid = True
+        fresh.open_invoice.tx_hash = tx_hash
+        store.put_job_state(fresh)
+
+    # Not mark_paid: on the Base backend that deliberately refuses, because a
+    # receipts-contract payment must land as a Paid log. An x402 settlement is
+    # real USDC too, on its own rail, so it is recorded as its own evidence.
+    payments.record_x402(job_id, step, tx_hash, payer or "")
+
+    # A step that has already run (the settle path on a closed job) gets its
+    # rail stamped here; one that has not is stamped by the engine when it runs.
+    entity = store.get_job_entity(job_id)
+    if entity is not None and str(step) in entity.steps:
+        record = entity.steps[str(step)]
+        record.paid = True
+        record.tx_hash = tx_hash
+        record.pay_method = PAY_METHOD_X402
+        store.put_job_entity(job_id, entity)
+    cleared = payments.reconcile(state.buyer)
+    store.journal(
+        S.JournalEntry(
+            evaluated=[
+                f"{S.job_state_key(job_id)} -> step {step} owed "
+                f"{_x402_invoice_amount(job_id, step) or 0:.2f} USDC",
+                f"x402 {X402_NETWORK} -> settled by the facilitator in {tx_hash}",
+            ],
+            acted=[
+                f"recorded an x402 settlement for step {step} of job {job_id} "
+                f"from payer {payer.lower()} (tx {tx_hash})"
+            ],
+            forward=["the worker runs this step on its next pass"],
+            extra={
+                "job_id": job_id,
+                "buyer": state.buyer,
+                "step": step,
+                "decision": "PAID_X402",
+                "price": _x402_invoice_amount(job_id, step),
+                "tx_hash": tx_hash,
+                "pay_method": PAY_METHOD_X402,
+                "summary": (
+                    f"Step {step} was paid over x402: the buyer signed a USDC "
+                    f"transfer and a facilitator submitted it, so the buyer spent "
+                    f"no gas."
+                ),
+            },
+        )
+    )
+    return {"recorded": True, "tx_hash": tx_hash, "payer": payer.lower(), "reconciled": cleared}
+
+
+@app.post("/api/jobs/{job_id}/pay-x402/{step}")
+def api_pay_x402(job_id: str, step: int, request: Request) -> dict[str, Any]:
+    """Pay one open invoice over x402. Gasless for the buyer.
+
+    Unpaid, this answers 402 with the payment requirements. With a valid
+    PAYMENT-SIGNATURE (or X-PAYMENT) header the middleware verifies, this
+    handler checks the payer against the job's buyer, and the middleware
+    settles on the way out. The settlement hash is written to memory by
+    ``x402_settlement_recorder`` once it exists.
+    """
+    store, state, amount = _x402_check(job_id, step, request)
+    return {
+        "x402": "verified",
+        "job_id": job_id,
+        "step": step,
+        "amount_usdc": amount,
+        "buyer": state.buyer,
+        "note": "settlement is recorded once the facilitator confirms it",
+    }
+
+
+@app.post("/api/buyers/{address}/settle-x402/{job_id}/{step}")
+def api_settle_x402(address: str, job_id: str, step: int, request: Request) -> dict[str, Any]:
+    """Settle an outstanding item on a closed job over x402. Gasless."""
+    store, state, amount = _x402_check(job_id, step, request, address=address)
+    return {
+        "x402": "verified",
+        "job_id": job_id,
+        "step": step,
+        "amount_usdc": amount,
+        "buyer": state.buyer,
+        "note": "settlement is recorded once the facilitator confirms it",
+    }
+
+
+
+
+# ----------------------------------------------------------------------
+# x402 middleware: the paywall, and the recorder that follows it
+# ----------------------------------------------------------------------
+def _x402_install() -> None:
+    """Register the paywall on the two x402 endpoints, if x402 is on."""
+    from x402 import x402ResourceServer
+    from x402.http import FacilitatorConfig, HTTPFacilitatorClient
+    from x402.http.middleware.fastapi import payment_middleware
+    from x402.http.types import PaymentOption, RouteConfig
+    from x402.mechanisms.evm.exact.register import register_exact_evm_server
+
+    facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=X402_FACILITATOR))
+    server = x402ResourceServer(facilitator)
+    register_exact_evm_server(server)
+
+    def option(description: str) -> PaymentOption:
+        return PaymentOption(
+            scheme="exact",
+            pay_to=os.environ["AGENT_ADDRESS"],
+            price=_x402_price,
+            network=X402_NETWORK,
+            max_timeout_seconds=X402_TIMEOUT_SECONDS,
+        )
+
+    # [param] compiles to [^/]+, so these match one path segment each and
+    # nothing else on the API is behind the paywall.
+    routes = {
+        "POST /api/jobs/[job_id]/pay-x402/[step]": RouteConfig(
+            accepts=option("one metered step"),
+            description="turnstyl: one metered step of an audit or test suite",
+        ),
+        "POST /api/buyers/[address]/settle-x402/[job_id]/[step]": RouteConfig(
+            accepts=option("an outstanding invoice"),
+            description="turnstyl: an outstanding invoice on a closed job",
+        ),
+    }
+    paywall = payment_middleware(routes, server)
+
+    @app.middleware("http")
+    async def x402_paywall(request: Request, call_next):
+        return await paywall(request, call_next)
+
+    # Added last, so it is the OUTERMOST layer and sees the response the
+    # paywall produced, including the PAYMENT-RESPONSE header it attaches
+    # after settling. The exact scheme settles after the handler, so this is
+    # the first point at which the settlement hash exists.
+    @app.middleware("http")
+    async def x402_settlement_recorder(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        match = X402_PAY_PATH.match(path) or X402_SETTLE_PATH.match(path)
+        if match is None:
+            return response
+
+        if response.status_code == 402:
+            # v2 sends an empty body and puts the requirements in a header. Mirror
+            # them into the body too: a browser can only read the header when CORS
+            # exposes it, and a reader with the body needs no such permission.
+            req_raw = response.headers.get("payment-required")
+            if not req_raw:
+                return response
+            try:
+                requirements = json.loads(base64.b64decode(req_raw))
+            except Exception:  # noqa: BLE001
+                return response
+            headers = {
+                k: v for k, v in response.headers.items() if k.lower() != "content-length"
+            }
+            return JSONResponse(content=requirements, status_code=402, headers=headers)
+
+        if response.status_code != 200:
+            return response
+
+        raw = response.headers.get("payment-response") or response.headers.get(
+            "x-payment-response"
+        )
+        if not raw:
+            return response
+        try:
+            settled = json.loads(base64.b64decode(raw))
+        except Exception:  # noqa: BLE001 - a malformed receipt is not our crash
+            return response
+        if not settled.get("success") or not settled.get("transaction"):
+            return response
+
+        groups = match.groups()
+        job_id, step = (groups[0], int(groups[1])) if len(groups) == 2 else (groups[1], int(groups[2]))
+        try:
+            result = x402_record_settlement(
+                job_id, step, str(settled["transaction"]), str(settled.get("payer") or "")
+            )
+        except Exception as e:  # noqa: BLE001 - the money moved; say so, do not 500
+            logger.exception("x402: settled but could not record the payment")
+            result = {"recorded": False, "reason": f"{type(e).__name__}: {e}"}
+
+        body = {
+            "x402": "settled",
+            "settlement": settled,
+            "recorded": result,
+        }
+        try:
+            store = TurnstylStore(TurnstylMemory(db_path()))
+            body["job"] = job_detail(store, job_id)
+        except Exception:  # noqa: BLE001 - the receipt matters more than the view
+            body["job"] = None
+        headers = {
+            k: v for k, v in response.headers.items() if k.lower() != "content-length"
+        }
+        return JSONResponse(content=body, status_code=200, headers=headers)
+
+
 @app.get("/api/journal")
 def api_journal(
     job: str | None = Query(default=None, description="Filter to one job id."),
@@ -1055,6 +1476,52 @@ def api_journal(
 # ----------------------------------------------------------------------
 # Static page
 # ----------------------------------------------------------------------
+# Decide once, at import, and say so once. The paywall can only be registered
+# while the app is being built, so the facilitator health check happens here
+# rather than on a startup event.
+_x402_ok, _x402_reason = _x402_probe()
+x402_status["enabled"] = _x402_ok
+x402_status["reason"] = _x402_reason
+if _x402_ok:
+    try:
+        _x402_install()
+        print(f"x402: enabled on {X402_NETWORK} ({_x402_reason})", flush=True)
+    except Exception as _e:  # noqa: BLE001 - a paywall that will not build is off
+        x402_status["enabled"] = False
+        x402_status["reason"] = f"could not install the paywall: {type(_e).__name__}: {_e}"
+        print(f"x402: disabled ({x402_status['reason']})", flush=True)
+else:
+    print(f"x402: disabled ({_x402_reason})", flush=True)
+
+
+# CORS is added LAST on purpose. Starlette applies the most recently added
+# middleware outermost, and a 402 produced by the x402 paywall never reaches an
+# inner layer, so a CORS middleware registered earlier would leave the browser
+# unable to read the payment requirements it is being asked to satisfy.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Content-Type",
+        "Accept",
+        "ngrok-skip-browser-warning",
+        # x402 sends the signed authorisation in a header; v1 name accepted too
+        "PAYMENT-SIGNATURE",
+        "X-PAYMENT",
+    ],
+    # The page is served from GitHub Pages and the API from a tunnel, so the
+    # x402 headers are cross-origin. Without this the browser can see the 402
+    # but not the requirements inside it.
+    expose_headers=[
+        "PAYMENT-REQUIRED",
+        "PAYMENT-RESPONSE",
+        "X-PAYMENT-RESPONSE",
+    ],
+    max_age=600,
+)
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     page = WEB_DIR / "index.html"

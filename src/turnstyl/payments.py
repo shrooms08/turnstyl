@@ -22,6 +22,10 @@ load_dotenv()
 FAKE = "fake"
 BASE = "base"
 
+# How a settled invoice was paid.
+PAY_METHOD_RECEIPTS = "receipts"
+PAY_METHOD_X402 = "x402"
+
 EXPLORER = "https://sepolia.basescan.org"
 
 
@@ -70,6 +74,41 @@ class PaymentBackend(ABC):
             f"  Have the buyer run: .venv/bin/python scripts/buyer_pay.py "
             f"<job_id> <step>"
         )
+
+    # ---- x402: a second settlement rail, shared by both backends ----
+    def _x402_key(self, job_id: str, step: int) -> str:
+        return f"{job_id}:{step}"
+
+    def _x402_load(self) -> dict[str, Any]:
+        record = self.memory.get_state(S.STATE_X402_PAYMENTS)
+        return dict(record["body"]) if record else {}
+
+    def record_x402(self, job_id: str, step: int, tx_hash: str, payer: str) -> str:
+        """Record a settled x402 payment as evidence for ``check_paid``.
+
+        An x402 payment is a real USDC transfer on Base, signed by the buyer
+        and submitted by a facilitator, so it never emits a Paid event on the
+        receipts contract. Recording it here is what makes the two rails
+        equivalent everywhere else: the worker, reconcile and the ledger all
+        ask ``check_paid``, and it answers for either.
+        """
+        paid = self._x402_load()
+        paid[self._x402_key(job_id, step)] = {
+            "tx": tx_hash,
+            "payer": payer.lower(),
+            "method": PAY_METHOD_X402,
+            "at": S.utc_now(),
+        }
+        self.memory.set_state(S.STATE_X402_PAYMENTS, paid)
+        return tx_hash
+
+    def x402_paid(self, job_id: str, step: int) -> str | None:
+        """The settling tx of an x402 payment for this step, if there was one."""
+        entry = self._x402_load().get(self._x402_key(job_id, step))
+        if isinstance(entry, dict):
+            tx = entry.get("tx")
+            return str(tx) if tx else None
+        return str(entry) if entry else None
 
     # ---- optional capabilities; the default answers keep `fake` unchanged ----
     def current_block(self) -> int | None:
@@ -208,7 +247,7 @@ class FakePayments(PaymentBackend):
         return S.invoice_memo(job_id, step)
 
     def check_paid(self, job_id: str, step: int) -> str | None:
-        return self._load().get(self._key(job_id, step))
+        return self._load().get(self._key(job_id, step)) or self.x402_paid(job_id, step)
 
     def mark_paid(self, job_id: str, step: int, tx_hash: str | None = None) -> str:
         paid = self._load()
@@ -459,7 +498,16 @@ class BasePayments(PaymentBackend):
         return found
 
     def check_paid(self, job_id: str, step: int) -> str | None:
-        """A Paid log from this buyer for at least the invoiced amount."""
+        """Evidence that this step was paid: an x402 settlement, or a Paid log.
+
+        Both are real USDC on Base. The receipts contract emits Paid; an x402
+        payment is an EIP-3009 transfer submitted by a facilitator and emits
+        nothing here, so it is recorded in memory when it settles and read back
+        first. Everything downstream treats them identically.
+        """
+        settled = self.x402_paid(job_id, step)
+        if settled:
+            return settled
         facts = self._invoice_facts(job_id, step)
         if facts is None:
             return None

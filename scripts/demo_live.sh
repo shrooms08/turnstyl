@@ -174,6 +174,85 @@ pay_run(){  # pay_run <beat> <job> <step> <amount> [cached]
   check "$beat" "step $step committed on chain" "COMMITTED"
   [ -n "$cached" ] && check "$beat" "step $step served from memory" "from memory (cached)"
 }
+X402_SKIPPED=""
+x402_pay_run(){  # x402_pay_run <beat> <job> <step> <amount>
+  # The gasless rail: the buyer signs an EIP-3009 authorisation and a
+  # facilitator submits it. Needs the HTTP API up, so this starts a server with
+  # the worker for the duration and lets the worker run the step. A facilitator
+  # that is down or refuses is a SKIP, not a failure: it is not turnstyl's.
+  local beat="$1" job="$2" step="$3" amount="$4"
+  local port=8802
+  echo "--- x402: pay step $step of $job ($amount USDC, no gas)"
+  $CLI serve --with-worker --port $port --db "$DB" > /tmp/turnstyl-demo-x402-serve.log 2>&1 &
+  local srv=$!; disown $srv 2>/dev/null
+  local i
+  for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$port/api/status" && break; sleep 0.5; done
+
+  local enabled
+  enabled=$(curl -s "http://127.0.0.1:$port/api/status" | $PY -c "import json,sys;print((json.load(sys.stdin).get('x402') or {}).get('enabled'))" 2>/dev/null)
+  if [ "$enabled" != "True" ]; then
+    local why
+    why=$(curl -s "http://127.0.0.1:$port/api/status" | $PY -c "import json,sys;print((json.load(sys.stdin).get('x402') or {}).get('reason'))" 2>/dev/null)
+    echo "  SKIP x402 is not available: $why"
+    X402_SKIPPED="x402 unavailable: $why"
+    kill $srv 2>/dev/null
+    pay_run "$beat" "$job" "$step" "$amount"      # fall back to the receipts contract
+    return
+  fi
+
+  TURNSTYL_API="http://127.0.0.1:$port" run_quiet $PY scripts/buyer_pay_x402.py "$job" "$step"
+  local rc=$?
+  collect_tx "$OUT"
+  if [ $rc -ne 0 ]; then
+    local reason
+    reason=$(flatten "$OUT" | tail -c 300)
+    echo "  SKIP the facilitator refused or was unreachable: $reason"
+    X402_SKIPPED="facilitator refused: $reason"
+    kill $srv 2>/dev/null
+    pay_run "$beat" "$job" "$step" "$amount"      # fall back to the receipts contract
+    return
+  fi
+  check "$beat" "step $step paid over x402, gasless" "PAID $amount USDC over x402"
+  X402_TX=$(flatten "$OUT" | grep -oE '0x[0-9a-fA-F]{64}' | head -1)
+
+  # The worker, not the CLI, runs a step paid this way. Wait for the whole pass,
+  # not for the step card: the step is written to the entity before the agent
+  # commits its hash on chain, credits the buyer, and invoices the next step, so
+  # a server killed the moment the card reads "done" is killed mid-step. What
+  # says the pass is finished is the job moving on: a new invoice, or COMPLETE.
+  local moved=""
+  for i in $(seq 1 60); do
+    moved=$(curl -s "http://127.0.0.1:$port/api/jobs/$job" | $PY -c "
+import json,sys
+d=json.load(sys.stdin); inv=d.get('open_invoice') or {}
+print('yes' if d.get('status') == 'complete' or (inv.get('step') or 0) > $step else 'no')" 2>/dev/null)
+    [ "$moved" = "yes" ] && break
+    sleep 2
+  done
+  local ran
+  ran=$(curl -s "http://127.0.0.1:$port/api/jobs/$job" | $PY -c "
+import json,sys
+d=json.load(sys.stdin); s=[x for x in d['steps'] if x['step']==$step][0]
+print(s['status'], s.get('pay_method'), s.get('pay_tx') or '-', s.get('commit_tx') or '-')" 2>/dev/null)
+  kill $srv 2>/dev/null
+  case "$ran" in
+    "done x402 0x"*" 0x"*) echo "  ok   the worker ran step $step, recorded pay_method x402, and committed on chain";;
+    "done x402 0x"*) echo "  FAIL step $step ran and was paid over x402 but never committed on chain: $ran"
+       FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("$beat: x402 commit");;
+    *) echo "  FAIL the worker did not record an x402 payment for step $step: $ran"
+       FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("$beat: x402 worker/record");;
+  esac
+  # the settlement hash must be a real transaction on Base Sepolia
+  local onchain
+  onchain=$(cast receipt "$X402_TX" status --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
+  if [ "$onchain" = "1" ] || [ "$onchain" = "true" ]; then
+    echo "  ok   the x402 settlement is on Base Sepolia: $X402_TX"
+  else
+    echo "  FAIL the x402 settlement tx is not on chain: $X402_TX (status ${onchain:-none})"
+    FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("$beat: x402 tx on chain")
+  fi
+}
+
 complete_paid_job(){  # complete_paid_job <beat> -> sets NEWJOB; repeat contract, cached prices
   local beat="$1"
   run "job new" $CLI job new "$CONTRACT" --buyer "$BUYER_ADDRESS"
@@ -222,20 +301,22 @@ beat_result 2 "job opened, step 2 invoiced, no credit for a stranger" $before
 
 # ----------------------------------------------------------------- beat 3
 before=$FAILURES
-echo "BEAT 3: first job, every step paid on chain and committed"
+echo "BEAT 3: first job, paid on both rails: the receipts contract and x402"
 pay_run 3 "$JOB1" 2 0.50
 check 3 "reentrancy finding delivered" "Reentrancy in withdraw()"
 check 3 "invoice for step 3 at 0.75 USDC" "amount 0.75 USDC"
-pay_run 3 "$JOB1" 3 0.75
-check 3 "invoice for step 4 at 0.25 USDC" "amount 0.25 USDC"
+x402_pay_run 3 "$JOB1" 3 0.75
+# the worker already ran step 3, so this run reports on step 4: its invoice and
+# the decision to wait for it. (`check` reads the most recent captured output.)
 run "job run $JOB1 (step 4 unpaid)" $CLI job run "$JOB1"
+check 3 "invoice for step 4 at 0.25 USDC" "amount 0.25 USDC"
 check 3 "two paid steps still do not earn credit" "DECISION: WAIT_FOR_PAYMENT"
 pay_run 3 "$JOB1" 4 0.25
 check 3 "job complete" "COMPLETE"
 run "ledger" $CLI ledger "$BUYER_ADDRESS"
 check 3 "one completed paid job on the ledger" "completed paid jobs 1"
 check 3 "buyer trust tier still new" "trust tier new"
-beat_result 3 "first job fully paid, still no credit" $before
+beat_result 3 "first job fully paid on two rails, still no credit" $before
 
 # ----------------------------------------------------------------- beat 3b
 before=$FAILURES
@@ -436,6 +517,11 @@ echo "${VERIFY_SAMPLE:-n/a}" | sed 's/^/  /'
 echo
 echo "double-charge transaction: ${DOUBLE_TX:-none}"
 echo
+if [ -n "$X402_SKIPPED" ]; then
+  echo "x402: SKIPPED ($X402_SKIPPED); step 3 fell back to the receipts contract"
+else
+  echo "x402: step 3 paid gaslessly, settlement ${X402_TX:-unknown}"
+fi
 echo "transactions: $(wc -l < "$TXFILE" | tr -d ' ') recorded in $TXFILE"
 echo "========================================================================"
 if [ "$FAILURES" -ne 0 ]; then

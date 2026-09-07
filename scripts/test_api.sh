@@ -6,6 +6,8 @@
 #   scripts/test_api.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# AGENT_ADDRESS and USDC_ADDRESS are needed to assert what an x402 402 quotes.
+[ -f .env ] && { set -a; . ./.env; set +a; }
 
 PORT=8791
 BASE="http://127.0.0.1:$PORT"
@@ -145,7 +147,7 @@ N2=$(jget "/api/journal?limit=500" | jq_ "d['count']")
 
 # ---------------------------------------------------------------- status for the page
 [ "$(jget "/api/status" | jq_ "sorted(e['name'] for e in d['receipts_abi'])")" = "['Paid', 'pay']" ] && ok "status carries the receipts ABI (pay, Paid)" || bad "status carries the receipts ABI"
-[ "$(jget "/api/status" | jq_ "sorted(e['name'] for e in d['usdc_abi'])")" = "['allowance', 'approve', 'balanceOf', 'decimals']" ] && ok "status carries the USDC ABI" || bad "status carries the USDC ABI"
+[ "$(jget "/api/status" | jq_ "sorted(e['name'] for e in d['usdc_abi'])")" = "['allowance', 'approve', 'balanceOf', 'decimals', 'name', 'version']" ] && ok "status carries the USDC ABI (incl. name/version for the x402 EIP-712 domain)" || bad "status carries the USDC ABI"
 [ "$(jget "/api/status" | jq_ "'usdc_address' in d")" = "True" ] && ok "status carries usdc_address" || bad "status carries usdc_address"
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs/$JOB/pay")
 [ "$C" = "400" ] && ok "simulate on a job with no open invoice -> 400" || bad "simulate on a job with no open invoice -> 400" "got $C"
@@ -157,9 +159,41 @@ SERVER2=$!; disown $SERVER2 2>/dev/null   # so the shell does not report the kil
 for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$PORT2/api/status" && break; sleep 0.5; done
 R2=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/jobs/$JOB2/pay"); C2=$(echo "$R2" | tail -1); B2=$(echo "$R2" | sed '$d')
 R3=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/buyers/$BUYER/settle/$JOB/4"); C3=$(echo "$R3" | tail -1); B3=$(echo "$R3" | sed '$d')
+# x402 on the base backend: an unpaid POST must quote this invoice
+X4=$(curl -s "http://127.0.0.1:$PORT2/api/status" | jq_ "d['x402']['enabled'], d['x402']['network']")
+XJOB=$(jget "/api/jobs" | jq_ "[j['job_id'] for j in d['jobs'] if j['status']!='complete'][0] if [j for j in d['jobs'] if j['status']!='complete'] else ''")
+XSTEP=$(jget "/api/jobs/$XJOB" | jq_ "(d.get('open_invoice') or {}).get('step') or ''")
+XAMT=$(jget "/api/jobs/$XJOB" | jq_ "(d.get('open_invoice') or {}).get('amount_usdc') or ''")
+case "$X4" in
+  "True eip155:84532")
+    ok "x402 is on under PAYMENTS=base ($X4)"
+    if [ -n "$XSTEP" ]; then
+      XR=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$PORT2/api/jobs/$XJOB/pay-x402/$XSTEP")
+      XC=$(echo "$XR" | tail -1); XB=$(echo "$XR" | sed '$d')
+      XUNITS=$($PY -c "print(round(float('$XAMT')*1000000))")
+      if [ "$XC" = "402" ]; then
+        XFACTS=$(echo "$XB" | jq_ "d['accepts'][0]['payTo'], d['accepts'][0]['network'], d['accepts'][0]['amount'], d['accepts'][0]['scheme']")
+        [ "$XFACTS" = "$AGENT_ADDRESS eip155:84532 $XUNITS exact" ] && ok "unpaid pay-x402 -> 402 quoting $AGENT_ADDRESS, eip155:84532, $XUNITS units ($XAMT USDC)" || bad "402 requirements" "got: $XFACTS (wanted $AGENT_ADDRESS eip155:84532 $XUNITS exact)"
+      else
+        bad "unpaid pay-x402 -> 402" "got $XC: $(echo "$XB" | head -c 200)"
+      fi
+    else
+      bad "unpaid pay-x402 -> 402" "no open invoice to quote"
+    fi
+    ;;
+  *) ok "x402 unavailable on this run, skipping the 402 check ($X4)";;
+esac
+
 kill $SERVER2 2>/dev/null
 [ "$C2" = "404" ] && grep -q "payments are on chain; use the Pay button" <<< "$B2" && ok "PAYMENTS=base: simulate -> 404 with the on-chain detail" || bad "PAYMENTS=base: simulate -> 404" "got $C2: $(echo "$B2" | head -c 120)"
 [ "$C3" = "404" ] && grep -q "payments are on chain; use the Pay button" <<< "$B3" && ok "PAYMENTS=base: settle -> 404 with the on-chain detail" || bad "PAYMENTS=base: settle -> 404" "got $C3: $(echo "$B3" | head -c 120)"
+
+# ---------------------------------------------------------------- x402 off on the fake backend
+[ "$(jget "/api/status" | jq_ "d['x402']['enabled']")" = "False" ] && ok "x402 is off under PAYMENTS=fake" || bad "x402 is off under PAYMENTS=fake" "$(jget "/api/status" | jq_ "d['x402']")"
+R=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/jobs/$JOB/pay-x402/2"); C=$(echo "$R" | tail -1); B=$(echo "$R" | sed '$d')
+[ "$C" = "404" ] && grep -q "x402 is not available" <<< "$B" && grep -q "settles real USDC" <<< "$B" && ok "pay-x402 under PAYMENTS=fake -> 404 saying why" || bad "pay-x402 under PAYMENTS=fake -> 404" "got $C: $(echo "$B" | head -c 160)"
+R=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle-x402/$JOB/2"); C=$(echo "$R" | tail -1); B=$(echo "$R" | sed '$d')
+[ "$C" = "404" ] && grep -q "x402 is not available" <<< "$B" && ok "settle-x402 under PAYMENTS=fake -> 404 saying why" || bad "settle-x402 under PAYMENTS=fake -> 404" "got $C: $(echo "$B" | head -c 160)"
 
 # ---------------------------------------------------------------- validation
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"0xnotanaddress\",\"source\":$SRC}")

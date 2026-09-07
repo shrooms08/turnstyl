@@ -321,14 +321,34 @@
   }
 
   /* ── render: chrome ────────────────────────────────────────────── */
+  // The agent is up but running code that cannot read its own store. Saying
+  // nothing here is what turned a schema drift into "you have no jobs".
+  function needsRestart(){
+    var schema = (S.status || {}).schema;
+    return !!(schema && schema.ok === false);
+  }
+  function restartReason(){
+    var schema = (S.status || {}).schema || {};
+    return schema.problem || "this build cannot read rows the store holds";
+  }
+  function restartCard(){
+    return '<div class="card restart"><h3>the agent needs a restart</h3>' +
+      '<p>The agent is answering, but it is running code that cannot read its own ' +
+      'store, so nothing here can be listed. This is not an empty store: your jobs ' +
+      'are still in it.</p>' +
+      '<div class="why">' + esc(restartReason()) + '</div></div>';
+  }
+
   function renderChrome(){
     var st = S.status || {};
     document.body.classList.toggle("memory-missing", !!S.missing);
     document.body.classList.toggle("agent-offline", !!S.offline && !S.missing);
+    document.body.classList.toggle("needs-restart", needsRestart() && !S.missing);
     var banner = $("#banner");
     if(S.missing) banner.textContent = "memory deleted: " + (st.db_path || "unknown path");
+    else if(needsRestart()) banner.textContent = "the agent needs a restart: it cannot read its own store";
     else if(S.offline) banner.textContent = "agent offline: the operator's machine is not reachable right now";
-    var bannerH = (S.missing || S.offline) ? banner.offsetHeight : 0;
+    var bannerH = (S.missing || S.offline || needsRestart()) ? banner.offsetHeight : 0;
     document.documentElement.style.setProperty("--banner-h", bannerH + "px");
 
     var dot = $("#dbDot");
@@ -780,6 +800,7 @@
 
   function jobView(){
     var job = S.job;
+    if(needsRestart() && !S.missing && !job) return restartCard();
     if(S.missing)
       return '<div class="card"><h3>job '+esc(S.jobId)+'</h3><div class="empty gone-note">job gone — steps, prices, outputs and invoices were stored in the deleted memory file</div></div>' +
         timeline() + buyerCard();
@@ -825,6 +846,7 @@
   }
 
   function listView(){
+    if(needsRestart() && !S.missing) return restartCard();
     if(S.missing)
       return '<div class="card"><h3>jobs</h3><div class="empty gone-note">no jobs — the index of every job the agent has run was in the deleted memory file</div></div>';
 

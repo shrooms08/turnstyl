@@ -29,6 +29,7 @@
       <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
       <div class="row" id="whoRow"></div>
     </div>
+    <div class="stats" id="statsLine"></div>
     <div class="chead">
       <h2 id="consoleTitle">Jobs</h2>
       <div class="meta" id="consoleMeta">polling every 3s</div>
@@ -133,8 +134,11 @@
 
   /* ── state ─────────────────────────────────────────────────────── */
   var S = {
-    status:null, jobs:null, job:null, buyer:null, journal:null,
-    missing:false, connected:false, jobId:null,
+    // `mine` is this wallet's jobs, `all` is the operator's list, and they are
+    // fetched separately because the API answers them separately: the job list
+    // without a buyer filter is an operator view and 403s for anyone else.
+    status:null, stats:null, mine:null, all:null, job:null, buyer:null, journal:null,
+    missing:false, connected:false, jobId:null, listErr:null,
     openStep:null, memTouched:{}, jobType:null,
     statusFails:0, offline:false
   };
@@ -143,7 +147,11 @@
   var P = { jobId:null, step:null, status:null, tx:null, busy:false };
   // A: who the API thinks we are. `token` is a wallet session; `operator` is
   // the pasted OPERATOR_TOKEN, which outranks it when both are present.
-  var A = { token:null, address:null, operator:null, kind:"public", busy:false, err:null, note:"" };
+  // Both credentials can be held at once: an operator who is also a buyer sees
+  // their own jobs and everyone's. `kind` is what the API makes of the token
+  // actually sent; `buyerOk` is the wallet session confirmed separately.
+  var A = { token:null, address:null, operator:null, kind:"public", buyerOk:false,
+            busy:false, err:null, note:"" };
   var BASE_CHAIN = "0x14a34";
   var BASE_SEPOLIA = { chainId:BASE_CHAIN, chainName:"Base Sepolia", rpcUrls:["https://sepolia.base.org"],
                        nativeCurrency:{ name:"Ether", symbol:"ETH", decimals:18 },
@@ -177,8 +185,12 @@
   }
   // the operator token wins: it is the wider identity of the two
   function bearer(){ return A.operator || A.token || null; }
-  function signedIn(){ return A.kind === "buyer" || A.kind === "operator"; }
   function isOperator(){ return A.kind === "operator"; }
+  // signed in as a wallet: either the token being sent is the buyer session,
+  // or the operator token is being sent and a buyer session was confirmed too
+  function buyerSignedIn(){ return A.kind === "buyer" || (isOperator() && !!A.token && A.buyerOk); }
+  function myAddress(){ return buyerSignedIn() ? A.address : null; }
+  function signedIn(){ return buyerSignedIn() || isOperator(); }
 
   /* ── fetch ─────────────────────────────────────────────────────── */
   function apiUrl(path){ return String(window.TURNSTYL_API || "").replace(/\/+$/, "") + path; }
@@ -210,31 +222,43 @@
     return typeof d === "string" ? d : JSON.stringify(d);
   }
 
+  // /api/auth/me for one specific token, used to confirm the wallet session
+  // while the operator token is the one being sent on everything else
+  function meAs(tok){
+    return fetch(apiUrl("/api/auth/me"), { cache:"no-store",
+      headers:{ accept:"application/json", "ngrok-skip-browser-warning":"true",
+                Authorization:"Bearer " + tok } })
+      .then(function(r){ return r.ok ? r.json() : null; }).catch(function(){ return null; });
+  }
+
   function poll(){
     var id = S.jobId;
-    var calls = [ api("/api/status"), api("/api/jobs"), api("/api/journal?limit=50"), api("/api/auth/me") ];
+    // The public figures need no credential and name nobody; the job list does
+    // and is fetched below, once we know what this caller is allowed to ask.
+    var calls = [ api("/api/status"), api("/api/stats"), api("/api/journal?limit=50"), api("/api/auth/me") ];
     calls.push(id ? api("/api/jobs/"+encodeURIComponent(id)) : Promise.resolve(null));
     calls.push(id ? api("/api/journal?job="+encodeURIComponent(id)+"&limit=50") : Promise.resolve(null));
     return Promise.all(calls).then(function(r){
-      var status = r[0], jobs = r[1], gjournal = r[2], me = r[3], job = r[4], jjournal = r[5];
+      var status = r[0], stats = r[1], gjournal = r[2], me = r[3], job = r[4], jjournal = r[5];
       S.connected = !!status;
       S.statusFails = status ? 0 : S.statusFails + 1;
       S.offline = S.statusFails >= 2;
       if(status) S.status = status;
-      if(jobs) S.jobs = jobs;
+      if(stats) S.stats = stats;
       if(job) S.job = job;
       S.journal = id ? (jjournal || null) : (gjournal || null);
       S.globalJournal = gjournal || S.globalJournal || null;
       if(me){
         A.kind = me.kind || "public";
         // a session the server has forgotten (restart, expiry) reads as public
-        if(me.kind === "buyer") A.address = me.address;
+        if(me.kind === "buyer"){ A.address = me.address; A.buyerOk = true; }
+        if(me.kind !== "operator") A.buyerOk = (me.kind === "buyer");
         if(me.kind === "public" && (A.token || A.operator)) A.note = "the session expired; sign in again";
         else if(me.kind !== "public") A.note = "";
       }
 
       var missing = false;
-      [status, jobs, job, gjournal, jjournal].forEach(function(x){
+      [status, stats, job, gjournal, jjournal].forEach(function(x){
         if(x && x.memory_missing === true) missing = true;
       });
       if(status && status.db_exists === false) missing = true;
@@ -250,7 +274,30 @@
       }
       if(!id || missing) S.buyer = null;
       render();
-    }).then(function(){ if(W.addr) refreshBalance(); });
+    }).then(function(){
+      // the wallet session, confirmed on its own while the operator token is
+      // the credential everything else travels with
+      if(A.operator && A.token) return meAs(A.token).then(function(m){
+        A.buyerOk = !!(m && m.kind === "buyer");
+        if(A.buyerOk) A.address = m.address;
+      });
+    }).then(fetchLists).then(function(){ if(W.addr) refreshBalance(); });
+  }
+
+  // Two lists, two permissions. A wallet may ask for its own jobs; only the
+  // operator may ask for all of them. Anything else the API answers 403, which
+  // is a fact worth showing rather than an error to swallow.
+  function fetchLists(){
+    if(S.missing){ S.mine = null; S.all = null; return Promise.resolve(); }
+    var jobs = [];
+    var addr = myAddress();
+    jobs.push(addr
+      ? api("/api/jobs?buyer=" + encodeURIComponent(addr)).then(function(d){ S.mine = d; })
+      : Promise.resolve().then(function(){ S.mine = null; }));
+    jobs.push(isOperator()
+      ? api("/api/jobs").then(function(d){ S.all = d; })
+      : Promise.resolve().then(function(){ S.all = null; }));
+    return Promise.all(jobs).then(render);
   }
 
   /* ── render: chrome ────────────────────────────────────────────── */
@@ -276,8 +323,9 @@
     $("#chainRow").innerHTML = chain;
 
     var who = $("#whoRow");
-    if(isOperator()) who.innerHTML = '<span class="pill gold">operator</span><span class="muted">every job visible</span>';
-    else if(A.kind === "buyer") who.innerHTML = '<span class="pill violet">signed in</span><span class="mono muted">'+esc(trunc(A.address))+'</span>';
+    if(isOperator()) who.innerHTML = '<span class="pill gold">operator</span><span class="muted">every job visible</span>' +
+      (buyerSignedIn() ? '<span class="pill violet" style="margin-left:10px">signed in</span><span class="mono muted">'+esc(trunc(myAddress()))+'</span>' : "");
+    else if(buyerSignedIn()) who.innerHTML = '<span class="pill violet">signed in</span><span class="mono muted">'+esc(trunc(A.address))+'</span>';
     else who.innerHTML = '<span class="muted">public view — job contents are private to the buyer who paid</span>';
 
     var f = $("#footReceipts");
@@ -288,8 +336,9 @@
     var sn = $("#sessionNote");
     if(sn){
       sn.innerHTML = isOperator()
-        ? 'Signed in as the <b>operator</b>. Clear the token above to drop back to your wallet.'
-        : (A.kind === "buyer"
+        ? 'Signed in as the <b>operator</b>' + (buyerSignedIn() ? ' and as <b>'+esc(trunc(myAddress()))+'</b>' : '') +
+          '. Clear the token above to drop back to your wallet.'
+        : (buyerSignedIn()
             ? 'Signed in as <b>'+esc(trunc(A.address))+'</b>. Valid 24 hours, or until the agent restarts.'
             : 'Not signed in. Connect a wallet in the header and approve the signature.');
     }
@@ -595,7 +644,9 @@
       '<div><div class="k">status</div><div class="v">'+statusPill(job.status)+'</div></div>' +
       '<div><div class="k">current step</div><div class="v">'+esc(job.current_step==null?"—":job.current_step)+' of '+esc(job.last_step||4)+'</div></div>' +
       (job.archived ? '<div><div class="k">source</div><div class="v muted">archived, read-only</div></div>' : "") +
-      "</div>" + creditNote(job) + headerActions(job) + "</div>";
+      "</div>" +
+      (mineJob(job) ? "" : '<div class="wait" style="margin-top:14px">you are viewing the public receipt for this job</div>') +
+      creditNote(job) + headerActions(job) + "</div>";
 
     var steps = '<div class="card"><h3>metered steps</h3><div class="steps">' +
       fourSteps(job).map(function(s){ return stepCard(s, job); }).join("") +
@@ -626,41 +677,68 @@
   function listView(){
     if(S.missing)
       return '<div class="card"><h3>jobs</h3><div class="empty gone-note">no jobs — the index of every job the agent has run was in the deleted memory file</div></div>';
-    var d = S.jobs;
-    if(!d) return '<div class="card"><div class="empty">connecting to memory…</div></div>';
-    var jobs = d.jobs || [];
-    // A row this viewer may read comes back with the full address; everyone
-    // else's is truncated by the API. That is what marks a job as ours.
-    var mine = jobs.filter(function(j){ return j.redacted !== true; });
 
     var out = "";
-    if(signedIn()){
-      out += '<div class="sect"><h3>'+(isOperator() ? "every job (operator)" : "your jobs")+'</h3><span class="n">'+mine.length+'</span></div>' +
-        '<div class="card">' + (mine.length ? jobTable(mine) : '<div class="empty">no jobs for this wallet yet</div>') + "</div>";
-    } else {
+    // Your jobs. Asked for by address, so the API answers it for this wallet
+    // and for nobody else.
+    if(buyerSignedIn()){
+      var mine = (S.mine && S.mine.jobs) || [];
+      out += '<div class="sect"><h3>your jobs</h3><span class="n">'+esc(trunc(myAddress()))+' · '+mine.length+'</span></div>' +
+        '<div class="card">' + (mine.length
+          ? jobTable(mine)
+          : '<div class="empty">no jobs for this wallet yet</div>') + "</div>";
+    } else if(!isOperator()){
       out += '<div class="sect"><h3>your jobs</h3></div>' +
-        '<div class="card"><div class="locked">Connect a wallet and sign in to see the jobs you paid for, their outputs, and your ledger.</div></div>';
+        '<div class="card"><div class="locked">Connect a wallet and sign in to see the jobs you paid for, their outputs, their reports and your ledger. Nothing is spent: signing in is one signature over a message this agent hands you.<br><br>There is no list of everyone else\'s jobs here. Who bought what is not part of the meter; the figures above are.</div></div>';
     }
-    if(!isOperator()){
-      out += '<div class="sect"><h3>every job</h3><span class="n">'+jobs.length+' in memory</span></div>' +
-        '<div class="card">' + (jobs.length ? jobTable(jobs) : '<div class="empty">no jobs in memory</div>') +
-        '<div class="locked" style="margin-top:16px">Public rows: the meter is public, the work is not. Buyer addresses are shortened and contents are hidden unless the job is yours.</div></div>';
+    // All jobs. The operator view, and it says so.
+    if(isOperator()){
+      var all = (S.all && S.all.jobs) || [];
+      out += '<div class="sect"><h3>all jobs <span class="pill gold">operator view</span></h3><span class="n">'+all.length+' in memory</span></div>' +
+        '<div class="card">' + (all.length
+          ? jobTable(all)
+          : '<div class="empty">no jobs in memory</div>') +
+        '<div class="locked" style="margin-top:16px">Operator view: every job in this store, with full addresses and full detail. Clear the operator token in Settings to drop back to your own jobs.</div></div>';
     }
     return out;
+  }
+
+  // Six numbers about the whole store and nothing about any one job, so this
+  // needs no credential and is shown to everyone.
+  function statsLine(){
+    var el = $("#statsLine");
+    if(!el) return;
+    var t = S.stats;
+    if(S.missing){
+      el.className = "stats gone";
+      el.innerHTML = '<div class="s"><b>0</b><span>everything the agent knew was in the deleted file</span></div>';
+      return;
+    }
+    el.className = "stats";
+    if(!t){ el.innerHTML = '<div class="s"><span>reading memory…</span></div>'; return; }
+    function n(v){ return (v == null) ? "—" : Number(v).toLocaleString(); }
+    el.innerHTML =
+      '<div class="s"><b>'+n(t.jobs)+'</b><span>jobs in memory</span></div>' +
+      '<div class="s"><b>'+n(t.jobs_completed)+'</b><span>completed</span></div>' +
+      '<div class="s"><b>'+n(t.buyers)+'</b><span>buyers</span></div>' +
+      '<div class="s"><b>'+usdc(t.usdc_settled)+'</b><span>USDC settled</span></div>' +
+      '<div class="s"><b>'+n(t.decisions)+'</b><span>decisions logged</span></div>' +
+      '<div class="s"><b>'+n(t.served_from_memory)+'</b><span>served from memory</span></div>';
   }
 
   function render(){
     renderChrome();
     renderWallet();
+    statsLine();
     syncAuditPanel();
     var title = $("#consoleTitle"), meta = $("#consoleMeta"), body = $("#consoleBody");
     if(S.jobId){
       title.innerHTML = 'Job <span class="mono" style="font-size:26px">'+esc(S.jobId)+"</span>";
-      meta.innerHTML = '<a class="back" href="app.html">← all jobs</a>';
+      meta.innerHTML = '<a class="back" href="app.html">← your jobs</a>';
       body.innerHTML = jobView();
     } else {
       title.textContent = "Jobs";
-      var n = (S.jobs && S.jobs.jobs) ? S.jobs.jobs.length : 0;
+      var n = (S.stats && S.stats.jobs != null) ? S.stats.jobs : 0;
       meta.textContent = S.missing ? "memory missing" : (S.connected ? n + " jobs · polling 3s" : "api unreachable · retrying");
       body.innerHTML = listView();
     }
@@ -731,14 +809,15 @@
       })
       .then(function(res){
         if(!res.ok || !res.body.token) throw new Error(detailOf(res));
-        A.token = res.body.token; A.address = res.body.address || addr; A.kind = "buyer"; A.note = "";
+        A.token = res.body.token; A.address = res.body.address || addr; A.buyerOk = true; A.note = "";
+        if(!A.operator) A.kind = "buyer";
         saveSession();
       })
       .catch(function(e){ A.err = errText(e); })
       .then(function(){ A.busy = false; render(); return poll(); });
   }
   function signOut(){
-    A.token = null; A.address = null;
+    A.token = null; A.address = null; A.buyerOk = false; S.mine = null;
     if(!A.operator) A.kind = "public";
     saveSession(); render(); poll();
   }
@@ -753,7 +832,7 @@
         W.busy = false; renderWallet(); render();
         // connecting is only half of it: sign in straight away so the jobs
         // this wallet paid for are readable without a second click
-        if(W.addr && A.kind !== "buyer") return signIn();
+        if(W.addr && !buyerSignedIn()) return signIn();
       });
   }
 
@@ -775,7 +854,7 @@
       row.innerHTML = '<button type="button" class="chip" id="switchChainBtn" title="'+esc(W.addr)+' is on another chain; click to switch"><span class="dot warn"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="lbl">switch to Base Sepolia</span></button>' + err;
       return;
     }
-    var isSignedInHere = (A.kind === "buyer" && A.address && A.address.toLowerCase() === W.addr.toLowerCase());
+    var isSignedInHere = (buyerSignedIn() && A.address && A.address.toLowerCase() === W.addr.toLowerCase());
     if(!isSignedInHere && !isOperator()){
       row.innerHTML = '<button type="button" class="chip" id="signInBtn"'+(A.busy ? " disabled" : "")+' title="sign a message to prove this wallet is yours; nothing is spent"><span class="dot warn"></span><span class="addr">'+esc(trunc(W.addr))+'</span><span class="sep"></span><span class="lbl">'+(A.busy ? "signing…" : "sign in")+'</span></button>' + err;
       return;
@@ -814,6 +893,7 @@
     $("#opToken").value = "";
     $("#opMsg").textContent = "cleared";
     A.kind = A.token ? "buyer" : "public";
+    S.all = null;
     render(); poll();
   }
 
@@ -887,7 +967,7 @@
     if(!W.addr){ btn.disabled = true; msg.textContent = W.available ? "connect a wallet to submit" : "no wallet found"; return; }
     // the API refuses a job created in a wallet's name without that wallet's
     // session, so say so here rather than letting the submit 401
-    if(A.kind !== "buyer"){ btn.disabled = true; msg.textContent = "sign in with this wallet to submit a job in its name"; return; }
+    if(!buyerSignedIn()){ btn.disabled = true; msg.textContent = "sign in with this wallet to submit a job in its name"; return; }
     btn.disabled = !text;
     var chosen = typeSpec(S.jobType), second = chosen.steps[1];
     msg.textContent = auditNote || (text
@@ -1151,6 +1231,7 @@
   /* ── start ─────────────────────────────────────────────────────── */
   loadSession();
   if(A.operator) A.kind = "operator"; else if(A.token) A.kind = "buyer";
+  A.buyerOk = !!A.token && !A.operator;
   S.jobId = jobParam();
   try{
     var note = sessionStorage.getItem("turnstylNote");

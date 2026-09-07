@@ -85,9 +85,9 @@
       <div class="oline" id="opLine">
         <div class="row"><span class="dot" id="dbDot"></span><span id="agentState">connecting…</span></div>
         <div class="row"><span class="mono" id="dbPath">—</span></div>
-        <div class="row"><span class="mono" id="jobCount">—</span></div>
         <div class="row chain" id="chainRow"><span>Base Sepolia</span></div>
       </div>
+      <div class="stats" id="statsLine"></div>
       <p class="osum" id="opSummary"><span class="d">—</span>waiting for the journal…</p>
       <div class="go">
         <a class="btn" href="app.html">Open the app</a>
@@ -145,7 +145,7 @@
   /* ── state ─────────────────────────────────────────────────────── */
   // This page reads the agent, it never acts on it: no wallet, no session,
   // no writes. Everything a buyer does lives in app.html.
-  var S = { status:null, jobs:null, journal:null, missing:false, connected:false,
+  var S = { status:null, stats:null, journal:null, missing:false, connected:false,
             statusFails:0, offline:false };
 
   function apiUrl(path){ return String(window.TURNSTYL_API || "").replace(/\/+$/, "") + path; }
@@ -157,18 +157,20 @@
   }
 
   function poll(){
-    return Promise.all([ api("/api/status"), api("/api/jobs"), api("/api/journal?limit=1") ])
+    // /api/stats, not the job list: who has bought what is an operator view,
+    // and this page has no credentials and wants none. Six numbers, nobody named.
+    return Promise.all([ api("/api/status"), api("/api/stats"), api("/api/journal?limit=1") ])
       .then(function(r){
-        var status = r[0], jobs = r[1], journal = r[2];
+        var status = r[0], stats = r[1], journal = r[2];
         S.connected = !!status;
         // "agent offline" is two consecutive failed status polls; one success clears it
         S.statusFails = status ? 0 : S.statusFails + 1;
         S.offline = S.statusFails >= 2;
         if(status) S.status = status;
-        if(jobs) S.jobs = jobs;
+        if(stats) S.stats = stats;
         if(journal) S.journal = journal;
         var missing = false;
-        [status, jobs, journal].forEach(function(x){ if(x && x.memory_missing === true) missing = true; });
+        [status, stats, journal].forEach(function(x){ if(x && x.memory_missing === true) missing = true; });
         if(status && status.db_exists === false) missing = true;
         S.missing = missing;
         render();
@@ -185,6 +187,29 @@
       return { n:Math.round(st.db_size_bytes/1024), label:"KB in memory", unit:"KB in memory" };
     return { n:null, label:"records in memory", unit:"records" };
   }
+  // The same six public figures the app shows under its header, from the same
+  // endpoint: jobs, completed, buyers, USDC settled, decisions, cache hits.
+  function statsLine(){
+    var el = $("#statsLine");
+    if(!el) return;
+    var t = S.stats;
+    if(S.missing){
+      el.className = "stats gone";
+      el.innerHTML = '<div class="s"><b>0</b><span>everything the agent knew was in the deleted file</span></div>';
+      return;
+    }
+    el.className = "stats";
+    if(!t){ el.innerHTML = '<div class="s"><span>reading memory…</span></div>'; return; }
+    function n(v){ return (v == null) ? "—" : Number(v).toLocaleString(); }
+    el.innerHTML =
+      '<div class="s"><b>'+n(t.jobs)+'</b><span>jobs in memory</span></div>' +
+      '<div class="s"><b>'+n(t.jobs_completed)+'</b><span>completed</span></div>' +
+      '<div class="s"><b>'+n(t.buyers)+'</b><span>buyers</span></div>' +
+      '<div class="s"><b>'+(t.usdc_settled == null ? "—" : Number(t.usdc_settled).toFixed(2))+'</b><span>USDC settled</span></div>' +
+      '<div class="s"><b>'+n(t.decisions)+'</b><span>decisions logged</span></div>' +
+      '<div class="s"><b>'+n(t.served_from_memory)+'</b><span>served from memory</span></div>';
+  }
+
   // The journal is public here, so an event carries its decision and the one
   // sentence the engine wrote to explain itself, and nothing under it.
   function latest(){
@@ -229,8 +254,7 @@
     $("#agentState").textContent = S.missing ? "memory deleted"
       : (S.offline ? "agent offline" : (S.connected ? "agent online" : "connecting…"));
     $("#dbPath").textContent = st.db_path || (S.connected ? "no path reported" : "api unreachable");
-    var n = (S.jobs && S.jobs.jobs) ? S.jobs.jobs.length : null;
-    $("#jobCount").textContent = S.missing ? "0 jobs" : (n == null ? "— jobs" : n + (n === 1 ? " job" : " jobs") + " in memory");
+    statsLine();
     var chain = '<span>Base Sepolia</span>';
     if(st.receipts_address)
       chain += '<a href="'+esc(ex)+'/address/'+esc(st.receipts_address)+'" target="_blank" rel="noopener" title="'+esc(st.receipts_address)+'">'+esc(trunc(st.receipts_address))+'</a>';

@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -29,7 +30,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -417,6 +418,39 @@ def api_auth_verify(body: VerifyLoginRequest) -> dict[str, Any]:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"signed_in": True, **session}
+
+
+@app.post("/api/auth/logout", status_code=204)
+def api_auth_logout(authorization: str | None = Header(default=None)) -> Response:
+    """End this session. 204 once, 401 if the token was not a live session.
+
+    The operator token is not a session and is never closed here: it comes from
+    .env and the operator drops it by clearing it in the app's settings.
+    """
+    token = auth.bearer(authorization)
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "signing out needs the session to sign out of: send "
+                "Authorization: Bearer <token>."
+            ),
+        )
+    if secrets.compare_digest(token, auth.operator_token()):
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "the operator token is not a session and cannot be signed out. "
+                "Clear it in the app's settings drawer, or remove OPERATOR_TOKEN "
+                "from .env."
+            ),
+        )
+    if not auth.close_session(token):
+        raise HTTPException(
+            status_code=401,
+            detail="that token is not a live session; it expired or was already signed out.",
+        )
+    return Response(status_code=204)
 
 
 @app.get("/api/auth/me")

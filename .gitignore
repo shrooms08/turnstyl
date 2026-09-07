@@ -8,3 +8,4 @@ data/
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+evals/results/*-mock.json

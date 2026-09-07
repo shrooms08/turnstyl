@@ -384,3 +384,15 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 .warn .hit .rl{color:var(--mute);letter-spacing:.1em;text-transform:uppercase;font-size:10px}
 .warn .hit .tx{word-break:break-word}
 @media (max-width:700px){ .warn .hit{grid-template-columns:1fr;gap:2px} }
+
+/* ── wallet chip menu ───────────────────────────────────────────── */
+.menuwrap{position:relative;display:inline-flex}
+.chip .caret{color:var(--mute);font-size:10px;margin-left:2px}
+.menu{position:absolute;top:calc(100% + 8px);right:0;z-index:80;min-width:200px;background:var(--card);border:1px solid var(--line-2);display:none;flex-direction:column;padding:4px}
+.menu.open{display:flex}
+.menu .mi{background:none;border:0;text-align:left;color:var(--ink);font-family:var(--mono);font-weight:300;font-size:12.5px;letter-spacing:.02em;padding:10px 12px;cursor:pointer;white-space:nowrap}
+.menu .mi:hover{background:#141414;color:var(--gold)}
+.menu .mi.danger{color:var(--dim)}
+.menu .mi.danger:hover{color:var(--red)}
+.menu .sepline{height:1px;background:var(--line);margin:4px 0}
+@media (max-width:700px){ .menu{min-width:170px} .menu .mi{font-size:12px;padding:11px 12px} }

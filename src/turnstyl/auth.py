@@ -162,6 +162,17 @@ def open_session(address: str) -> dict[str, object]:
     }
 
 
+def close_session(token: str) -> bool:
+    """Invalidate one session token. True if it was live, False if it was not.
+
+    Signing out has to mean something on this side too: the token stops being
+    accepted here, not merely in the tab that was holding it.
+    """
+    with _session_lock:
+        _sweep_sessions(_now())
+        return _sessions.pop(token, None) is not None
+
+
 def session_address(token: str) -> str | None:
     now = _now()
     with _session_lock:

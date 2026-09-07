@@ -259,6 +259,26 @@ CB=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs" -H "Authori
 CC=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/jobs/$JOB4/pay")
 [ "$CC" = "401" ] && ok "simulate a payment without a session -> 401" || bad "simulate without a session -> 401" "got $CC"
 
+# ---------------------------------------------------------------- sign out
+# Signing out closes the session on this side, not only in the tab that held
+# it. A throwaway session is used so the one this script runs on survives.
+read -r THROW TTOK <<< "$(signin_stranger "$BASE")"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TTOK" "$BASE/api/auth/me")" = "200" ] && \
+  [ "$(curl -s -H "Authorization: Bearer $TTOK" "$BASE/api/auth/me" | jq_ "d['kind']")" = "buyer" ] && \
+  ok "a fresh session reads as its buyer" || bad "fresh session reads as its buyer"
+LO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TTOK" "$BASE/api/auth/logout")
+[ "$LO" = "204" ] && ok "POST /api/auth/logout returns 204" || bad "logout returns 204" "got $LO"
+[ "$(curl -s -H "Authorization: Bearer $TTOK" "$BASE/api/auth/me" | jq_ "d['kind'], d['signed_in']")" = "public False" ] && ok "the token reads as public once signed out" || bad "token rejected after logout" "$(curl -s -H "Authorization: Bearer $TTOK" "$BASE/api/auth/me")"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TTOK" "$BASE/api/jobs?buyer=$THROW")" = "401" ] && ok "the signed-out token can no longer list that buyer's jobs" || bad "signed-out token still lists jobs"
+LO2=$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $TTOK" "$BASE/api/auth/logout")
+[ "$(echo "$LO2" | tail -1)" = "401" ] && grep -q "not a live session" <<< "$LO2" && ok "a second logout with the same token -> 401 saying why" || bad "second logout -> 401" "got $(echo "$LO2" | tail -1): $(echo "$LO2" | sed '$d' | head -c 140)"
+LO3=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/auth/logout")
+[ "$(echo "$LO3" | tail -1)" = "401" ] && ok "logout with no token -> 401" || bad "logout with no token -> 401" "got $(echo "$LO3" | tail -1)"
+LO4=$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $OPTOK" "$BASE/api/auth/logout")
+[ "$(echo "$LO4" | tail -1)" = "401" ] && grep -q "not a session" <<< "$LO4" && ok "the operator token cannot be signed out (it is not a session)" || bad "operator token logout -> 401" "got $(echo "$LO4" | tail -1)"
+[ "$(jop "/api/auth/me" | jq_ "d['operator']")" = "True" ] && ok "and the operator token still works afterwards" || bad "operator token survived the logout attempt"
+[ "$(jget "/api/auth/me" | jq_ "d['kind']")" = "buyer" ] && ok "this script's own session is untouched by another's logout" || bad "own session untouched" "$(jget "/api/auth/me")"
+
 # ---------------------------------------------------------------- untrusted source
 # A contract whose comments try to instruct the auditor. The scan runs before
 # any model sees the file, and its hits ride on the job like any other fact.

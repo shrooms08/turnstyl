@@ -442,6 +442,31 @@ LOP=$(curl -s "${OPH[@]}" -o /dev/null -w "%{http_code}" "$BASE/api/jobs" 2>/dev
 curl -s "$BASE/api/jobs" 2>/dev/null | grep -q "the job list is an operator view" \
   && ok "the 403 says the job list is an operator view" || bad "job list 403 detail"
 
+# ---------------------------------------------------------------- sign out and disconnect
+echo
+echo "sign out"
+hasapp "the signed-in chip opens a menu"    'id="walletMenu"'
+hasapp "menu item: copy address"            '>Copy address</button>'
+hasapp "menu item: sign out"                'id="signOutBtn">Sign out</button>'
+hasapp "menu item: disconnect"              'id="disconnectBtn">Disconnect</button>'
+hasapp "copy stays the first item"          'class="mi" data-copy='
+hasapp "the chip toggles its own menu"      'if(hit("walletChip")){ W.menu = !W.menu;'
+hasapp "sign out calls the logout endpoint" '"/api/auth/logout"'
+hasapp "logout carries the old session token" 'Authorization: "Bearer " + token'
+hasapp "sign out keeps the wallet connected" "A.token = null; A.address = null; A.buyerOk = false;"
+hasapp "disconnect signs out first"         "return signOut().then(function(){"
+hasapp "disconnect clears the reconnect flag" 'sessionStorage.removeItem("wasConnected")'
+hasapp "disconnect asks the wallet to revoke" 'eth("wallet_revokePermissions", [{ eth_accounts: {} }])'
+hasapp "an unsupported wallet is not an error" "/* not supported here */"
+hasapp "an account change signs the old session out" 'window.ethereum.on("accountsChanged"'
+hasapp "and drops to the connect state"     "W.addr = null; W.balance = null; W.menu = false;"
+hasapp "clicking outside closes the menu"   'e.target.closest("#walletMenu")'
+has   "the menu is styled"                  ".menu{position:absolute"
+hasapp "settings: clear operator token"     'id="clearOp">Clear operator token</button>'
+hasapp "settings says signing out does not clear it" "Signing out of a wallet does not clear it"
+LOCODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/auth/logout" 2>/dev/null)
+[ "$LOCODE" = "401" ] && ok "POST /api/auth/logout without a token -> 401" || bad "logout without a token -> 401" "HTTP $LOCODE"
+
 # ---------------------------------------------------------------- untrusted source
 echo
 echo "untrusted source"

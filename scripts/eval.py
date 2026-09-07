@@ -18,7 +18,9 @@ patch compiled, whether the verifier agreed with the compiler, tokens and
 seconds per step, cost, and whether a second audit of the same contract in the
 same store was served from memory for nothing.
 
-Writes evals/results/<date>.json and rewrites docs/EVALS.md.
+Writes evals/results/<date>.json and rewrites docs/EVALS.md. A --mock run
+writes evals/results/<date>-mock.json and leaves docs/EVALS.md alone: it
+measures the harness, not the model, and must not overwrite real numbers.
 
 Exit codes: 0 done, 2 usage or a missing fixture, 3 the estimate exceeded the
 budget and nothing was spent, 4 the budget was hit mid-run (partial results are
@@ -465,7 +467,8 @@ def markdown(report: dict) -> str:
         "```",
         "",
         "`--mock` runs the whole harness against the canned offline outputs and "
-        "spends nothing, which checks the harness rather than the model.",
+        "spends nothing, which checks the harness rather than the model. It "
+        "writes to `evals/results/<date>-mock.json` and leaves this file alone.",
         "",
     ]
     return "\n".join(lines)
@@ -569,17 +572,27 @@ def main(argv: list[str]) -> int:
         "runs": results,
     }
 
+    # A mock run measures the harness, not the model, so it never overwrites
+    # the measured numbers: its results go to their own file and docs/EVALS.md
+    # is left exactly as the last real run wrote it.
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    out = RESULTS_DIR / f"{stamp}.json"
+    out = RESULTS_DIR / (f"{stamp}-mock.json" if args.mock else f"{stamp}.json")
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    EVALS_DOC.parent.mkdir(parents=True, exist_ok=True)
-    EVALS_DOC.write_text(markdown(report), encoding="utf-8")
+    if not args.mock:
+        EVALS_DOC.parent.mkdir(parents=True, exist_ok=True)
+        EVALS_DOC.write_text(markdown(report), encoding="utf-8")
 
     print()
     print(f"turnstyl eval: {len(results)} audit(s), spent ${spent:.4f} of ${args.budget:.2f}")
     print(f"  results  {out.relative_to(REPO_ROOT)}")
-    print(f"  summary  {EVALS_DOC.relative_to(REPO_ROOT)}")
+    if args.mock:
+        print(
+            f"  summary  {EVALS_DOC.relative_to(REPO_ROOT)} left alone: a mock run "
+            f"measures the harness, not the model"
+        )
+    else:
+        print(f"  summary  {EVALS_DOC.relative_to(REPO_ROOT)}")
     return 4 if stopped else 0
 
 

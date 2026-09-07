@@ -48,6 +48,7 @@ from .memory import (
     TurnstylStore,
     archived_job_ids as _archived_job_ids,
     count_records,
+    PROJECT_ROOT,
     default_db_path,
     read_archived_job as _read_archived_job,
 )
@@ -1510,6 +1511,38 @@ X402_SETTLE_PATH = re.compile(r"^/api/buyers/([^/]+)/settle-x402/([^/]+)/(\d+)$"
 
 x402_status: dict[str, Any] = {"enabled": False, "reason": "not checked"}
 
+# Every x402 attempt and its outcome, appended to data/serve.log. A payment that
+# fails in a browser leaves nothing behind on this side otherwise, and "it did
+# not work" is not a thing an operator can act on.
+X402_LOG = PROJECT_ROOT / "data" / "serve.log"
+_x402_log_lock = threading.Lock()
+_x402_log_warned = False
+
+
+def x402_log(event: str, **fields: Any) -> None:
+    """One line per attempt. Never raises: a payment must not fail over a log."""
+    global _x402_log_warned
+    parts = [datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), f"x402 {event}"]
+    for key, value in fields.items():
+        if value is None or value == "":
+            continue
+        text = str(value).replace("\n", " ")
+        parts.append(f"{key}={text[:200]}")
+    line = "  ".join(parts)
+    try:
+        with _x402_log_lock:
+            X402_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with X402_LOG.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except OSError as e:  # noqa: BLE001 - said once, then the payment carries on
+        if not _x402_log_warned:
+            _x402_log_warned = True
+            print(
+                f"turnstyl: cannot write the x402 log at {X402_LOG} "
+                f"({type(e).__name__}: {e}); attempts will not be recorded.",
+                flush=True,
+            )
+
 
 def _x402_probe() -> tuple[bool, str]:
     """Decide once, at startup, whether x402 is on. One line either way.
@@ -1647,8 +1680,16 @@ def _x402_check(job_id: str, step: int, request: Request, address: str | None = 
         )
     payer = _x402_payer(request)
     if payer is None:
+        x402_log(
+            "rejected", job=job_id, step=step, buyer=state.buyer, amount=amount,
+            reason="no payment payload on the request",
+        )
         raise HTTPException(status_code=400, detail="no x402 payment payload on the request")
     if payer.lower() != state.buyer.lower():
+        x402_log(
+            "rejected", job=job_id, step=step, buyer=state.buyer, amount=amount,
+            payer=payer.lower(), reason="payer is not this job's buyer",
+        )
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1656,6 +1697,10 @@ def _x402_check(job_id: str, step: int, request: Request, address: str | None = 
                 f"{state.buyer}; nothing was settled"
             ),
         )
+    x402_log(
+        "verified", job=job_id, step=step, buyer=state.buyer, amount=amount,
+        payer=payer.lower(),
+    )
     return store, state, amount
 
 
@@ -1845,6 +1890,15 @@ def _x402_install() -> None:
             headers = {
                 k: v for k, v in response.headers.items() if k.lower() != "content-length"
             }
+            want = (requirements.get("accepts") or [{}])[0]
+            groups = match.groups()
+            x402_log(
+                "quoted",
+                job=groups[0] if len(groups) == 2 else groups[1],
+                step=groups[-1],
+                amount=want.get("amount"),
+                pay_to=want.get("payTo"),
+            )
             return JSONResponse(content=requirements, status_code=402, headers=headers)
 
         if response.status_code != 200:
@@ -1859,7 +1913,22 @@ def _x402_install() -> None:
             settled = json.loads(base64.b64decode(raw))
         except Exception:  # noqa: BLE001 - a malformed receipt is not our crash
             return response
+        groups = match.groups()
+        logged_job = groups[0] if len(groups) == 2 else groups[1]
         if not settled.get("success") or not settled.get("transaction"):
+            x402_log(
+                "failed",
+                job=logged_job,
+                step=groups[-1],
+                payer=settled.get("payer"),
+                reason=(
+                    settled.get("errorMessage")
+                    or settled.get("error_message")
+                    or settled.get("errorReason")
+                    or settled.get("error_reason")
+                    or "the facilitator reported no transaction and gave no reason"
+                ),
+            )
             return response
 
         groups = match.groups()
@@ -1872,6 +1941,16 @@ def _x402_install() -> None:
             logger.exception("x402: settled but could not record the payment")
             result = {"recorded": False, "reason": f"{type(e).__name__}: {e}"}
 
+        x402_log(
+            "settled",
+            job=job_id,
+            step=step,
+            buyer=(result or {}).get("payer") or settled.get("payer"),
+            amount=_x402_invoice_amount(job_id, step),
+            tx=settled.get("transaction"),
+            recorded=bool((result or {}).get("recorded")),
+            reason=(result or {}).get("reason"),
+        )
         body = {
             "x402": "settled",
             "settlement": settled,

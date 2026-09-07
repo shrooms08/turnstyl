@@ -489,6 +489,38 @@ d=json.load(sys.stdin)
 print('ok' if d['complete'] is False and 'model_spend_usd_estimated' not in d['figures'] else 'bad')" 2>/dev/null)
 [ "$DGPUB" = "ok" ] && ok "the public digest is counts only" || bad "public digest is counts only" "got: $DGPUB"
 
+# ---------------------------------------------------------------- payment errors
+echo
+echo "payment errors"
+hasapp "failures go through one mapper"        "function explainPayError("
+hasapp "and one place ends a failed attempt"   "function payFailed("
+hasapp "the sentence and the raw text are separate" "function payErrorBlock("
+hasapp "mapped: user cancelled"                "You cancelled the request in your wallet"
+hasapp "mapped: invoice already settled"       "This invoice is already settled"
+hasapp "mapped: insufficient USDC names the balance" "Not enough USDC in this wallet"
+hasapp "and names what the step costs"         'and this step costs " + amount'
+hasapp "mapped: authorization expired"         "The payment authorization expired before the facilitator"
+hasapp "expired offers a fresh signature"      "sign a fresh one and try again"
+hasapp "mapped: signature rejected"            "The facilitator would not accept the signature"
+hasapp "mapped: wrong network"                 "Your wallet is on the wrong network"
+hasapp "mapped: agent offline"                 "The agent did not answer"
+hasapp "unmatched reads as one sentence"       "The payment could not be submitted"
+hasapp "the raw text sits behind a disclosure" "<details><summary>details</summary><pre>"
+hasapp "a failed attempt offers a retry"       'id="payRetryBtn"'
+hasapp "and the other rail as a fallback"      'id="payFallbackBtn">Pay on chain instead<'
+hasapp "the fallback is offered only after x402" 'P.rail === "x402" && ctx.memo'
+hasapp "the retry uses the rail that failed"   'if(P.rail === "x402")'
+has   "the error block is clamped and wrapped" "-webkit-line-clamp:3"
+has   "and cannot widen the panel"             ".payerr{flex-basis:100%;width:100%;max-width:100%"
+has   "the raw text scrolls inside its own box" ".payerr pre{margin:10px 0 0;max-height:200px"
+hasapp "the x402 window is 1800 seconds"       "X402_WINDOW_SECONDS = 1800"
+hasapp "and the signature uses it"             "Math.floor(Date.now()/1000) + X402_WINDOW_SECONDS"
+hasapp "validAfter stays 0"                    'validAfter: "0"'
+hasapp "a fresh nonce on every attempt"        "ethers.hexlify(ethers.randomBytes(32))"
+hasapp "and it says why it is never reused"    "never reused after a failure"
+hasapp "the facilitator's own reason comes first" "receipt.reason || receipt.errorMessage"
+hasapp "a failed settlement is a failure even on a 200" "receipt.success === false"
+
 # ---------------------------------------------------------------- blocked recovery
 echo
 echo "blocked"

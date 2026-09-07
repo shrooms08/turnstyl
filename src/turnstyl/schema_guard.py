@@ -16,7 +16,7 @@ restart instead of showing nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -27,14 +27,19 @@ from .memory import TurnstylStore
 # More would only make startup slower without making the answer different.
 SAMPLE = 5
 
-# Every entity kind, and the model that has to be able to read it.
-KINDS: tuple[tuple[str, type], ...] = (
-    (S.CAT_BUYER, S.BuyerLedger),
-    (S.CAT_JOB, S.JobEntity),
-    (S.CAT_STEP_COST, S.StepCost),
-    (S.CAT_FINDINGS, S.FindingsEntity),
-    (S.CAT_PATTERN, S.BuyerPattern),
-    (S.CAT_DIGEST, S.DigestEntity),
+# Every entity kind, the model that has to read it, and the function the rest
+# of the code actually reads it with. That third column is not decoration: the
+# guard was once stricter than the real read path, because it called
+# model_validate where the code called FindingsEntity.from_body, and it
+# condemned a healthy store over a row the agent reads perfectly well. A guard
+# that does not use the reader is testing something nobody runs.
+KINDS: tuple[tuple[str, type, Callable[[dict], Any]], ...] = (
+    (S.CAT_BUYER, S.BuyerLedger, S.BuyerLedger.model_validate),
+    (S.CAT_JOB, S.JobEntity, S.JobEntity.model_validate),
+    (S.CAT_STEP_COST, S.StepCost, S.StepCost.model_validate),
+    (S.CAT_FINDINGS, S.FindingsEntity, S.FindingsEntity.from_body),
+    (S.CAT_PATTERN, S.BuyerPattern, S.BuyerPattern.model_validate),
+    (S.CAT_DIGEST, S.DigestEntity, S.DigestEntity.model_validate),
 )
 
 RESTART = (
@@ -77,14 +82,14 @@ def _first_error(error: ValidationError) -> tuple[str, str]:
 def check(store: TurnstylStore, sample: int = SAMPLE) -> list[Problem]:
     """Read a sample of every entity kind. Returns what does not parse."""
     problems: list[Problem] = []
-    for kind, model in KINDS:
+    for kind, _model, read in KINDS:
         try:
             rows = store.memory.list_entities(kind, limit=sample)
         except Exception:  # noqa: BLE001 - a kind with no table yet is not drift
             continue
         for row in rows:
             try:
-                model.model_validate(row.get("body") or {})
+                read(row.get("body") or {})
             except ValidationError as e:
                 field, detail = _first_error(e)
                 problems.append(

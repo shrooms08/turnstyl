@@ -311,6 +311,39 @@ GSRC=$($PY -c "import json;print(json.dumps(open('examples/Vault.sol').read()))"
 curl -s -o /dev/null "${GAUTH[@]}" -X POST "$GBASE/api/jobs" -H 'content-type: application/json' -d "{\"buyer\":\"$BUYER\",\"source\":$GSRC}"
 [ "$(curl -s "$GBASE/api/status" | jq_ "d['schema']['ok'], d['schema']['problem']")" = "True None" ] && ok "a store this build can read reports schema ok" || bad "schema ok on a clean store" "$(curl -s "$GBASE/api/status" | jq_ "d['schema']")"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "${GAUTH[@]}" "$GBASE/api/buyers/$BUYER")" = "200" ] && ok "and the ledger reads normally" || bad "clean ledger read"
+# A findings entity is keyed by step name, and step names come from the job
+# type spec. A job type this build has never heard of must therefore read
+# cleanly: the guard once condemned a healthy store over exactly this, because
+# it validated the key set instead of the values.
+$PY -c "
+import sys; sys.path.insert(0,'src')
+from turnstyl.memory import TurnstylStore, TurnstylMemory
+from turnstyl import schema as S
+st = TurnstylStore(TurnstylMemory('$GDB'))
+h = 'f' * 64
+# the shape rows are written in today, under a job type invented here
+st.memory.set_entity(S.CAT_FINDINGS, 'exploit/' + h,
+                     {'slots': {'triage': 'a', 'exploit': 'b', 'writeup': 'c'}})
+# and the shape rows written before job types existed still use
+st.memory.set_entity(S.CAT_FINDINGS, 'e' * 64,
+                     {'scope': 'a', 'findings': 'b', 'patch': 'c', 'verify': 'd'})"
+GSF=$($PY -c "
+import sys; sys.path.insert(0,'src')
+from turnstyl.memory import TurnstylStore, TurnstylMemory
+from turnstyl import schema as S, schema_guard
+st = TurnstylStore(TurnstylMemory('$GDB'))
+print(len(schema_guard.check(st, sample=50)))
+print(sorted(S.FindingsEntity.from_body(st.memory.get_entity(S.CAT_FINDINGS, 'exploit/' + 'f'*64)['body']).slots))
+print(sorted(S.FindingsEntity.from_body(st.memory.get_entity(S.CAT_FINDINGS, 'e'*64)['body']).slots))
+try:
+    S.FindingsEntity.model_validate({'slots': {'scope': 17}}); print('accepted')
+except Exception as e:
+    print('rejected', 'slots.scope' in str(e))" 2>&1)
+[ "$(echo "$GSF" | sed -n 1p)" = "0" ] && ok "a job type with step names this build has never seen passes the guard" || bad "unseen step names pass the guard" "$GSF"
+[ "$(echo "$GSF" | sed -n 2p)" = "['exploit', 'triage', 'writeup']" ] && ok "and its step names read back as the keys they are" || bad "unseen step names read back" "$(echo "$GSF" | sed -n 2p)"
+[ "$(echo "$GSF" | sed -n 3p)" = "['findings', 'patch', 'scope', 'verify']" ] && ok "a row written before job types existed reads back too" || bad "legacy findings row" "$(echo "$GSF" | sed -n 3p)"
+[ "$(echo "$GSF" | sed -n 4p)" = "rejected True" ] && ok "the values are still validated: a non-string step output is refused" || bad "findings values validated" "$(echo "$GSF" | sed -n 4p)"
+[ "$(curl -s "$GBASE/api/status" | jq_ "d['schema']['ok']")" = "True" ] && ok "and the running server still serves" || bad "serves with unseen step names" "$(curl -s "$GBASE/api/status" | jq_ "d['schema']")"
 # a field a later build added, written under the running server
 $PY -c "
 import sys; sys.path.insert(0,'src')
@@ -332,6 +365,21 @@ GOUT=$(TURNSTYL_DB="$GDB" .venv/bin/turnstyl serve --port $GPORT --db "$GDB" 2>&
 [ "$GRC" != "0" ] && ok "a server refuses to start on a store it cannot read (exit $GRC)" || bad "startup guard refuses" "it started anyway"
 grep -q "refusing to serve" <<< "$GOUT" && grep -q "loyalty_points" <<< "$GOUT" && ok "saying which entity and field" || bad "startup guard message" "$(echo "$GOUT" | head -c 240)"
 grep -q "Nothing was served" <<< "$GOUT" && ok "and that nothing was served" || bad "startup guard reassurance" "$(echo "$GOUT" | head -c 240)"
+grep -q -- "--skip-schema-guard" <<< "$GOUT" && ok "and offers the emergency flag for a false positive" || bad "startup guard offers the flag" "$(echo "$GOUT" | head -c 400)"
+# The emergency exit: the same store, served anyway, loudly.
+TURNSTYL_DB="$GDB" $CLI_ENV .venv/bin/turnstyl serve --port $GPORT --db "$GDB" --skip-schema-guard > /tmp/turnstyl-test-skip.log 2>&1 &
+GSRV2=$!; disown $GSRV2 2>/dev/null
+for i in $(seq 1 20); do curl -s -o /dev/null "$GBASE/api/status" && break; sleep 0.5; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$GBASE/api/status")" = "200" ] && ok "--skip-schema-guard serves a store the guard objects to" || bad "skip flag serves" "$(cat /tmp/turnstyl-test-skip.log | head -c 300)"
+SKO=$(cat /tmp/turnstyl-test-skip.log)
+grep -q "SCHEMA GUARD SKIPPED" <<< "$SKO" && ok "printing a loud warning that it was skipped" || bad "skip warning" "$(echo "$SKO" | head -c 300)"
+grep -q "loyalty_points" <<< "$SKO" && ok "and naming what is being ignored" || bad "skip names the problem" "$(echo "$SKO" | head -c 300)"
+[ "$(curl -s "$GBASE/api/status" | jq_ "d['schema']['ok'], d['schema']['skipped']")" = "False True" ] && ok "status still reports the problem and says it was skipped" || bad "status under skip" "$(curl -s "$GBASE/api/status" | jq_ "d['schema']")"
+# a new process means a new session, so sign in again before the authed read
+GTOK2=$(signin "$GBASE") && GAUTH2=(-H "Authorization: Bearer $GTOK2") || GAUTH2=()
+GSC=$(curl -s -o /dev/null -w '%{http_code}' "${GAUTH2[@]}" "$GBASE/api/buyers/$BUYER")
+[ "$GSC" = "503" ] && ok "the affected read still fails honestly as a 503" || bad "skipped read still 503" "got $GSC"
+kill $GSRV2 2>/dev/null
 rm -f "$GDB" "$GDB-wal" "$GDB-shm"
 
 # ---------------------------------------------------------------- arrears before default

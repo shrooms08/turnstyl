@@ -580,13 +580,20 @@ def worker(
     raise typer.Exit(code=worker_main(None, interval, once))
 
 
-def guard_schema() -> None:
+def guard_schema(skip: bool = False) -> None:
     """Refuse to serve a store this build cannot read.
 
     Serving anyway is worse than not serving: every read raises, the API
     answers an error, and a page that treats a failed fetch as "no data" shows
     a store full of jobs as empty. That happened. One line, and a non-zero
     exit.
+
+    ``skip`` is the emergency exit, and it is deliberately not silent. A guard
+    can be wrong — this one was, when it read findings entities more strictly
+    than the code that actually reads them and condemned a healthy store — and
+    a wrong guard must not be the thing that keeps the agent down. So the check
+    still runs and still reports into ``/api/status``; only the refusal is
+    withheld, and the operator is told, loudly, what is being ignored.
     """
     from . import schema_guard
     from .api import schema_state
@@ -598,18 +605,65 @@ def guard_schema() -> None:
     try:
         problems = schema_guard.check(TurnstylStore(TurnstylMemory(path)))
     except Exception as e:  # noqa: BLE001 - an unreadable store is its own message
+        if skip:
+            problems = []
+            console.print(
+                Text(
+                    f"!! SCHEMA GUARD SKIPPED: {path} could not even be checked "
+                    f"({type(e).__name__}: {e}). Serving anyway because "
+                    f"--skip-schema-guard was passed.",
+                    style="bold yellow",
+                ),
+                soft_wrap=True,
+            )
+            schema_state.update(
+                {"ok": True, "problem": None, "checked": False, "skipped": True}
+            )
+            return
         fail(f"turnstyl: could not read {path} to check its layout: {type(e).__name__}: {e}")
         raise
     schema_state.update(
         {"ok": not problems, "problem": schema_guard.message(problems) or None,
-         "checked": True}
+         "checked": True, "skipped": bool(skip)}
     )
     if not problems:
+        if skip:
+            console.print(
+                Text(
+                    "!! SCHEMA GUARD SKIPPED by --skip-schema-guard. It ran anyway "
+                    "and found nothing wrong, so the flag changed nothing here.",
+                    style="bold yellow",
+                ),
+                soft_wrap=True,
+            )
+        return
+    if skip:
+        console.print(
+            Text(
+                f"!! SCHEMA GUARD SKIPPED: serving {path} anyway, over "
+                f"{len(problems)} problem(s) this build reported.",
+                style="bold yellow",
+            ),
+            soft_wrap=True,
+        )
+        console.print(Text(f"!!   {schema_guard.message(problems)}", style="yellow"),
+                      soft_wrap=True)
+        console.print(
+            Text(
+                "!!   Reads of the affected rows will still fail, one endpoint at a "
+                "time, as 503s. Use this only to keep the agent up while the real "
+                "fix lands.",
+                style="yellow",
+            ),
+            soft_wrap=True,
+        )
         return
     fail(
         f"turnstyl: refusing to serve {path}.\n"
         f"  {schema_guard.message(problems)}\n"
-        f"  Nothing was served, so no request saw a half-read row."
+        f"  Nothing was served, so no request saw a half-read row.\n"
+        f"  If this is a false positive and the agent must stay up, re-run with "
+        f"--skip-schema-guard."
     )
 
 
@@ -648,6 +702,12 @@ def serve(
     interval: float = typer.Option(
         3.0, "--interval", help="Worker pass interval in seconds (with --with-worker)."
     ),
+    skip_schema_guard: bool = typer.Option(
+        False,
+        "--skip-schema-guard",
+        help="Serve even if the layout check objects. Emergency use: it prints "
+             "a loud warning and the affected reads still fail as 503s.",
+    ),
 ) -> None:
     """Serve the web view of this agent's memory.
 
@@ -684,7 +744,7 @@ def serve(
         Text(f"turnstyl serving http://{host}:{port}", style="bold"), soft_wrap=True
     )
     announce_memory()
-    guard_schema()
+    guard_schema(skip=skip_schema_guard)
     if with_worker:
         from .worker import start_in_thread
 

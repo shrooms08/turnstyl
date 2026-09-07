@@ -30,7 +30,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ----------------------------------------------------------------------
 # Steps
@@ -371,11 +371,39 @@ class StepCost(_Model):
 class FindingsEntity(_Model):
     """WARM: entity ("findings", "<type>/<contract_hash>").
 
-    One slot per step, keyed by the step's name in its job type, so a type can
-    have any steps it likes. Serves repeat work for the same contract.
+    A mapping from step name to that step's cached output, and nothing else.
+    The keys are data: they come from whichever job type wrote the row, so
+    audit rows are keyed scope/findings/patch/verify and tests rows
+    plan/tests/report, and a job type added tomorrow will use names this file
+    has never heard of. What is validated is the values, never the key set.
+
+    That is also why this model reads two shapes. Rows written before job types
+    existed put the step names at the top level; rows written since nest them
+    under ``slots``. Both are folded into ``slots`` on the way in, so a caller
+    only ever sees one shape and neither needs migrating.
     """
 
     slots: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_step_names(cls, data: Any) -> Any:
+        """Any key that is not ``slots`` is a step name, so it belongs in it.
+
+        Without this the base model's extra="forbid" rejects every legacy row,
+        which is correct for a field that should not exist and wrong for a step
+        name the writer was entitled to choose. Values are still validated by
+        the annotation below: a step whose output is not a string is a real
+        problem and is reported as one.
+        """
+        if not isinstance(data, dict):
+            return data
+        named = {k: v for k, v in data.items() if k != "slots"}
+        if not named:
+            return data
+        merged = dict(data.get("slots") or {})
+        merged.update(named)
+        return {"slots": merged}
 
     def slot(self, step_name: str) -> str | None:
         return self.slots.get(step_name)
@@ -391,16 +419,14 @@ class FindingsEntity(_Model):
 
     @classmethod
     def from_body(cls, body: dict[str, Any]) -> "FindingsEntity":
-        """Read a stored row, including one written before job types.
+        """Read a stored row, of either shape.
 
-        The old audit shape put the four outputs at the top level
-        (scope/findings/patch/verify). Those are read as slots rather than
-        migrated: nothing rewrites them, and they keep serving repeat audits.
+        Kept as the name the rest of the code calls, but there is nothing left
+        for it to do: ``model_validate`` now folds both shapes itself, which is
+        what lets the startup guard use the ordinary reader and get the same
+        answer this does.
         """
-        if "slots" in body:
-            return cls.model_validate(body)
-        legacy = {k: v for k, v in body.items() if isinstance(v, str) and v}
-        return cls(slots=legacy)
+        return cls.model_validate(body)
 
 
 class PricingRules(_Model):

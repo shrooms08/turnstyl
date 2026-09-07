@@ -332,7 +332,9 @@ def redact_buyer(payload: dict[str, Any], ident: auth.Identity) -> dict[str, Any
 # What the startup check found. Filled in by cli.serve before uvicorn starts,
 # and by the first request otherwise, so a server started any other way still
 # answers honestly.
-schema_state: dict[str, Any] = {"ok": True, "problem": None, "checked": False}
+schema_state: dict[str, Any] = {
+    "ok": True, "problem": None, "checked": False, "skipped": False
+}
 
 
 def worker_heartbeat() -> dict[str, Any]:
@@ -350,7 +352,13 @@ def schema_report() -> dict[str, Any]:
             problems = schema_guard.check(store)
             schema_state["ok"] = not problems
             schema_state["problem"] = schema_guard.message(problems) or None
-    return {"ok": bool(schema_state["ok"]), "problem": schema_state["problem"]}
+    return {
+        "ok": bool(schema_state["ok"]),
+        "problem": schema_state["problem"],
+        # True when the operator started with --skip-schema-guard. A bypass
+        # that is not visible is a bypass nobody remembers taking.
+        "skipped": bool(schema_state.get("skipped")),
+    }
 
 
 @app.exception_handler(ValidationError)

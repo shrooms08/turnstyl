@@ -261,6 +261,8 @@ def redact_job_detail(detail: dict[str, Any], ident: auth.Identity) -> dict[str,
     out["buyer"] = auth.trunc_address(detail.get("buyer"))
     out["contract_hash"] = None
     out["steps"] = [dict(s, output=None) for s in (detail.get("steps") or [])]
+    if out.get("open_invoice"):
+        out["open_invoice"] = dict(out["open_invoice"], price_reason=None)
     # That a contract tried to instruct the auditor is worth showing to anyone
     # holding the receipt; the passage itself is a quote from a private source.
     out["injection_flags"] = [
@@ -808,6 +810,9 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
                 "invoice_block": invoice.invoice_block,
                 "paid": invoice.paid,
                 "tx_hash": invoice.tx_hash,
+                # Why this price, in the pricing rules' own words. The buyer is
+                # entitled to the reason they are being charged what they are.
+                "price_reason": invoice.price_reason,
             }
             if invoice is not None
             else None

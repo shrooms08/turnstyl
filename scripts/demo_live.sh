@@ -37,6 +37,10 @@ export NO_COLOR=1
 
 PY=.venv/bin/python
 CLI="$PY -m turnstyl.cli"
+# Verification reads every step's output, so it is private to the buyer who
+# paid and to the operator. This script is the operator; OPERATOR_TOKEN comes
+# from .env, which the server writes on first start, and is never echoed.
+OPH=(-H "Authorization: Bearer ${OPERATOR_TOKEN:-}")
 CONTRACT=examples/Vault.sol
 TXFILE=data/demo_live_txs.txt
 OUT=$(mktemp -d)/out.txt
@@ -324,7 +328,7 @@ echo "BEAT 3b: VERIFY. Every paid step's output matches its on-chain commit; a t
 VPORT=8796
 $CLI serve --port $VPORT --db "$DB" > /tmp/turnstyl-demo-verify.log 2>&1 & VSRV=$!; disown $VSRV 2>/dev/null
 for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$VPORT/api/status" && break; sleep 0.5; done
-curl -s "http://127.0.0.1:$VPORT/api/jobs/$JOB1/verify" > "$OUT"
+curl -s "${OPH[@]}" "http://127.0.0.1:$VPORT/api/jobs/$JOB1/verify" > "$OUT"
 VSUM=$($PY -c "
 import json,sys; d=json.load(open('$OUT'))
 paid=[x for x in d['steps'] if x['tx']]
@@ -359,7 +363,7 @@ print('changed byte', i, 'of step 2 output; recorded sha kept', rec.output_sha25
 echo "    $TDESC"
 $CLI serve --port 8797 --db "$TAMPER" > /tmp/turnstyl-demo-tamper.log 2>&1 & TSRV=$!; disown $TSRV 2>/dev/null
 for i in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:8797/api/status" && break; sleep 0.5; done
-curl -s "http://127.0.0.1:8797/api/jobs/$JOB1/verify" > "$OUT"
+curl -s "${OPH[@]}" "http://127.0.0.1:8797/api/jobs/$JOB1/verify" > "$OUT"
 TSUM=$($PY -c "
 import json; d=json.load(open('$OUT')); s2=[x for x in d['steps'] if x['step']==2][0]
 print(s2['matches'], s2['output_sha256_recomputed']!=s2['output_sha256_stored'], s2['onchain_hash']=='0x'+s2['output_sha256_stored'], [x['matches'] for x in d['steps'] if x['step'] in (3,4)])")
@@ -502,6 +506,72 @@ if [ "$FAILURES" -eq "$before" ]; then
 fi
 beat_result 9 "memory deleted, buyer charged twice for the same work" $before
 
+# ----------------------------------------------------------------- beat 10
+# One purchase made by a program through the MCP server rather than by a person
+# in the browser: same wallet signature, same x402 rail, same receipts. Gated,
+# because it needs both the gasless rail and a key.
+MCP_SKIPPED=""
+echo "BEAT 10: MCP. An agent harness buys a step over the same rails a person does"
+before=$FAILURES
+mcp_beat(){
+  local port=8803
+  if [ ! -x .venv/bin/turnstyl-mcp ]; then
+    MCP_SKIPPED="turnstyl-mcp is not installed (uv pip install -e .)"
+    echo "  SKIP $MCP_SKIPPED"
+    return
+  fi
+  if [ -z "${BUYER_PRIVATE_KEY:-}" ]; then
+    MCP_SKIPPED="BUYER_PRIVATE_KEY is not set, so the MCP server has no wallet"
+    echo "  SKIP $MCP_SKIPPED"
+    return
+  fi
+  $CLI serve --with-worker --port $port --db "$DB" > /tmp/turnstyl-demo-mcp-serve.log 2>&1 &
+  local srv=$!; disown $srv 2>/dev/null
+  local i
+  for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$port/api/status" && break; sleep 0.5; done
+  local enabled
+  enabled=$(curl -s "http://127.0.0.1:$port/api/status" | $PY -c "import json,sys;print((json.load(sys.stdin).get('x402') or {}).get('enabled'))" 2>/dev/null)
+  if [ "$enabled" != "True" ]; then
+    MCP_SKIPPED="x402 is not available on this run, and the MCP paying tool uses no other rail"
+    echo "  SKIP $MCP_SKIPPED"
+    kill $srv 2>/dev/null
+    return
+  fi
+
+  TURNSTYL_API="http://127.0.0.1:$port" run_quiet $PY scripts/mcp_buy.py "$CONTRACT_MCP"
+  local rc=$?
+  collect_tx "$OUT"
+  kill $srv 2>/dev/null
+  if [ $rc -ne 0 ]; then
+    MCP_SKIPPED="the MCP purchase did not complete: $(flatten "$OUT" | tail -c 220)"
+    echo "  SKIP $MCP_SKIPPED"
+    return
+  fi
+  check 10 "an MCP client signed in with its own wallet"        "signed in as 0x"
+  check 10 "it read the services and their prices"              "services:"
+  check 10 "it submitted a contract and got the free scope"     "scope ok"
+  check 10 "it was quoted a price with a reason"                "quoted"
+  check 10 "it refused an invoice above its limit"              "refused over budget"
+  check 10 "it paid over x402, gasless"                         "PAID"
+  check 10 "the agent ran the step it paid for"                 "ran step"
+  check 10 "the settlement is a real Base Sepolia transaction"  "settlement 0x"
+  MCP_TX=$(flatten "$OUT" | grep -oE 'settlement (0x[0-9a-fA-F]{64})' | head -1 | awk '{print $2}')
+  if [ -n "$MCP_TX" ]; then
+    local onchain
+    onchain=$(cast receipt "$MCP_TX" status --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
+    if [ "$onchain" = "1" ] || [ "$onchain" = "true" ]; then
+      echo "  ok   the MCP settlement is on Base Sepolia: $MCP_TX"
+    else
+      echo "  FAIL the MCP settlement tx is not on chain: $MCP_TX (status ${onchain:-none})"
+      FAILURES=$((FAILURES + 1)); FAILED_BEATS+=("10: mcp settlement on chain")
+    fi
+  fi
+}
+# a contract of its own, so this beat buys work rather than reading a cache
+CONTRACT_MCP=evals/contracts/unchecked_call.sol
+mcp_beat
+beat_result 10 "a program bought metered work with its own wallet" $before
+
 # ----------------------------------------------------------------- summary
 sort -u "$TXFILE" -o "$TXFILE"
 echo "========================================================================"
@@ -522,6 +592,11 @@ if [ -n "$X402_SKIPPED" ]; then
 else
   echo "x402: step 3 paid gaslessly, settlement ${X402_TX:-unknown}"
 fi
+if [ -n "$MCP_SKIPPED" ]; then
+  echo "MCP: SKIPPED ($MCP_SKIPPED)"
+else
+  echo "MCP: an agent harness bought a step, settlement ${MCP_TX:-unknown}"
+fi
 echo "transactions: $(wc -l < "$TXFILE" | tr -d ' ') recorded in $TXFILE"
 echo "========================================================================"
 if [ "$FAILURES" -ne 0 ]; then
@@ -529,4 +604,4 @@ if [ "$FAILURES" -ne 0 ]; then
   for f in "${FAILED_BEATS[@]}"; do echo "  - $f"; done
   exit 1
 fi
-echo "RESULT: PASS — all 9 beats passed on Base Sepolia"
+echo "RESULT: PASS — all 10 beats passed on Base Sepolia"

@@ -183,6 +183,93 @@ Reproduce it:
 .venv/bin/python scripts/eval.py --mock                    # the harness, no spend
 ```
 
+## Use it from your agent
+
+turnstyl ships an MCP server, so any harness that speaks Model Context Protocol
+can buy from it the way a person does in the browser. The buyer is a program
+with its own wallet: it signs in, is quoted per step, pays in USDC, and gets
+exactly what it paid for. Full tool list in [docs/MCP.md](docs/MCP.md).
+
+```bash
+pip install turnstyl-mcp      # or, from this repo: uv pip install -e .
+```
+
+Two environment variables. `TURNSTYL_API` is the operator's **API** origin (the
+tunnel URL, or `http://127.0.0.1:8787` when the agent runs on your machine); the
+GitHub Pages URL is a static page and answers no API calls. `BUYER_PRIVATE_KEY`
+is the wallet that pays, and without it the paying tool is not registered at all
+while every read-only tool still works.
+
+**Claude Code**
+
+```bash
+claude mcp add turnstyl --env TURNSTYL_API=http://127.0.0.1:8787 --env BUYER_PRIVATE_KEY=0x... -- turnstyl-mcp
+```
+
+**Codex** (`~/.codex/config.toml`)
+
+```toml
+[mcp_servers.turnstyl]
+command = "turnstyl-mcp"
+env = { TURNSTYL_API = "http://127.0.0.1:8787", BUYER_PRIVATE_KEY = "0x..." }
+```
+
+**Cursor** (`.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "turnstyl": {
+      "command": "turnstyl-mcp",
+      "env": {
+        "TURNSTYL_API": "http://127.0.0.1:8787",
+        "BUYER_PRIVATE_KEY": "0x..."
+      }
+    }
+  }
+}
+```
+
+### A whole audit for under a dollar
+
+What the exchange looks like from the buying agent's side. The prices are the
+real ones; the measured median model cost of the work behind them is $0.0129
+(see [Measured, not claimed](#measured-not-claimed)).
+
+> **You:** audit `Vault.sol` for me, spend at most $2.
+
+```
+turnstyl_services()
+  2 service(s) on offer: audit (1.50 USDC), tests (1.05 USDC). Step 1 is free on each.
+
+turnstyl_submit(source=<Vault.sol>, job_type="audit")
+  job b1b73a869f46 open on audit; step 1 ran free; step 2 (findings) is invoiced
+  at 0.50 USDC; this buyer is new and needs 3 more fully paid job(s) for credit
+
+turnstyl_quote(job_id="b1b73a869f46")
+  step 2 (findings) of job b1b73a869f46 costs 0.50 USDC; buyer is new
+  price_reason: base 0.50 for step 2 (findings); no discount (not cached),
+  no surcharge; buyer trust_tier=new = 0.50 USDC
+
+turnstyl_pay_and_run(job_id="b1b73a869f46", max_usdc=0.60)
+  paid 0.50 USDC for step 2 (findings) of job b1b73a869f46 over x402, and the
+  agent ran it; next up is step 3 (patch) at 0.75 USDC
+  -> "Reentrancy in withdraw() - HIGH. withdraw() sends ETH with a raw call to
+      msg.sender BEFORE it reduces balances[msg.sender]..."
+
+turnstyl_pay_and_run(job_id="b1b73a869f46", max_usdc=0.80)   # step 3, the patch
+turnstyl_pay_and_run(job_id="b1b73a869f46", max_usdc=0.30)   # step 4, the verify
+
+turnstyl_verify(job_id="b1b73a869f46")
+  job b1b73a869f46: 3 of 4 step(s) match their on-chain commit, 0 differ,
+  1 has no commit.
+```
+
+Total: **1.50 USDC**, gasless, four transactions on Base Sepolia, and a report
+the agent can hand back. `max_usdc` is required on the paying tool and has no
+default: pass a ceiling or it refuses, and if the invoice is above it, it
+refuses without spending anything.
+
 ## Untrusted contract source
 
 A contract is data the buyer submitted, not instructions to the auditor. Two

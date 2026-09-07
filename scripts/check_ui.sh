@@ -467,6 +467,28 @@ hasapp "settings says signing out does not clear it" "Signing out of a wallet do
 LOCODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/auth/logout" 2>/dev/null)
 [ "$LOCODE" = "401" ] && ok "POST /api/auth/logout without a token -> 401" || bad "logout without a token -> 401" "HTTP $LOCODE"
 
+# ---------------------------------------------------------------- digest card
+echo
+echo "digest"
+hasapp "the operator view has a digest card"   'class="card digest"'
+hasapp "the card is labelled operator view"    'digest <span class="pill gold">operator view</span>'
+hasapp "the card is drawn only for the operator" "if(!isOperator()) return \"\";"
+hasapp "it asks for today and for all time"    '"/api/digest?days=1"'
+hasapp "it shows today against all time"       "left: today. right: all time"
+hasapp "it names the consolidation entity"     "consolidated as"
+hasapp "it shows USDC settled"                 ">USDC settled<"
+hasapp "it shows the estimated model spend"    "model spend (est.)"
+hasapp "it shows payment to output"            "payment to output:"
+hasapp "it shows the top contracts"            "top contracts by repeat audits"
+has   "the digest card is styled"              ".digest .cols{display:grid"
+DGCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/digest" 2>/dev/null)
+[ "$DGCODE" = "200" ] && ok "GET /api/digest answers without a credential" || bad "GET /api/digest" "HTTP $DGCODE"
+DGPUB=$(curl -s "$BASE/api/digest" 2>/dev/null | .venv/bin/python -c "
+import json,sys
+d=json.load(sys.stdin)
+print('ok' if d['complete'] is False and 'model_spend_usd_estimated' not in d['figures'] else 'bad')" 2>/dev/null)
+[ "$DGPUB" = "ok" ] && ok "the public digest is counts only" || bad "public digest is counts only" "got: $DGPUB"
+
 # ---------------------------------------------------------------- untrusted source
 echo
 echo "untrusted source"

@@ -13,6 +13,7 @@ Tier map (from the SDK source, see docs/SIBYL_API.md):
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,48 @@ def count_records(path: str | Path) -> int:
     except sqlite3.Error:
         return 0
     return total
+
+
+def read_archived_job(path: str | Path, job_id: str) -> dict[str, Any] | None:
+    """Read one archived job entity straight from the store, read-only.
+
+    The SDK archives entities (``archive_entity``) but exposes no reader for
+    them, so a completed job's per-step record would otherwise be invisible to
+    every consumer. Read here over a ``mode=ro`` connection, which the driver
+    refuses to write through. Lives beside ``count_records`` because it is the
+    same kind of thing: a fact about the store the SDK will not hand back.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT body, archived_at FROM archived_entities "
+            "WHERE tenant_id = ? AND category = ? AND name = ?",
+            (TENANT_ID, "job", job_id),
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return {"body": json.loads(row["body"]), "archived_at": row["archived_at"]}
+    except (json.JSONDecodeError, ValueError, IndexError):
+        return None
+
+
+def archived_job_ids(path: str | Path) -> list[str]:
+    """Every archived job id, oldest last. Empty for a missing or fresh store."""
+    try:
+        conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT name FROM archived_entities WHERE tenant_id = ? AND category = ?",
+            (TENANT_ID, "job"),
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    return [r[0] for r in rows]
 
 
 def bootstrap_memory(path: str | Path | None = None) -> tuple[Path, bool, int]:
@@ -327,6 +370,36 @@ class TurnstylStore:
             status=ledger.trust_tier,
         )
         return ledger
+
+    # ---------------- pattern (WARM, written only by reflection) ----------------
+    def get_pattern(self, buyer: str) -> S.BuyerPattern | None:
+        """What reflection has learned about this buyer, or None if it has not
+        looked yet. Absent is not zero: a buyer with no pattern is a buyer the
+        agent has no opinion about, and prices as such."""
+        row = self.memory.get_entity(S.CAT_PATTERN, self.buyer_key(buyer))
+        if row is None:
+            return None
+        return S.BuyerPattern.model_validate(row["body"])
+
+    def put_pattern(self, pattern: S.BuyerPattern) -> S.BuyerPattern:
+        self.memory.set_entity(
+            S.CAT_PATTERN,
+            self.buyer_key(pattern.address),
+            pattern.model_dump(),
+            status="prompt" if pattern.pays_promptly else "watching",
+        )
+        return pattern
+
+    # ---------------- digest (WARM, one row per day) ----------------
+    def get_digest(self, date: str) -> S.DigestEntity | None:
+        row = self.memory.get_entity(S.CAT_DIGEST, date)
+        if row is None:
+            return None
+        return S.DigestEntity.model_validate(row["body"])
+
+    def put_digest(self, digest: S.DigestEntity) -> S.DigestEntity:
+        self.memory.set_entity(S.CAT_DIGEST, digest.date, digest.model_dump())
+        return digest
 
     # ---------------- job entity (WARM) ----------------
     def get_job_entity(self, job_id: str) -> S.JobEntity | None:

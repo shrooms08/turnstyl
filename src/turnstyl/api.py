@@ -35,12 +35,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth
+from . import digest
 from . import policy
 from . import schema as S
 from .engine import Engine
 from . import jobtypes
 from .jobtypes import GATE_COMPILE, GATE_FORGE_TEST
-from .memory import TENANT_ID, TurnstylMemory, TurnstylStore, count_records, default_db_path
+from .memory import (
+    TENANT_ID,
+    TurnstylMemory,
+    TurnstylStore,
+    archived_job_ids as _archived_job_ids,
+    count_records,
+    default_db_path,
+    read_archived_job as _read_archived_job,
+)
 from .payments import (
     ERC20_ABI,
     PAY_METHOD_X402,
@@ -167,32 +176,11 @@ def missing(payload: dict[str, Any]) -> dict[str, Any]:
     return {"memory_missing": True, "db_path": str(db_path()), **payload}
 
 
-def read_archived_job(path: Path, job_id: str) -> dict[str, Any] | None:
-    """Read one archived job entity straight from the store, read-only.
-
-    The SDK archives entities (``archive_entity``) but exposes no reader for
-    them — ``archive_entity`` is the only public name containing "archiv", and
-    nothing in the package selects from ``archived_entities``. A completed job's
-    per-step record would otherwise be invisible to this API, so it is read here
-    over a ``mode=ro`` connection, which the driver refuses to write through.
-    """
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT body, archived_at FROM archived_entities "
-            "WHERE tenant_id = ? AND category = ? AND name = ?",
-            (TENANT_ID, S.CAT_JOB, job_id),
-        ).fetchone()
-        conn.close()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-    try:
-        return {"body": json.loads(row["body"]), "archived_at": row["archived_at"]}
-    except (json.JSONDecodeError, ValueError, IndexError):
-        return None
+# The archive readers live in memory.py: they are facts about the store the SDK
+# will not hand back, and the CLI's digest needs them without importing the web
+# app. Re-exported here under the names this module has always used.
+read_archived_job = _read_archived_job
+archived_job_ids = _archived_job_ids
 
 
 def record_count(path: Path) -> int:
@@ -333,19 +321,6 @@ def redact_buyer(payload: dict[str, Any], ident: auth.Identity) -> dict[str, Any
         ),
         "source": "entity buyer/<address>, reduced to the public facts",
     }
-
-
-def archived_job_ids(path: Path) -> list[str]:
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        rows = conn.execute(
-            "SELECT name FROM archived_entities WHERE tenant_id = ? AND category = ?",
-            (TENANT_ID, S.CAT_JOB),
-        ).fetchall()
-        conn.close()
-    except sqlite3.Error:
-        return []
-    return [r[0] for r in rows]
 
 
 # ----------------------------------------------------------------------
@@ -559,6 +534,39 @@ def api_stats() -> dict[str, Any]:
     with _stats_lock:
         _stats_cache = (time.monotonic(), stats)
     return stats
+
+
+@app.get("/api/digest")
+def api_digest(
+    days: int = Query(default=1, ge=1, le=90, description="How many days back to count."),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """What the agent did, counted from the journal and the entities.
+
+    The operator gets every figure. Everyone else gets the counts and nothing
+    that names a buyer, a job or a contract, which is the rule /api/stats
+    already follows: model spend is the operator's own bill and the contract
+    table is a list of what has been audited, so neither is public.
+
+    Computing it writes one consolidation entity, ``digest/<date>``, so the
+    same day counted again is an entity read rather than a walk of the journal.
+    """
+    ident = caller(authorization)
+    store = open_store()
+    if store is None:
+        return missing({"digest": None, "days": days})
+    entity = digest.build(store, days=days)
+    figures = entity.figures if ident.is_operator else digest.public(entity.figures)
+    return {
+        "memory_missing": False,
+        "date": entity.date,
+        "days": entity.days,
+        "generated_at": entity.generated_at,
+        "viewer": ident.kind,
+        "complete": ident.is_operator,
+        "consolidated_as": f"{S.CAT_DIGEST}/{entity.date}",
+        "figures": figures,
+    }
 
 
 @app.get("/api/job_types")

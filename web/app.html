@@ -137,7 +137,8 @@
     // `mine` is this wallet's jobs, `all` is the operator's list, and they are
     // fetched separately because the API answers them separately: the job list
     // without a buyer filter is an operator view and 403s for anyone else.
-    status:null, stats:null, mine:null, all:null, job:null, buyer:null, journal:null,
+    status:null, stats:null, digest:null, digestAll:null,
+    mine:null, all:null, job:null, buyer:null, journal:null,
     missing:false, connected:false, jobId:null, listErr:null,
     openStep:null, memTouched:{}, jobType:null,
     statusFails:0, offline:false
@@ -297,6 +298,14 @@
     jobs.push(isOperator()
       ? api("/api/jobs").then(function(d){ S.all = d; })
       : Promise.resolve().then(function(){ S.all = null; }));
+    // Today and all time, so the card can show one against the other. Only the
+    // operator gets the full figures, so only the operator asks.
+    if(isOperator()){
+      jobs.push(api("/api/digest?days=1").then(function(d){ S.digest = d; }));
+      jobs.push(api("/api/digest?days=90").then(function(d){ S.digestAll = d; }));
+    } else {
+      S.digest = null; S.digestAll = null;
+    }
     return Promise.all(jobs).then(render);
   }
 
@@ -706,8 +715,10 @@
       out += '<div class="sect"><h3>your jobs</h3></div>' +
         '<div class="card"><div class="locked">Connect a wallet and sign in to see the jobs you paid for, their outputs, their reports and your ledger. Nothing is spent: signing in is one signature over a message this agent hands you.<br><br>There is no list of everyone else\'s jobs here. Who bought what is not part of the meter; the figures above are.</div></div>';
     }
-    // All jobs. The operator view, and it says so.
+    // All jobs, and the day's figures above them. The operator view, and it
+    // says so.
     if(isOperator()){
+      out += digestCard();
       var all = (S.all && S.all.jobs) || [];
       out += '<div class="sect"><h3>all jobs <span class="pill gold">operator view</span></h3><span class="n">'+all.length+' in memory</span></div>' +
         '<div class="card">' + (all.length
@@ -716,6 +727,56 @@
         '<div class="locked" style="margin-top:16px">Operator view: every job in this store, with full addresses and full detail. Clear the operator token in Settings to drop back to your own jobs.</div></div>';
     }
     return out;
+  }
+
+  // The operator's daily read: today next to all time. Only the operator gets
+  // the full figures, so the card is only drawn for the operator; everyone
+  // else already has the public stats line under the header.
+  function digestCard(){
+    if(!isOperator()) return "";
+    var d = S.digest, a = S.digestAll;
+    if(!d) return '<div class="card digest"><h3>digest</h3><div class="empty">counting…</div></div>';
+    function n(v){ return (v == null) ? "—" : Number(v).toLocaleString(); }
+    function row(label, key, gold){
+      var f = (d.figures || {}), g = (a && a.figures) || {};
+      return '<div class="r'+(gold?" gold":"")+'"><span>'+esc(label)+'</span>' +
+             '<span><b>'+n(f[key])+'</b> <span class="muted">/ '+n(g[key])+'</span></span></div>';
+    }
+    var f = d.figures || {};
+    var tops = (f.top_contracts_by_repeat_audits || []).map(function(c){
+      return '<div><b>'+esc(c.contract_hash)+'…</b> '+esc(c.jobs)+' job(s), '+
+             esc(c.steps_from_memory)+' step(s) from memory</div>';
+    }).join("");
+    var median = f.median_seconds_payment_to_output;
+    return '<div class="card digest"><h3>digest <span class="pill gold">operator view</span></h3>' +
+      '<div class="cols">' +
+        '<div class="col"><h4>work</h4>' +
+          row("jobs opened", "jobs_opened") +
+          row("jobs completed", "jobs_completed") +
+          row("steps run", "steps_run") +
+          row("steps from memory", "steps_served_from_memory") +
+          row("injection flags", "injection_flags") +
+        '</div>' +
+        '<div class="col"><h4>money and trust</h4>' +
+          row("USDC settled", "usdc_settled", true) +
+          '<div class="r"><span>model spend (est.)</span><span><b>$'+
+            Number(f.model_spend_usd_estimated || 0).toFixed(4)+'</b> <span class="muted">'+
+            esc(f.model || "")+'</span></span></div>' +
+          row("new buyers", "new_buyers") +
+          row("trust changes", "trust_changes") +
+          row("defaults", "defaults") +
+          row("refusals", "refusals") +
+        '</div>' +
+      '</div>' +
+      '<div class="tops">' +
+        '<div>payment to output: ' + (median == null
+          ? '<b>not observed</b> in this window'
+          : '<b>'+esc(median)+'s</b> median over '+esc(f.payment_to_output_observations)+' payment(s)') + '</div>' +
+        (tops ? '<div style="margin-top:8px">top contracts by repeat audits:</div>' + tops
+              : '<div style="margin-top:8px">no contract audited twice yet</div>') +
+        '<div style="margin-top:10px" class="muted">left: today. right: all time. ' +
+          'consolidated as <b>'+esc(d.consolidated_as || "")+'</b>.</div>' +
+      '</div></div>';
   }
 
   // Six numbers about the whole store and nothing about any one job, so this

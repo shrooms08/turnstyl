@@ -14,6 +14,8 @@ from .schema import (
     CACHED_MULTIPLIER,
     EXPENSIVE_MULTIPLIER,
     EXPENSIVE_TOKEN_THRESHOLD,
+    PRICE_FLOOR_USDC,
+    PROMPT_PAYER_MULTIPLIER,
     REFUSE,
     RUN_FREE,
     RUN_ON_CREDIT,
@@ -24,6 +26,7 @@ from .schema import (
     TRUSTED_MIN_PAID_JOBS,
     WAIT_FOR_PAYMENT,
     BuyerLedger,
+    BuyerPattern,
     Decision,
     JobState,
     StepCost,
@@ -36,14 +39,23 @@ def price(
     buyer_entity: BuyerLedger,
     step_cost_entity: StepCost,
     findings_cached: bool,
+    buyer_pattern: BuyerPattern | None = None,
 ) -> tuple[float, str]:
     """Price one step in USDC.
 
     The base price comes from the job type's spec; the multipliers are the
     agent's, and are the same for every service it sells: base * 0.5 when this
     contract's output for this step is already in memory, * 1.5 when the
-    recorded average token cost for this step exceeds the threshold. Rounded to
-    2 decimals.
+    recorded average token cost for this step exceeds the threshold, and * 0.9
+    when the reflection pass has watched this buyer settle promptly. The prompt
+    payer discount is applied last, after the other two, and no combination of
+    multipliers may take a paid step below PRICE_FLOOR_USDC. Rounded to 2
+    decimals.
+
+    ``buyer_pattern`` is what reflection learned by reading the journal (see
+    reflect.py); None means the agent has formed no opinion and prices as it
+    always did. Credit and refusal are decided elsewhere and are untouched by
+    it: this buys a discount, never trust.
 
     Returns (amount_usdc, reason).
     """
@@ -70,9 +82,21 @@ def price(
             f"no discount (not cached), no surcharge (step_cost/{step} avg_tokens="
             f"{step_cost_entity.avg_tokens:.0f} over {step_cost_entity.runs} run(s))"
         )
+    # Applied last, so it discounts whatever the other rules arrived at.
+    if buyer_pattern is not None and buyer_pattern.pays_promptly:
+        amount *= PROMPT_PAYER_MULTIPLIER
+        parts.append(
+            f"x{PROMPT_PAYER_MULTIPLIER} because this buyer has paid within a "
+            f"median of {buyer_pattern.median_seconds_invoice_to_payment:.0f}s "
+            f"over {buyer_pattern.payments_observed} payments"
+        )
     parts.append(f"buyer trust_tier={buyer_entity.trust_tier}")
 
     amount = round(amount, 2)
+    # A free step stays free; a paid one never rounds away to nothing.
+    if base > 0 and amount < PRICE_FLOOR_USDC:
+        amount = PRICE_FLOOR_USDC
+        parts.append(f"floored at {PRICE_FLOOR_USDC:.2f} USDC")
     return amount, f"{'; '.join(parts)} = {amount:.2f} USDC"
 
 

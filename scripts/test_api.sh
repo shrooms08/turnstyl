@@ -296,6 +296,25 @@ APUB=$(jpub "/api/jobs/$AJOB")
 AJ=$(jget "/api/journal?job=$AJOB&limit=20")
 [ "$(echo "$AJ" | jq_ "any(e['decision']=='FLAGGED_UNTRUSTED_SOURCE' for e in d['events'])")" = "True" ] && ok "the journal records the scan as one decision" || bad "journal records the scan" "$(echo "$AJ" | jq_ "[e['decision'] for e in d['events']]")"
 
+# ---------------------------------------------------------------- digest
+# Counted from the journal and the entities, and consolidated as one entity so
+# counting the same day again is a single read.
+DG=$(jop "/api/digest")
+[ "$(echo "$DG" | jq_ "d['complete'], d['days'], d['consolidated_as'] == 'digest/' + d['date']")" = "True 1 True" ] && ok "GET /api/digest for the operator is complete and names its consolidation entity" || bad "digest shape" "$(echo "$DG" | head -c 240)"
+[ "$(echo "$DG" | jq_ "sorted(k for k in d['figures'])")" = "['buyers_active', 'defaults', 'injection_flags', 'jobs_completed', 'jobs_opened', 'median_seconds_payment_to_output', 'model', 'model_spend_usd_estimated', 'new_buyers', 'payment_to_output_observations', 'refusals', 'steps_run', 'steps_served_from_memory', 'tokens_in', 'tokens_out', 'top_contracts_by_repeat_audits', 'trust_changes', 'usdc_settled']" ] && ok "the operator digest carries every figure" || bad "operator digest figures" "$(echo "$DG" | jq_ "sorted(d['figures'])")"
+[ "$(echo "$DG" | jq_ "d['figures']['jobs_opened'] > 0, d['figures']['steps_run'] > 0, d['figures']['usdc_settled'] > 0, d['figures']['steps_served_from_memory'] > 0")" = "True True True True" ] && ok "the digest counts jobs, steps, USDC and cache hits" || bad "digest values" "$(echo "$DG" | jq_ "d['figures']")"
+[ "$(echo "$DG" | jq_ "d['figures']['injection_flags'] > 0")" = "True" ] && ok "the digest counts the injection flags raised on the adversarial contract" || bad "digest injection flags" "$(echo "$DG" | jq_ "d['figures']['injection_flags']")"
+# no buyer is driven into REFUSE by this suite; the offline demo asserts > 0
+[ "$(echo "$DG" | jq_ "isinstance(d['figures']['refusals'], int) and d['figures']['refusals'] >= 0")" = "True" ] && ok "the digest counts refusals (none in this run)" || bad "digest refusals" "$(echo "$DG" | jq_ "d['figures']['refusals']")"
+[ "$(echo "$DG" | jq_ "len(d['figures']['top_contracts_by_repeat_audits']) > 0, all('contract_hash' in c and 'jobs' in c for c in d['figures']['top_contracts_by_repeat_audits'])")" = "True True" ] && ok "the digest names the top contracts by repeat audits" || bad "digest top contracts" "$(echo "$DG" | jq_ "d['figures']['top_contracts_by_repeat_audits']")"
+
+DGP=$(jpub "/api/digest")
+[ "$(echo "$DGP" | jq_ "d['complete']")" = "False" ] && ok "a public digest says it is not complete" || bad "public digest complete flag"
+[ "$(echo "$DGP" | jq_ "sorted(k for k in d['figures'])")" = "['defaults', 'injection_flags', 'jobs_completed', 'jobs_opened', 'median_seconds_payment_to_output', 'new_buyers', 'payment_to_output_observations', 'refusals', 'steps_run', 'steps_served_from_memory', 'trust_changes', 'usdc_settled']" ] && ok "a public digest is counts only, in the shape /api/stats uses" || bad "public digest figures" "$(echo "$DGP" | jq_ "sorted(d['figures'])")"
+grep -qE "model_spend|top_contracts|contract_hash|0x[0-9a-f]{40}" <<< "$DGP" && bad "the public digest names nobody and no cost" "$(echo "$DGP" | head -c 200)" || ok "the public digest carries no model spend, no contract and no address"
+[ "$(jget "/api/digest" | jq_ "d['complete']")" = "False" ] && ok "a signed-in buyer gets the public digest, not the operator's" || bad "buyer digest is not complete"
+[ "$(echo "$DG" | jq_ "d['figures']['jobs_opened']")" = "$(jop "/api/digest?days=7" | jq_ "d['figures']['jobs_opened']")" ] && ok "the same store counted over a wider window agrees on jobs opened" || bad "digest window" "1d=$(echo "$DG" | jq_ "d['figures']['jobs_opened']") 7d=$(jop "/api/digest?days=7" | jq_ "d['figures']['jobs_opened']")"
+
 # ---------------------------------------------------------------- outstanding on a closed job
 B=$(jget "/api/buyers/$BUYER")
 [ "$(echo "$B" | jq_ "len(d['outstanding']), d['outstanding'][0]['job_id'], d['outstanding'][0]['step']")" = "1 $JOB 2" ] && ok "ledger carries the credit step as outstanding" || bad "ledger carries the credit step as outstanding" "$(echo "$B" | jq_ "d['outstanding']")"

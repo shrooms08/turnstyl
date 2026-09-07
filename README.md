@@ -80,6 +80,20 @@ Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
 
 - half price when this contract's output for that step is already in `findings/`
 - 1.5x when the recorded average token cost for that step exceeds 6000
+- **x0.9 when the buyer pays promptly**, applied after the other two and floored
+  at 0.05 USDC. "Promptly" is a median under 300 seconds from invoice to
+  settlement over at least three payments, learned by the reflection pass
+  reading the agent's own journal (see [docs/MEMORY.md](docs/MEMORY.md)). Below
+  three payments nothing is inferred and the price is unchanged. The invoice
+  says so in its own words:
+
+  ```
+  base 0.50 for step 2 (findings); no discount (not cached), no surcharge
+  (step_cost/2 avg_tokens=744 over 1 run(s)); x0.9 because this buyer has paid
+  within a median of 0s over 16 payments; buyer trust_tier=trusted = 0.45 USDC
+  ```
+
+  It buys a discount and nothing else: credit and refusal never read it.
 - **RUN_FREE**: step 1, never gated
 - **RUN_PAID**: the invoice for this step is settled
 - **RUN_ON_CREDIT**: unpaid, but the buyer is trusted
@@ -328,6 +342,38 @@ unset MOCK_LLM
 
 Contracts: `cd contracts && forge test`. `forge init --no-git` vendored
 `forge-std` as plain files, so a fresh clone builds with no `forge install`.
+
+## What the agent did today
+
+`turnstyl digest [--days 1]` counts the day from the journal and the entities
+already in the store: jobs opened and completed, USDC settled, steps run against
+steps served from memory, model spend estimated from the recorded token counts,
+new buyers, trust changes, defaults, refusals, injection flags raised, the median
+seconds from payment to output, and the top three contracts by repeat audits.
+
+```
+turnstyl digest for today (2026-09-07)
+
+  jobs opened              9
+  jobs completed           6
+  USDC settled             5.25
+  steps run                28
+  steps served from memory 18
+  model spend (estimated)  $0.0412 on claude-haiku-4-5
+  new buyers               1
+  trust changes            1
+  defaults                 1
+  refusals                 1
+  injection flags raised   10
+
+  consolidated as entity digest/2026-09-07
+```
+
+It writes one entity, `digest/<date>`, so counting the same day again is a
+single read rather than a walk of the journal. `GET /api/digest` returns the
+same figures: complete for the operator, and counts only for everyone else, on
+the rule `/api/stats` already follows. The app's operator view shows today
+against all time.
 
 ## Web UI
 

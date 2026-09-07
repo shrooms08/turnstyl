@@ -23,12 +23,14 @@ import threading
 import time
 from pathlib import Path
 
+from . import reflect
 from . import schema as S
 from .engine import Engine
 from .memory import TurnstylMemory, TurnstylStore, default_db_path
 from .payments import get_backend
 
 RUNNING_GRACE_SECONDS = 120.0   # a job mid-step in another process is left alone
+REFLECT_EVERY_SECONDS = 3600.0  # the agent reads its own journal once an hour
 
 
 def _log(line: str) -> None:
@@ -44,6 +46,9 @@ class Worker:
         # world, and it must not survive the process or land in the store.
         self.last_seen: dict[str, tuple] = {}
         self.said_missing = False
+        # Monotonic, and zero on purpose: a worker reflects on its first pass so
+        # a fresh process is not an hour behind what the journal already says.
+        self.last_reflect = 0.0
         self.stop = threading.Event()
 
     def path(self) -> Path:
@@ -76,6 +81,7 @@ class Worker:
             # job at all, so the per-job sweep above would never reconcile it.
             # Walk every buyer carrying outstanding items as well.
             actions += self._reconcile_outstanding(engine, store)
+            actions += self._reflect(store)
             # forget jobs that are no longer active
             active = set(store.get_active_jobs())
             for job_id in list(self.last_seen):
@@ -86,6 +92,26 @@ class Worker:
             closer = getattr(getattr(store.memory, "client", None), "storage", None)
             if closer is not None and hasattr(closer, "close"):
                 closer.close()
+
+    def _reflect(self, store: TurnstylStore) -> int:
+        """Read the journal once an hour and write what it says about each buyer.
+
+        Cheap (one journal read, one small entity per buyer), never on the path
+        of a job, and it changes only the price of the next invoice. A failure
+        here must not stop work running, so it is reported and the pass goes on.
+        """
+        now = time.monotonic()
+        if self.last_reflect and now - self.last_reflect < REFLECT_EVERY_SECONDS:
+            return 0
+        self.last_reflect = now
+        try:
+            patterns = reflect.reflect(store)
+        except Exception as e:  # noqa: BLE001 - say it once, keep working
+            _log(f"worker: reflection failed: {type(e).__name__}: {e}")
+            return 0
+        if patterns:
+            _log(f"worker: {reflect.summary(patterns)}")
+        return 0        # reflection is not work done on a job; it is not an action
 
     def _reconcile_outstanding(self, engine: Engine, store: TurnstylStore) -> int:
         cleared_total = 0

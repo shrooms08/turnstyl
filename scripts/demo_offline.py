@@ -23,7 +23,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from turnstyl import jobtypes  # noqa: E402
+from turnstyl import digest  # noqa: E402
 from turnstyl import injection  # noqa: E402
+from turnstyl import policy  # noqa: E402
 from turnstyl import schema as S  # noqa: E402
 from turnstyl.memory import TurnstylMemory, TurnstylStore  # noqa: E402
 
@@ -481,8 +483,141 @@ def beat_i() -> None:
     )
 
 
-def beat_j(prior_jobs: set[str]) -> str:
-    print("BEAT j: DELETE TEST. Wipe the database and watch the agent forget")
+def beat_j() -> None:
+    """Reflection: the agent reads its own journal and prices what it learned."""
+    print("BEAT j: REFLECTION. Three fast payments in the journal earn a discount")
+    r: list[bool] = []
+    raw, flat = cli("reflect")
+    st = store()
+    pattern = st.get_pattern(BUYER)
+
+    r.append(check("j", "reflection wrote a pattern entity for this buyer",
+                   pattern is not None, f"pattern={pattern}"))
+    if pattern is None:
+        beat_result("j", "reflection", r)
+        return
+    r.append(check("j", "it counted at least three settled invoices",
+                   pattern.payments_observed >= S.PROMPT_PAYER_MIN_PAYMENTS,
+                   f"payments_observed={pattern.payments_observed}"))
+    r.append(check("j", "the median is under the prompt-payer threshold",
+                   pattern.median_seconds_invoice_to_payment is not None
+                   and pattern.median_seconds_invoice_to_payment < S.PROMPT_PAYER_MAX_SECONDS,
+                   f"median={pattern.median_seconds_invoice_to_payment}"))
+    r.append(check("j", "so pays_promptly is true", pattern.pays_promptly is True,
+                   f"pays_promptly={pattern.pays_promptly}"))
+    r.append(check("j", "it records how the median was measured", bool(pattern.basis),
+                   pattern.basis))
+    r.append(check("j", "and how much of a job this buyer buys",
+                   pattern.steps_per_job_median is not None,
+                   f"steps_per_job_median={pattern.steps_per_job_median}"))
+
+    # The discount is not inferred from one payment. Same buyer, same ledger,
+    # a pattern with two observations: the price must be untouched.
+    spec = jobtypes.get("audit").step(2)
+    ledger = st.get_buyer(BUYER)
+    cost = st.get_step_cost("audit", 2)
+    plain, plain_reason = policy.price(spec, ledger, cost, False)
+    two = S.BuyerPattern(address=BUYER, payments_observed=2,
+                         median_seconds_invoice_to_payment=1.0, pays_promptly=None)
+    under, under_reason = policy.price(spec, ledger, cost, False, two)
+    over, over_reason = policy.price(spec, ledger, cost, False, pattern)
+    r.append(check("j", "below three observations the price is unchanged",
+                   under == plain and "x0.9" not in under_reason,
+                   f"{under} vs {plain}: {under_reason}"))
+    r.append(check("j", "at three the price drops a tenth",
+                   abs(over - round(plain * 0.9, 2)) < 1e-9 and "x0.9" in over_reason,
+                   f"{over} vs {plain}: {over_reason}"))
+    r.append(check("j", "and the reason names the median and the count",
+                   f"median of {pattern.median_seconds_invoice_to_payment:.0f}s" in over_reason
+                   and f"over {pattern.payments_observed} payments" in over_reason,
+                   over_reason))
+
+    # Now a real invoice, priced through the engine on a contract this buyer
+    # has not audited, so the discount is the only multiplier in play.
+    variant = CONTRACT.read_text(encoding="utf-8") + "\n// reflection variant\n"
+    variant_path = DB_PATH.parent / "Variant.sol"
+    variant_path.write_text(variant, encoding="utf-8")
+    _, flat2 = cli("job", "new", str(variant_path), "--buyer", BUYER)
+    r.append(check("j", "a live invoice carries the discount and says why",
+                   "x0.9 because this buyer has paid within a median of" in flat2,
+                   flat2[flat2.find("priced step"):][:200] if "priced step" in flat2 else flat2[:300]))
+    r.append(check("j", "the invoice is 0.45 USDC, not 0.50",
+                   "amount 0.45 USDC" in flat2, flat2[:400]))
+    notes.append(
+        f"beat j discount reason:\n    {over_reason}"
+    )
+    beat_result("j", "the agent learned a buyer pays fast, and charged less for it", r)
+
+
+def beat_k() -> None:
+    """The digest: one consolidation entity, and its numbers match the store."""
+    print("BEAT k: DIGEST. A day counted from the journal, consolidated once")
+    r: list[bool] = []
+    raw, flat = cli("digest")
+    st = store()
+    today = digest.today()
+    entity = st.get_digest(today)
+
+    r.append(check("k", "the digest wrote one consolidation entity",
+                   entity is not None, f"digest/{today}"))
+    if entity is None:
+        beat_result("k", "digest", r)
+        return
+    f = entity.figures
+    r.append(check("k", "the CLI printed the day's figures",
+                   "turnstyl digest for today" in flat and "consolidated as entity" in flat,
+                   flat[:200]))
+
+    # Every figure is checked against the store it was counted from.
+    job_ids = digest.all_job_ids(st)
+    complete = sum(1 for j in job_ids if (st.get_job_state(j) or S.JobState(
+        job_id="x", buyer="x", contract_hash="x")).status == S.STATUS_COMPLETE)
+    ledger = st.get_buyer(BUYER)
+    r.append(check("k", "jobs opened matches the jobs in the store",
+                   f["jobs_opened"] == len(job_ids),
+                   f"digest={f['jobs_opened']} store={len(job_ids)}"))
+    r.append(check("k", "jobs completed matches the completed job states",
+                   f["jobs_completed"] == complete,
+                   f"digest={f['jobs_completed']} store={complete}"))
+    r.append(check("k", "defaults matches the buyer ledger",
+                   f["defaults"] == ledger.defaults,
+                   f"digest={f['defaults']} ledger={ledger.defaults}"))
+    r.append(check("k", "USDC settled is positive and no more than the ledger",
+                   0 < f["usdc_settled"] <= ledger.paid_usdc + 0.01,
+                   f"digest={f['usdc_settled']} ledger={ledger.paid_usdc}"))
+    r.append(check("k", "steps served from memory is counted",
+                   f["steps_served_from_memory"] > 0,
+                   str(f["steps_served_from_memory"])))
+    r.append(check("k", "model spend is estimated from the recorded tokens",
+                   f["model_spend_usd_estimated"] > 0 and f["tokens_in"] > 0,
+                   f"${f['model_spend_usd_estimated']} over {f['tokens_in']} in"))
+    r.append(check("k", "injection flags raised are counted",
+                   f["injection_flags"] > 0, str(f["injection_flags"])))
+    r.append(check("k", "refusals are counted", f["refusals"] > 0, str(f["refusals"])))
+    r.append(check("k", "the top contracts are named, most audited first",
+                   len(f["top_contracts_by_repeat_audits"]) > 0
+                   and f["top_contracts_by_repeat_audits"][0]["jobs"] >= 1,
+                   str(f["top_contracts_by_repeat_audits"])[:200]))
+
+    # The second read is the point of consolidating: same day, same numbers.
+    again = digest.build(st, days=1)
+    r.append(check("k", "counting the same day again gives the same figures",
+                   again.figures["jobs_opened"] == f["jobs_opened"]
+                   and again.figures["usdc_settled"] == f["usdc_settled"],
+                   f"{again.figures['jobs_opened']} vs {f['jobs_opened']}"))
+    notes.append(
+        "beat k digest: "
+        + ", ".join(
+            f"{k}={f[k]}" for k in
+            ("jobs_opened", "jobs_completed", "usdc_settled", "steps_run",
+             "steps_served_from_memory", "defaults", "refusals", "injection_flags")
+        )
+    )
+    beat_result("k", "the day counted once, from what the agent wrote down", r)
+
+
+def beat_l(prior_jobs: set[str]) -> str:
+    print("BEAT l: DELETE TEST. Wipe the database and watch the agent forget")
     for suffix in ("", "-wal", "-shm"):
         target = Path(str(DB_PATH) + suffix)
         if target.exists():
@@ -495,20 +630,20 @@ def beat_j(prior_jobs: set[str]) -> str:
     new_job = only_job_id()
     ledger = store().get_buyer(BUYER)
     r = [
-        check("j", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
-        check("j", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
-        check("j", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
-        check("j", "step 2 is invoiced at 0.50 USDC again",
+        check("l", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
+        check("l", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
+        check("l", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
+        check("l", "step 2 is invoiced at 0.50 USDC again",
               "step 2 (findings)" in flat and "amount 0.50 USDC" in flat, flat[:500]),
-        check("j", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
+        check("l", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
               f"trust_tier={ledger.trust_tier}"),
-        check("j", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
+        check("l", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
               f"paid_steps={ledger.paid_steps}, completed_paid_jobs={ledger.completed_paid_jobs}"),
     ]
-    beat_result("j", "memory deleted, buyer treated as a stranger", r)
+    beat_result("l", "memory deleted, buyer treated as a stranger", r)
     if all(r):
         print("DOUBLE CHARGE REPRODUCED: memory deleted, buyer re-invoiced 0.50 for paid work\n")
-    notes.append(f"beat j DECISION line:\n    {line}")
+    notes.append(f"beat l DECISION line:\n    {line}")
     return line
 
 
@@ -531,8 +666,10 @@ def main() -> int:
     seen.add(beat_h(sixth))
     seen.update(store().get_active_jobs())
     beat_i()
+    beat_j()
+    beat_k()
     seen.update(store().get_active_jobs())
-    beat_j(seen)
+    beat_l(seen)
 
     print("-" * 72)
     for note in notes:
@@ -543,7 +680,7 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: PASS — all 10 beats passed")
+    print("RESULT: PASS — all 12 beats passed")
     return 0
 
 

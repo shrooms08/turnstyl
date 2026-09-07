@@ -56,6 +56,15 @@ CACHED_MULTIPLIER = 0.5
 EXPENSIVE_MULTIPLIER = 1.5
 EXPENSIVE_TOKEN_THRESHOLD = 6000
 
+# What the agent learns about a buyer from watching, rather than from the
+# ledger. A buyer who settles quickly costs less to carry: the invoice is not
+# outstanding, the worker is not re-checking it, and the job does not sit half
+# done. That is worth a tenth off, and nothing else.
+PROMPT_PAYER_MULTIPLIER = 0.9
+PROMPT_PAYER_MAX_SECONDS = 300      # median, not mean: one slow night cannot spoil it
+PROMPT_PAYER_MIN_PAYMENTS = 3       # nothing is inferred from one payment
+PRICE_FLOOR_USDC = 0.05             # no multiplier may take a paid step below this
+
 # ----------------------------------------------------------------------
 # Decisions returned by policy.decide
 # ----------------------------------------------------------------------
@@ -110,6 +119,12 @@ CAT_BUYER = "buyer"
 CAT_JOB = "job"
 CAT_STEP_COST = "step_cost"
 CAT_FINDINGS = "findings"
+# Written by the reflection pass, not by any decision: what the journal says
+# about how a buyer behaves, as opposed to what the ledger says they owe.
+CAT_PATTERN = "pattern"
+# One consolidated day of figures, so a later digest need not re-read the
+# whole journal to say what happened.
+CAT_DIGEST = "digest"
 
 
 def findings_name(job_type: str, contract_hash: str) -> str:
@@ -375,6 +390,42 @@ class PricingRules(_Model):
         "cached_multiplier of base. A step whose recorded avg_tokens exceeds "
         "expensive_token_threshold costs expensive_multiplier of base."
     )
+
+
+class BuyerPattern(_Model):
+    """WARM entity ("pattern", <address>): what watching this buyer has taught.
+
+    Derived from the journal by ``reflect.py`` and by nothing else. It is an
+    observation, never an obligation: the ledger says what a buyer owes, this
+    says how they have behaved. ``pays_promptly`` stays None until there are
+    enough payments to mean anything.
+    """
+
+    address: str
+    payments_observed: int = 0
+    median_seconds_invoice_to_payment: float | None = None
+    steps_per_job_median: float | None = None
+    jobs_observed: int = 0
+    default_rate: float | None = None
+    pays_promptly: bool | None = None
+    last_reflected_at: str = Field(default_factory=utc_now)
+    # How the median was measured, in one phrase, so a price that cites it can
+    # be read back years later without reading this file.
+    basis: str = ""
+
+
+class DigestEntity(_Model):
+    """WARM entity ("digest", <YYYY-MM-DD>): one day's figures, consolidated.
+
+    The only write the digest makes. Recomputing a past day from the journal
+    gives the same answer, so this is a cache with a date for a key, and it is
+    what lets a later digest be cheap.
+    """
+
+    date: str
+    generated_at: str = Field(default_factory=utc_now)
+    days: int = 1
+    figures: dict[str, Any] = Field(default_factory=dict)
 
 
 class JournalEntry(_Model):

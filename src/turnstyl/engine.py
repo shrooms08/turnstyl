@@ -764,7 +764,9 @@ class Engine:
             price_usdc = invoice.amount_usdc
         else:
             step_cost = self.store.get_step_cost(spec.id, step)
-            price_usdc, _ = policy.price(step_spec, ledger, step_cost, cached)
+            price_usdc, _ = policy.price(
+                step_spec, ledger, step_cost, cached, self.store.get_pattern(state.buyer)
+            )
 
         # Which rail settled this step, if one did. The invoice was paid before
         # the step ran, so the backend already holds the evidence; asking it here
@@ -1061,7 +1063,18 @@ class Engine:
         read.append(f"entity step_cost/{spec.id}/{step}")
         findings = self.store.get_findings(spec.id, state.contract_hash)
         cached = step_spec.cacheable and findings.slot(step_spec.name) is not None
-        amount, price_reason = policy.price(step_spec, ledger, step_cost, cached)
+        # What reflection learned by reading the journal, if it has looked yet.
+        # None prices exactly as the agent always did.
+        pattern = self.store.get_pattern(state.buyer)
+        amount, price_reason = policy.price(
+            step_spec, ledger, step_cost, cached, pattern
+        )
+        if pattern is not None and pattern.pays_promptly:
+            evaluated.append(
+                f"entity pattern/{state.buyer} -> pays_promptly=True, median "
+                f"{pattern.median_seconds_invoice_to_payment:.0f}s over "
+                f"{pattern.payments_observed} payments"
+            )
         evaluated.append(
             f"entity step_cost/{spec.id}/{step} -> runs={step_cost.runs}, "
             f"avg_tokens={step_cost.avg_tokens:.0f}; priced step {step}: {price_reason}"

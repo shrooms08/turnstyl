@@ -21,7 +21,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from . import digest
 from . import jobtypes
+from . import reflect
 from . import schema as S
 from .engine import Engine, Outcome
 from .memory import DB_PATH_ENV_VAR as DB_PATH_ENV_VAR_MEMORY
@@ -307,6 +309,24 @@ def build_engine() -> Engine:
         raise
 
 
+def build_store():
+    """A store handle for the commands that read memory without an engine."""
+    from .memory import TurnstylMemory, TurnstylStore, default_db_path
+
+    path = default_db_path()
+    if not path.is_file():
+        fail(
+            f"turnstyl: no memory at {path}. Start the agent once "
+            f"(`turnstyl status`) to create it, or point TURNSTYL_DB at an "
+            f"existing store."
+        )
+    try:
+        return TurnstylStore(TurnstylMemory(path))
+    except Exception as e:  # noqa: BLE001 - the path is the actionable part
+        fail(f"turnstyl: could not open {path}: {type(e).__name__}: {e}")
+        raise
+
+
 @app.command("types")
 def types() -> None:
     """List the services on offer, with their steps and prices."""
@@ -472,6 +492,60 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
             )
         console.print(table)
     console.print(Text(f"memory read: {', '.join(data['memory_read'])}", style="dim"))
+
+
+@app.command("reflect")
+def reflect_cmd() -> None:
+    """Read the journal and write what it says about each buyer.
+
+    The same pass the worker runs once an hour. It writes only
+    entity ("pattern", <address>) and changes only one thing downstream: a
+    tenth off the next invoice for a buyer who settles quickly.
+    """
+    store = build_store()
+    patterns = reflect.reflect(store)
+    console.print(Text(reflect.summary(patterns)))
+    if not patterns:
+        return
+    grid = Table.grid(padding=(0, 2))
+    for column in ("buyer", "payments", "median", "steps/job", "defaults", "prompt"):
+        grid.add_column(style="dim" if column == "buyer" else None)
+    grid.add_row("buyer", "payments", "median", "steps/job", "default rate", "pays promptly")
+    for pattern in patterns:
+        grid.add_row(
+            pattern.address,
+            str(pattern.payments_observed),
+            "—" if pattern.median_seconds_invoice_to_payment is None
+            else f"{pattern.median_seconds_invoice_to_payment:.1f}s",
+            "—" if pattern.steps_per_job_median is None
+            else f"{pattern.steps_per_job_median:g}",
+            "—" if pattern.default_rate is None else f"{pattern.default_rate:.0%}",
+            {True: "yes", False: "no", None: "not enough payments"}[pattern.pays_promptly],
+        )
+    console.print(grid)
+    console.print(
+        Text(
+            f"below {S.PROMPT_PAYER_MIN_PAYMENTS} payments nothing is inferred and "
+            f"the price is unchanged",
+            style="dim",
+        )
+    )
+
+
+@app.command("digest")
+def digest_cmd(
+    days: int = typer.Option(1, "--days", help="How many days back to count.", min=1),
+) -> None:
+    """What the agent did today, counted from what it wrote down.
+
+    Derived from the journal and the entities already in the store. Writes one
+    consolidation entity, ("digest", <date>), so counting the same day again is
+    an entity read rather than a walk of the journal.
+    """
+    store = build_store()
+    entity = digest.build(store, days=days)
+    for line in digest.lines(entity):
+        console.print(Text(line))
 
 
 @app.command("worker")

@@ -23,6 +23,7 @@ from rich.text import Text
 
 from . import digest
 from . import jobtypes
+from . import policy
 from . import reflect
 from . import schema as S
 from .engine import Engine, Outcome
@@ -458,6 +459,10 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
             f"(credit returns at {S.EARN_BACK_PAID_STEPS})",
         )
     grid.add_row("trust tier", book.trust_tier)
+    if book.trust_tier == S.TRUST_BLOCKED:
+        grid.add_row("paid steps since block",
+                     f"{book.consecutive_paid_since_block} of {S.UNBLOCK_PAID_STEPS}")
+        grid.add_row("to be served again", policy.unblock_terms(book))
     grid.add_row("jobs", str(len(book.jobs)))
     console.print(Panel(grid, title="LEDGER", border_style="cyan", padding=(1, 2)))
 

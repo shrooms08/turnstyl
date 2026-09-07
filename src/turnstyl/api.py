@@ -1389,6 +1389,19 @@ def api_buyer(
             "would_decide": decision,
             "explanation": reason,
             "jobs_until_credit": policy.jobs_until_credit(ledger),
+            # What a blocked buyer must do, in the words the refusal uses. None
+            # when the buyer is not blocked, so a reader never has to guess.
+            "unblock": (
+                {
+                    "terms": policy.unblock_terms(ledger),
+                    "outstanding_usdc": policy.outstanding_usdc(ledger),
+                    "paid_steps_since_block": ledger.consecutive_paid_since_block,
+                    "paid_steps_required": S.UNBLOCK_PAID_STEPS,
+                    "steps_remaining": policy.steps_until_unblocked(ledger),
+                }
+                if ledger.trust_tier == S.TRUST_BLOCKED
+                else None
+            ),
             # same value under the old name, for any consumer still reading it
             "steps_until_credit": policy.jobs_until_credit(ledger),
             "completed_paid_jobs": ledger.completed_paid_jobs,

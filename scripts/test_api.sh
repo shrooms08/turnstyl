@@ -296,6 +296,42 @@ APUB=$(jpub "/api/jobs/$AJOB")
 AJ=$(jget "/api/journal?job=$AJOB&limit=20")
 [ "$(echo "$AJ" | jq_ "any(e['decision']=='FLAGGED_UNTRUSTED_SOURCE' for e in d['events'])")" = "True" ] && ok "the journal records the scan as one decision" || bad "journal records the scan" "$(echo "$AJ" | jq_ "[e['decision'] for e in d['events']]")"
 
+# ---------------------------------------------------------------- blocked is recoverable
+# The tier rule and the terms it publishes, checked against policy directly:
+# driving a live buyer to two defaults would take a whole second demo.
+BL=$($PY -c "
+import sys; sys.path.insert(0,'src')
+from turnstyl import policy, jobtypes
+from turnstyl import schema as S
+spec = jobtypes.get('audit')
+owed = [S.OutstandingItem(job_id='j', step=2, amount_usdc=0.45, memo='0x')]
+def led(**kw):
+    base = dict(defaults=2, unpaid_from_prior_jobs=1, trust_tier=S.TRUST_BLOCKED, outstanding=owed)
+    base.update(kw); return S.BuyerLedger(**base)
+st = S.JobState(job_id='j', buyer='0xa', contract_hash='0'*64, current_step=2)
+paid = S.JobState(job_id='j', buyer='0xa', contract_hash='0'*64, current_step=2,
+                  open_invoice=S.OpenInvoice(step=2, amount_usdc=0.5, memo='0xm', paid=True, tx_hash='0xt'))
+clear = led(unpaid_from_prior_jobs=0, outstanding=[], consecutive_paid_since_block=3)
+print(policy.decide(1, led(), st, spec)[0])
+print(policy.decide(2, led(), st, spec)[0])
+print(policy.decide(2, clear, paid, spec)[0])
+print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, consecutive_paid_since_block=5)))
+print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, consecutive_paid_since_block=6)))
+print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, unpaid_from_prior_jobs=1, consecutive_paid_since_block=9)))
+print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, consecutive_paid_since_block=6, completed_paid_jobs=9, completed_paid_jobs_at_block=9)))
+print(policy.recompute_trust_tier(S.BuyerLedger(defaults=2, consecutive_paid_since_block=6, completed_paid_jobs=12, completed_paid_jobs_at_block=9, consecutive_paid_since_default=6)))
+print(policy.unblock_terms(led()))
+" 2>&1)
+[ "$(echo "$BL" | sed -n 1p)" = "RUN_FREE" ] && ok "a blocked buyer still gets the free scope step" || bad "blocked buyer free step" "got $(echo "$BL" | sed -n 1p)"
+[ "$(echo "$BL" | sed -n 2p)" = "REFUSE" ] && ok "a blocked buyer's unpaid step is refused" || bad "blocked buyer paid step refused" "got $(echo "$BL" | sed -n 2p)"
+[ "$(echo "$BL" | sed -n 3p)" = "RUN_PAID" ] && ok "a step a blocked buyer already paid for is served once nothing is outstanding" || bad "blocked buyer prepaid step" "got $(echo "$BL" | sed -n 3p)"
+[ "$(echo "$BL" | sed -n 4p)" = "blocked" ] && ok "still blocked at five of six paid steps" || bad "blocked at five" "got $(echo "$BL" | sed -n 4p)"
+[ "$(echo "$BL" | sed -n 5p)" = "new" ] && ok "six paid steps returns the tier to new" || bad "six paid steps unblocks" "got $(echo "$BL" | sed -n 5p)"
+[ "$(echo "$BL" | sed -n 6p)" = "blocked" ] && ok "an outstanding debt keeps the block whatever the count" || bad "debt keeps the block" "got $(echo "$BL" | sed -n 6p)"
+[ "$(echo "$BL" | sed -n 7p)" = "new" ] && ok "credit after a block is earned on jobs completed since it" || bad "credit restarts after a block" "got $(echo "$BL" | sed -n 7p)"
+[ "$(echo "$BL" | sed -n 8p)" = "trusted" ] && ok "three fully paid jobs after the block earns credit again" || bad "credit re-earned after a block" "got $(echo "$BL" | sed -n 8p)"
+[ "$(echo "$BL" | sed -n 9p)" = "blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more consecutive paid steps to be served again" ] && ok "the terms read exactly as specified" || bad "unblock terms wording" "got: $(echo "$BL" | sed -n 9p)"
+
 # ---------------------------------------------------------------- digest
 # Counted from the journal and the entities, and consolidated as one entity so
 # counting the same day again is a single read.

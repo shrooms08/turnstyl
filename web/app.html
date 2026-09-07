@@ -636,6 +636,7 @@
         cell("jobs until credit", esc((T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit)==null?"—":(T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit))) +
         (T.would_decide ? cell("would decide", decisionPill(T.would_decide)) : "") +
       "</div>" +
+      unblockLine(T) +
       (T.explanation ? '<div class="expl">'+esc(T.explanation)+"</div>" : "") +
       (outs ? '<div class="outs"><div class="k" style="font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)">outstanding</div>'+outs+"</div>" : "") +
       "</div>";
@@ -654,6 +655,19 @@
     return '<div class="card warn"><h3>untrusted source</h3>' +
       '<p>This contract contains text that tries to instruct the auditor. It was found by a mechanical scan of the comments and strings before any model saw the file, recorded here, and handed to the audit as evidence rather than followed.</p>' +
       '<div class="hits">'+hits+'</div></div>';
+  }
+
+  // A blocked tier is a stop, not an ending, and the card says how it lifts in
+  // the same words the refusal uses.
+  function unblockLine(trust){
+    var u = trust && trust.unblock;
+    if(!u) return "";
+    return '<div class="unblock"><b>how to be served again</b><br>' +
+      esc(u.terms) + '<br><span class="steps">' +
+      esc(u.paid_steps_since_block) + ' of ' + esc(u.paid_steps_required) +
+      ' paid steps done</span>. A step already paid for is still served while ' +
+      'blocked, once nothing is outstanding: that is how the count is earned. ' +
+      'The free scope step is never refused.</div>';
   }
 
   function jobView(){

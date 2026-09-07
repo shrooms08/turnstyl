@@ -14,7 +14,8 @@ Changes the agent's decision by: the price it quotes (half when
 `findings/<contract_hash>` already holds that step, 1.5x when
 `step_cost/<n>.avg_tokens` exceeds 6000), whether it runs at all (RUN_PAID,
 RUN_ON_CREDIT, WAIT_FOR_PAYMENT or REFUSE, chosen from the buyer entity's
-completed_paid_jobs, open_invoices, defaults and consecutive_paid_since_default),
+completed_paid_jobs, open_invoices, defaults, consecutive_paid_since_default and
+consecutive_paid_since_block),
 and whether it calls a model or serves the answer it already has.
 
 ## What breaks when memory is deleted
@@ -34,6 +35,42 @@ on chain tells the agent which invoice it already collected, so it charges again
 | reflection | two things. Per decision: `Engine._advance` builds the `evaluated` list before acting, so each journal event states the facts it rested on (`engine.py`). Over time: `reflect.reflect` (`reflect.py`) reads the journal hourly from `Worker._reflect` (`worker.py`) or on demand from `turnstyl reflect`, and writes `("pattern", <address>)` | the agent's own account of why it charged or refused, and what watching a buyer over many jobs has taught it |
 | consolidation | two things. Per job: `Engine._complete` (`engine.py:808`) copies the four step outputs into `findings/<contract_hash>` and archives the job entity via `TurnstylStore.archive_job_entity` (`memory.py:293`). Per day: `digest.build` (`digest.py`) writes `("digest", <YYYY-MM-DD>)` from `turnstyl digest` and `GET /api/digest` | closed jobs leave the working set and their outputs become the cache that prices the next audit; a counted day becomes one entity read instead of a walk of the journal |
 | semantic search (FTS5) | `TurnstylStore.search_findings` (`memory.py:329`), called from `Engine._memory_hints` (`engine.py:297`) on every `job new` | queries `findings/*` with the contract's own function names and prints any hit as a dim "memory hint" line |
+
+## Blocked is a stop, not an ending
+
+Two defaults block a buyer. The block holds while `unpaid_from_prior_jobs > 0`,
+and then while `consecutive_paid_since_block < 6`. Both are fields on the buyer
+entity, and the second is incremented on every settled paid step while the tier
+is blocked (in `Engine._execute`'s money branch and in `PaymentBackend.reconcile`
+when a debt is settled), and reset to 0 by any new default alongside
+`consecutive_paid_since_default`.
+
+What a blocked buyer can still do: submit jobs, and be served the free scope
+step, because `policy.decide` returns RUN_FREE before it looks at the tier at
+all. What they cannot do: take work on credit, or have an unpaid step run. What
+they *can* do, and what makes the block recoverable: have a step they have
+already paid for served, once nothing is outstanding. That is the only route to
+six, and `policy.decide` returns RUN_PAID for it with a reason saying which of
+the six it is.
+
+`policy.unblock_terms` writes the requirement once:
+
+```
+blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more
+consecutive paid steps to be served again
+```
+
+The REFUSE reason, the CLI ledger card, `trust.unblock` in
+`GET /api/buyers/<address>` and the app's "how to be served again" line are all
+that one function, so the terms cannot drift between where they are enforced and
+where they are quoted.
+
+When the block lifts the buyer is **new**, not trusted. `completed_paid_jobs` is
+not reset (it is a lifetime count and the journal would contradict a reset), but
+`completed_paid_jobs_at_block` snapshots it when the block begins, and
+`policy.credit_jobs` subtracts it for a buyer with two or more defaults. So
+credit is earned back on jobs completed *since* the block, by the same
+three-fully-paid-jobs rule that applies to a stranger.
 
 ## Reflection: what the journal taught the agent
 

@@ -654,8 +654,123 @@ def beat_k() -> None:
     beat_result("k", "the day counted once, from what the agent wrote down", r)
 
 
-def beat_l(prior_jobs: set[str]) -> str:
-    print("BEAT l: DELETE TEST. Wipe the database and watch the agent forget")
+def variant(name: str, note: str) -> Path:
+    """A contract this buyer has not audited, so a beat buys work rather than
+    reading a cache."""
+    path = DB_PATH.parent / name
+    path.write_text(CONTRACT.read_text(encoding="utf-8") + f"\n// {note}\n", encoding="utf-8")
+    return path
+
+
+def job_for(path: Path) -> str:
+    """The active job for one source file, found by its hash rather than by
+    being the only one open."""
+    wanted = S.sha256_text(path.read_text(encoding="utf-8"))
+    st = store()
+    for job_id in st.get_active_jobs():
+        state = st.get_job_state(job_id)
+        if state is not None and state.contract_hash == wanted:
+            return job_id
+    raise SystemExit(f"turnstyl demo: no active job for {path}")
+
+
+def beat_l() -> None:
+    """A second default stops the relationship. Paying ends the stop."""
+    print("BEAT l: BLOCKED and BACK. A second default blocks the buyer, and six paid steps unblock them")
+    r: list[bool] = []
+
+    # A trusted buyer takes work on credit and lets the job close without
+    # settling it: the second default, and the block.
+    first = variant("Blocked1.sol", "block beat, first")
+    cli("job", "new", str(first), "--buyer", BUYER)
+    defaulting = job_for(first)
+    _, flat = cli("job", "run", defaulting)
+    r.append(check("l", "a trusted buyer takes step 2 on credit",
+                   "DECISION: RUN_ON_CREDIT" in flat, flat[:300]))
+    for step in (3, 4):
+        pay_and_run(defaulting, step, "l", r)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("l", "the job closed with that step unpaid: a second default",
+                   ledger.defaults == 2, f"defaults={ledger.defaults}"))
+    r.append(check("l", "which blocks the buyer",
+                   ledger.trust_tier == S.TRUST_BLOCKED, f"trust_tier={ledger.trust_tier}"))
+    r.append(check("l", "and resets the clock that lifts a block",
+                   ledger.consecutive_paid_since_block == 0,
+                   f"consecutive_paid_since_block={ledger.consecutive_paid_since_block}"))
+
+    # Blocked: the free step is still served, the paid one is not.
+    second = variant("Blocked2.sol", "block beat, second")
+    _, new_flat = cli("job", "new", str(second), "--buyer", BUYER)
+    blocked_job = job_for(second)
+    r.append(check("l", "a blocked buyer can still submit a job",
+                   bool(blocked_job), blocked_job))
+    r.append(check("l", "and the free scope step still runs for them",
+                   "STEP 1: scope" in new_flat and "DECISION: RUN_FREE" in new_flat,
+                   new_flat[:400]))
+    raw, flat = cli("job", "run", blocked_job)
+    refuse_line = decision_line(raw)
+    r.append(check("l", "but a paid step is refused", "DECISION: REFUSE" in flat, flat[:300]))
+    owed = policy.outstanding_usdc(ledger)
+    r.append(check("l", "and the refusal says exactly what is required",
+                   f"blocked after 2 defaults: settle {owed:.2f} USDC outstanding, then "
+                   f"{S.UNBLOCK_PAID_STEPS} more consecutive paid steps to be served again"
+                   in refuse_line, refuse_line))
+
+    # Settle the debt. That is a settled paid step too, so it is the first of six.
+    cli("pay", defaulting, "2")
+    cli("ledger", BUYER)                       # reconciliation runs on the next read
+    ledger = store().get_buyer(BUYER)
+    r.append(check("l", "settling the debt clears unpaid_from_prior_jobs",
+                   ledger.unpaid_from_prior_jobs == 0,
+                   f"unpaid_from_prior_jobs={ledger.unpaid_from_prior_jobs}"))
+    r.append(check("l", "and counts as the first of six paid steps",
+                   ledger.consecutive_paid_since_block == 1,
+                   f"consecutive_paid_since_block={ledger.consecutive_paid_since_block}"))
+    r.append(check("l", "the buyer is still blocked until the six are done",
+                   ledger.trust_tier == S.TRUST_BLOCKED, f"trust_tier={ledger.trust_tier}"))
+
+    # Five more paid steps, bought up front. A step already paid for is served
+    # while blocked: that is what the count is earned from.
+    for step in (2, 3, 4):
+        pay_and_run(blocked_job, step, "l", r)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("l", "four of six after one job bought up front",
+                   ledger.consecutive_paid_since_block == 4,
+                   f"consecutive_paid_since_block={ledger.consecutive_paid_since_block}"))
+    r.append(check("l", "still blocked at four of six",
+                   ledger.trust_tier == S.TRUST_BLOCKED, f"trust_tier={ledger.trust_tier}"))
+
+    third = variant("Blocked3.sol", "block beat, third")
+    cli("job", "new", str(third), "--buyer", BUYER)
+    last_job = job_for(third)
+    for step in (2, 3):
+        pay_and_run(last_job, step, "l", r)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("l", "six consecutive paid steps since the block",
+                   ledger.consecutive_paid_since_block == S.UNBLOCK_PAID_STEPS,
+                   f"consecutive_paid_since_block={ledger.consecutive_paid_since_block}"))
+    r.append(check("l", "so the tier returns to new, not straight to trusted",
+                   ledger.trust_tier == S.TRUST_NEW,
+                   f"trust_tier={ledger.trust_tier}, defaults={ledger.defaults}"))
+
+    # The seventh paid step runs with no block language at all.
+    raw = pay_and_run(last_job, 4, "l", r)
+    line = decision_line(raw)
+    r.append(check("l", "and the seventh paid step runs normally",
+                   "blocked" not in line, line))
+    ledger = store().get_buyer(BUYER)
+    r.append(check("l", "a blocked buyer who paid their way back can earn credit again",
+                   policy.jobs_until_credit(ledger) >= 0
+                   and ledger.trust_tier in (S.TRUST_NEW, S.TRUST_TRUSTED),
+                   f"trust_tier={ledger.trust_tier}, "
+                   f"completed_paid_jobs={ledger.completed_paid_jobs}, "
+                   f"jobs_until_credit={policy.jobs_until_credit(ledger)}"))
+    notes.append(f"beat l blocked REFUSE line:\n    {refuse_line}")
+    beat_result("l", "blocked, then paid back to new", r)
+
+
+def beat_m(prior_jobs: set[str]) -> str:
+    print("BEAT m: DELETE TEST. Wipe the database and watch the agent forget")
     for suffix in ("", "-wal", "-shm"):
         target = Path(str(DB_PATH) + suffix)
         if target.exists():
@@ -668,20 +783,20 @@ def beat_l(prior_jobs: set[str]) -> str:
     new_job = only_job_id()
     ledger = store().get_buyer(BUYER)
     r = [
-        check("l", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
-        check("l", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
-        check("l", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
-        check("l", "step 2 is invoiced at 0.50 USDC again",
+        check("m", "a brand new job id was issued", new_job not in prior_jobs, f"job={new_job}"),
+        check("m", "step 1 ran again", "STEP 1: scope" in flat and "SCOPE (contract" in flat),
+        check("m", "step 1 was NOT served from memory", "from memory (cached)" not in flat, flat[:400]),
+        check("m", "step 2 is invoiced at 0.50 USDC again",
               "step 2 (findings)" in flat and "amount 0.50 USDC" in flat, flat[:500]),
-        check("l", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
+        check("m", "buyer trust_tier is back to new", ledger.trust_tier == S.TRUST_NEW,
               f"trust_tier={ledger.trust_tier}"),
-        check("l", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
+        check("m", "buyer paid history is gone", ledger.paid_steps == 0 and ledger.completed_paid_jobs == 0,
               f"paid_steps={ledger.paid_steps}, completed_paid_jobs={ledger.completed_paid_jobs}"),
     ]
-    beat_result("l", "memory deleted, buyer treated as a stranger", r)
+    beat_result("m", "memory deleted, buyer treated as a stranger", r)
     if all(r):
         print("DOUBLE CHARGE REPRODUCED: memory deleted, buyer re-invoiced 0.50 for paid work\n")
-    notes.append(f"beat l DECISION line:\n    {line}")
+    notes.append(f"beat m DECISION line:\n    {line}")
     return line
 
 
@@ -706,8 +821,9 @@ def main() -> int:
     beat_i()
     beat_j()
     beat_k()
+    beat_l()
     seen.update(store().get_active_jobs())
-    beat_l(seen)
+    beat_m(seen)
 
     print("-" * 72)
     for note in notes:
@@ -718,7 +834,7 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("RESULT: PASS — all 12 beats passed")
+    print("RESULT: PASS — all 13 beats passed")
     return 0
 
 

@@ -85,10 +85,13 @@ TrustTier = Literal["new", "trusted", "blocked"]
 # Trust thresholds (policy.recompute_trust_tier is the only consumer).
 TRUSTED_MIN_PAID_JOBS = 3          # fully paid, completed jobs before credit
 BLOCKED_MIN_UNPAID_PRIOR_JOBS = 2
-# Two defaults ends the relationship. One can be worked off: four consecutive
-# paid steps with nothing left outstanding earns credit back.
+# Two defaults stops the relationship, but does not end it. One default can be
+# worked off with four consecutive paid steps and nothing outstanding; a block
+# takes settling every debt and then six paid steps, at which point the buyer is
+# a stranger again rather than a pariah, and earns credit back the ordinary way.
 BLOCKED_MIN_DEFAULTS = 2
 EARN_BACK_PAID_STEPS = 4
+UNBLOCK_PAID_STEPS = 6
 
 # Job statuses
 STATUS_NEW = "new"
@@ -326,6 +329,15 @@ class BuyerLedger(_Model):
     # Paid steps settled since the last default, counted so a buyer who defaulted
     # once can earn credit back. Any new default resets it to 0.
     consecutive_paid_since_default: int = 0
+    # The same clock for a buyer who was blocked, counted only while the tier is
+    # blocked and reset by any new default. A ledger written before this field
+    # existed reads as 0, which is correct: nothing has been proved yet.
+    consecutive_paid_since_block: int = 0
+    # completed_paid_jobs at the moment a block began. Credit after a block is
+    # earned on jobs completed since it, by the same three-fully-paid-jobs rule,
+    # so working a block off returns a buyer to "new" rather than handing back
+    # the standing they had before they defaulted twice.
+    completed_paid_jobs_at_block: int = 0
     # Jobs that reached complete with every paid step settled: nothing carried
     # as outstanding at close. Credit is extended on this, not on step counts.
     # A ledger written before this field existed reads as 0 (pydantic default).

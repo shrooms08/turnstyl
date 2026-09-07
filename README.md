@@ -102,7 +102,23 @@ Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
 
 Trust tiers: **trusted** needs three completed jobs with every paid step settled
 (`completed_paid_jobs >= 3`), nothing outstanding, and either no default or an
-earned-back one. **blocked** at two defaults. Otherwise **new**. Step counts do
+earned-back one. **blocked** at two defaults, and a block is a stop rather than
+an ending: it holds while anything is outstanding, and then while fewer than six
+paid steps have been settled since it began. Settle every debt, pay six steps up
+front, and the buyer is **new** again, earning credit back on jobs completed
+since the block by the same three-job rule as a stranger. Two further defaults
+block them again with the clock at zero. Otherwise **new**.
+
+A blocked buyer is not shut out. The free scope step is never refused, they can
+submit jobs, and a step they have already paid for is served once nothing is
+outstanding, which is how the six are earned. The refusal says exactly what is
+required, in one line the ledger card, the API and the app all quote:
+
+```
+blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more
+consecutive paid steps to be served again
+```
+ Step counts do
 not earn credit: a buyer who pays two steps and walks away from the third has
 paid for nothing the agent can extend credit on. Repeat contracts are served
 from memory at half price, so a history of three paid jobs is cheap to build.

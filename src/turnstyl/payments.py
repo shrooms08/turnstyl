@@ -148,6 +148,11 @@ class PaymentBackend(ABC):
             )
             ledger.paid_steps += 1
             ledger.consecutive_paid_since_default += 1
+            # Settling a debt is a settled paid step too, so it counts toward
+            # lifting a block. Generous on purpose: the terms say settle what is
+            # owed and then pay, and this makes the settling itself count.
+            if ledger.trust_tier == S.TRUST_BLOCKED:
+                ledger.consecutive_paid_since_block += 1
             ledger.paid_usdc = round(ledger.paid_usdc + item.amount_usdc, 2)
             # The debt is counted in one of two places, and which one depends on
             # whether the job it belongs to has closed: `_complete` moves a

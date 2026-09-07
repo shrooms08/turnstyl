@@ -901,12 +901,25 @@ class Engine:
         if decision == S.RUN_PAID and invoice is not None and invoice.step == step:
             ledger.paid_steps += 1
             ledger.consecutive_paid_since_default += 1
+            # Counted only while the tier is still blocked: this is the clock a
+            # blocked buyer is working off, and it is read before the tier is
+            # recomputed below, so the step that lifts the block is counted.
+            was_blocked = ledger.trust_tier == S.TRUST_BLOCKED
+            if was_blocked:
+                ledger.consecutive_paid_since_block += 1
             ledger.paid_usdc = round(ledger.paid_usdc + invoice.amount_usdc, 2)
             acted.append(
                 f"entity buyer/{state.buyer} -> paid_steps={ledger.paid_steps}, "
                 f"paid_usdc={ledger.paid_usdc:.2f}, "
                 f"consecutive_paid_since_default="
                 f"{ledger.consecutive_paid_since_default} (settled {invoice.memo})"
+                + (
+                    f"; consecutive_paid_since_block="
+                    f"{ledger.consecutive_paid_since_block} of "
+                    f"{S.UNBLOCK_PAID_STEPS}"
+                    if was_blocked
+                    else ""
+                )
             )
         elif decision == S.RUN_ON_CREDIT:
             ledger.open_invoices += 1
@@ -1156,13 +1169,19 @@ class Engine:
             ledger.open_invoices = max(0, ledger.open_invoices - len(carried))
             ledger.unpaid_from_prior_jobs += len(carried)
             ledger.defaults += len(carried)
-            # A fresh default restarts the earn-back clock from zero.
+            # A fresh default restarts both earn-back clocks from zero: the one
+            # that buys credit back, and the one that lifts a block.
             ledger.consecutive_paid_since_default = 0
+            ledger.consecutive_paid_since_block = 0
+            if ledger.defaults >= S.BLOCKED_MIN_DEFAULTS:
+                # Credit after this block is earned on jobs completed after it.
+                ledger.completed_paid_jobs_at_block = ledger.completed_paid_jobs
             acted.append(
                 f"entity buyer/{state.buyer} -> {len(carried)} delivered step(s) "
                 f"unpaid at close; unpaid_from_prior_jobs="
                 f"{ledger.unpaid_from_prior_jobs}, defaults={ledger.defaults}, "
-                f"consecutive_paid_since_default reset to 0"
+                f"consecutive_paid_since_default and consecutive_paid_since_block "
+                f"reset to 0"
             )
             closing = (
                 f"Job closed with {sum(o.amount_usdc for o in carried):.2f} USDC owed on step "

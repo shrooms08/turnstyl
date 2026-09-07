@@ -489,6 +489,16 @@ d=json.load(sys.stdin)
 print('ok' if d['complete'] is False and 'model_spend_usd_estimated' not in d['figures'] else 'bad')" 2>/dev/null)
 [ "$DGPUB" = "ok" ] && ok "the public digest is counts only" || bad "public digest is counts only" "got: $DGPUB"
 
+# ---------------------------------------------------------------- blocked recovery
+echo
+echo "blocked"
+hasapp "the ledger card says how to be served again" "how to be served again"
+hasapp "it is drawn only for a blocked tier"        "function unblockLine("
+hasapp "it shows the paid steps done of those needed" "paid steps done"
+hasapp "it says a prepaid step is still served"     "A step already paid for is still served while"
+hasapp "and that the free scope step is never refused" "The free scope step is never refused"
+has   "the unblock line is styled"                  ".unblock{margin-top:14px"
+
 # ---------------------------------------------------------------- journal facts
 echo
 echo "journal facts"

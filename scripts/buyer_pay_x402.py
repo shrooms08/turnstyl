@@ -36,6 +36,39 @@ def die(message: str, code: int = REFUSED) -> None:
     raise SystemExit(code)
 
 
+def sign_in(buyer) -> dict[str, str]:
+    """Exchange one signature for a session, and return the Authorization header.
+
+    The message is built by the agent and returned in full by
+    ``GET /api/auth/nonce``, so the bytes signed here are the bytes it verifies.
+    """
+    import httpx
+    from eth_account.messages import encode_defunct
+
+    address = buyer.address.lower()
+    try:
+        r = httpx.get(f"{API}/api/auth/nonce", params={"address": address}, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        die(f"could not reach the agent at {API}: {type(e).__name__}: {e}")
+    if r.status_code != 200:
+        die(f"the agent would not issue a login nonce ({r.status_code}): {r.text[:200]}")
+    nonce = r.json()
+    signature = buyer.sign_message(encode_defunct(text=nonce["message"])).signature.hex()
+    if not signature.startswith("0x"):
+        signature = "0x" + signature
+    try:
+        v = httpx.post(
+            f"{API}/api/auth/verify",
+            json={"address": address, "signature": signature, "nonce": nonce["nonce"]},
+            timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001
+        die(f"the login could not be verified: {type(e).__name__}: {e}")
+    if v.status_code != 200:
+        die(f"the agent refused the login ({v.status_code}): {v.text[:200]}")
+    return {"Authorization": f"Bearer {v.json()['token']}"}
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[1] == "--settle":
         if len(argv) != 5:
@@ -76,9 +109,15 @@ def main(argv: list[str]) -> int:
     print(f"buyer    {buyer.address}")
     print(f"endpoint {url}")
 
+    # 0. Sign in. Paying is acting on a job's behalf, so the agent wants a
+    #    session for the wallet that owns it: one signature over a message it
+    #    issues, exchanged for a bearer token. No transaction, nothing spent.
+    auth = sign_in(buyer)
+    print(f"session  signed in as {buyer.address.lower()}")
+
     # 1. Ask, unpaid, and read the requirements out of the PAYMENT-REQUIRED header
     try:
-        first = httpx.post(url, timeout=60)
+        first = httpx.post(url, headers=auth, timeout=60)
     except Exception as e:  # noqa: BLE001
         die(f"could not reach the agent at {API}: {type(e).__name__}: {e}")
     if first.status_code != 402:
@@ -115,7 +154,7 @@ def main(argv: list[str]) -> int:
 
     # 3. Re-post with the signature; the facilitator settles
     try:
-        second = httpx.post(url, headers={"PAYMENT-SIGNATURE": header}, timeout=180)
+        second = httpx.post(url, headers={**auth, "PAYMENT-SIGNATURE": header}, timeout=180)
     except Exception as e:  # noqa: BLE001
         die(f"the paid request failed: {type(e).__name__}: {e}")
     if second.status_code != 200:

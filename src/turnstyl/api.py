@@ -27,12 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import auth
 from . import policy
 from . import schema as S
 from .engine import Engine
@@ -199,6 +200,133 @@ def record_count(path: Path) -> int:
     return count_records(path)
 
 
+# ----------------------------------------------------------------------
+# Who is asking: public, the buyer who paid, or the operator
+# ----------------------------------------------------------------------
+# What a job says is the thing the buyer bought. That it exists, how far it
+# got, and what it cost stay public — the meter is the demo — but findings,
+# patches, test suites, the contract itself and the buyer's ledger are theirs.
+# See auth.py for the three identities and the login message.
+def caller(authorization: str | None) -> auth.Identity:
+    return auth.identify(authorization)
+
+
+SIGN_IN_HINT = (
+    "Sign in with that wallet: GET /api/auth/nonce?address=<address>, sign the "
+    "message it returns, POST /api/auth/verify, then send "
+    "Authorization: Bearer <token>. An operator sends OPERATOR_TOKEN instead."
+)
+
+
+def require_visible(ident: auth.Identity, buyer: str | None, what: str) -> None:
+    """Let the buyer who paid, and the operator, through. Nobody else."""
+    if ident.sees(buyer):
+        return
+    if not ident.signed_in:
+        raise HTTPException(
+            status_code=401,
+            detail=f"{what} is private to the buyer who paid for it. {SIGN_IN_HINT}",
+        )
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"{what} belongs to {buyer}; you are signed in as {ident.address}. "
+            f"A session only opens the jobs of the address that signed it."
+        ),
+    )
+
+
+def redact_job_summary(row: dict[str, Any], ident: auth.Identity) -> dict[str, Any]:
+    """A job row anyone may read: it exists, whose shape it has, how far it got."""
+    if ident.sees(row.get("buyer")):
+        return row
+    out = dict(row)
+    out["buyer"] = auth.trunc_address(row.get("buyer"))
+    out["contract_hash"] = None
+    out["redacted"] = True
+    return out
+
+
+def redact_job_detail(detail: dict[str, Any], ident: auth.Identity) -> dict[str, Any]:
+    """The job's shape without its contents.
+
+    Prices, statuses, payment and commit transactions stay: they are on a
+    public chain already, and the output hash is the very thing the agent
+    published. The outputs those hashes commit to do not.
+    """
+    if ident.sees(detail.get("buyer")):
+        return detail
+    out = dict(detail)
+    out["buyer"] = auth.trunc_address(detail.get("buyer"))
+    out["contract_hash"] = None
+    out["steps"] = [dict(s, output=None) for s in (detail.get("steps") or [])]
+    out["redacted"] = True
+    out["private"] = (
+        "step outputs and the contract are visible to the buyer who paid for "
+        "them, and to the operator"
+    )
+    return out
+
+
+def redact_journal_event(event: dict[str, Any], ident: auth.Identity) -> dict[str, Any]:
+    """One decision, one sentence. No evaluated lines, no acted lines.
+
+    The evaluated lines are the memory reads — key names, prices, ledger
+    counters — and the acted lines quote what was produced. Publicly this is
+    the decision, when it happened, which step, and the sentence the engine
+    wrote to explain itself.
+    """
+    extra = event.get("extra") or {}
+    if ident.sees(extra.get("buyer")):
+        return event
+    decision = event.get("decision")
+    step = event.get("step")
+    summary = extra.get("summary") or (
+        f"{decision} on step {step}" if decision else "a decision was recorded"
+    )
+    return {
+        "ts": event.get("ts"),
+        "decision": decision,
+        "step": step,
+        "buyer": None,
+        "evaluated": [],
+        "acted": [],
+        "forward": [],
+        "extra": {"decision": decision, "step": step, "summary": summary},
+        "redacted": True,
+    }
+
+
+def redact_buyer(payload: dict[str, Any], ident: auth.Identity) -> dict[str, Any]:
+    """Trust tier and how many jobs were paid in full. Nothing else.
+
+    How much a wallet has spent, what it still owes and which jobs are its own
+    are the buyer's business; whether the agent will extend it credit is the
+    part the demo is about.
+    """
+    if ident.sees(payload.get("buyer")):
+        return payload
+    ledger = payload.get("ledger") or {}
+    trust = payload.get("trust") or {}
+    tier = ledger.get("trust_tier") or trust.get("trust_tier")
+    completed = ledger.get("completed_paid_jobs")
+    return {
+        "memory_missing": False,
+        "buyer": auth.trunc_address(payload.get("buyer")),
+        "known": payload.get("known"),
+        "ledger": {"trust_tier": tier, "completed_paid_jobs": completed},
+        "trust": {"trust_tier": tier, "completed_paid_jobs": completed},
+        "outstanding": [],
+        "jobs": [],
+        "redacted": True,
+        "private": (
+            "paid steps, USDC paid, outstanding invoices and defaults are "
+            "visible to this buyer, and to the operator"
+        ),
+        "source": "entity buyer/<address>, reduced to the public facts",
+    }
+
+
 def archived_job_ids(path: Path) -> list[str]:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -247,6 +375,57 @@ def api_status() -> dict[str, Any]:
     }
 
 
+# ----------------------------------------------------------------------
+# /api/auth: prove you hold the wallet, get a session
+# ----------------------------------------------------------------------
+class VerifyLoginRequest(BaseModel):
+    address: str = Field(description="Buyer wallet, 0x + 40 hex.")
+    signature: str = Field(description="personal_sign over the message from /api/auth/nonce.")
+    nonce: str | None = Field(
+        default=None, description="Optional: the nonce that was signed, when the caller kept it."
+    )
+
+
+@app.get("/api/auth/nonce")
+def api_auth_nonce(
+    address: str = Query(description="The wallet that wants to sign in.")
+) -> dict[str, Any]:
+    """A one-time nonce, and the exact message to sign with it.
+
+    The message is returned in full so the wallet signs bytes this server
+    built. It expires in five minutes and can be used once.
+    """
+    addr = auth.normalise(address)
+    if not ADDRESS_RE.match(addr):
+        raise HTTPException(
+            status_code=400,
+            detail="address must be a 0x-prefixed 40-hex-character address",
+        )
+    return auth.issue_nonce(addr)
+
+
+@app.post("/api/auth/verify")
+def api_auth_verify(body: VerifyLoginRequest) -> dict[str, Any]:
+    """Exchange a signature for a session token, valid 24 hours."""
+    try:
+        session = auth.verify_login(body.address, body.signature, body.nonce)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"signed_in": True, **session}
+
+
+@app.get("/api/auth/me")
+def api_auth_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """What this request's credential is worth. No credential is not an error."""
+    ident = caller(authorization)
+    return {
+        "kind": ident.kind,
+        "address": ident.address,
+        "signed_in": ident.signed_in,
+        "operator": ident.is_operator,
+    }
+
+
 @app.get("/api/job_types")
 def api_job_types() -> dict[str, Any]:
     """The services on offer, with their steps, prices and gates.
@@ -269,6 +448,7 @@ def job_summary(state: S.JobState, archived: bool, source: str) -> dict[str, Any
         "job_id": state.job_id,
         "buyer": state.buyer,
         "contract_hash": state.contract_hash,
+        "job_type": state.job_type,
         "current_step": state.current_step,
         "status": state.status,
         "created_at": state.created_at,
@@ -281,6 +461,7 @@ def job_summary(state: S.JobState, archived: bool, source: str) -> dict[str, Any
 @app.get("/api/jobs")
 def api_jobs(
     buyer: str | None = Query(default=None, description="Only this buyer's jobs."),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     store = open_store()
     if store is None:
@@ -328,9 +509,13 @@ def api_jobs(
     if buyer_key:
         jobs = [j for j in jobs if j["buyer"] == buyer_key]
     jobs.sort(key=lambda j: j["created_at"], reverse=True)
+    # The list is public; each row is trimmed to what its own buyer allows.
+    ident = caller(authorization)
+    jobs = [redact_job_summary(j, ident) for j in jobs]
     return {
         "memory_missing": False,
         "buyer": buyer_key,
+        "viewer": ident.kind,
         "jobs": jobs,
         "source": (
             "The SDK archives entities but exposes no reader for them, so "
@@ -470,11 +655,14 @@ def job_detail(store: TurnstylStore, job_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/jobs/{job_id}")
-def api_job(job_id: str) -> dict[str, Any]:
+def api_job(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     store = open_store()
     if store is None:
         return missing({"job": None})
-    return job_detail(store, job_id)
+    ident = caller(authorization)
+    detail = redact_job_detail(job_detail(store, job_id), ident)
+    detail["viewer"] = ident.kind
+    return detail
 
 
 # ----------------------------------------------------------------------
@@ -640,22 +828,43 @@ def report_markdown(r: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def report_guard(store: TurnstylStore, job_id: str, ident: auth.Identity) -> None:
+    """A report is the whole of the work. Only the buyer and the operator."""
+    state = store.get_job_state(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    require_visible(ident, state.buyer, f"the report for job {job_id}")
+
+
 @app.get("/api/jobs/{job_id}/report.json")
-def api_report_json(job_id: str) -> dict[str, Any]:
+def api_report_json(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None, description="Session token, for a plain link."),
+) -> dict[str, Any]:
     store = open_store()
     if store is None:
         return missing({"job_id": job_id, "report": None})
+    report_guard(store, job_id, caller(authorization or (f"Bearer {token}" if token else None)))
     return {"memory_missing": False, **report_data(store, job_id)}
 
 
 @app.get("/api/jobs/{job_id}/report.md", include_in_schema=True)
-def api_report_md(job_id: str):
+def api_report_md(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None, description="Session token, for a plain link."),
+):
     store = open_store()
     if store is None:
         return PlainTextResponse(
             "memory missing: no report can be produced from an absent store\n",
             media_type="text/markdown",
         )
+    # A download is a navigation, not a fetch, so it carries no Authorization
+    # header. The page appends ?token= to the link instead; same session, same
+    # check, and nothing else accepts a token in the query string.
+    report_guard(store, job_id, caller(authorization or (f"Bearer {token}" if token else None)))
     md = report_markdown(report_data(store, job_id))
     return PlainTextResponse(
         md,
@@ -769,7 +978,7 @@ def verify_step(
 
 
 @app.get("/api/jobs/{job_id}/verify")
-def api_verify(job_id: str) -> dict[str, Any]:
+def api_verify(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     """Prove, per step, that the output in memory is the one committed on chain.
 
     Needs both sides: the chain holds the hash, memory holds the output. Either
@@ -782,6 +991,8 @@ def api_verify(job_id: str) -> dict[str, Any]:
     state = store.get_job_state(job_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    # Verify recomputes the sha256 of each output, so it reads the outputs.
+    require_visible(caller(authorization), state.buyer, f"verification of job {job_id}")
     entity = store.get_job_entity(job_id)
     source = "entity job/<id>"
     if entity is None:
@@ -814,7 +1025,9 @@ def api_verify(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/jobs")
-def api_create_job(body: NewJobRequest) -> dict[str, Any]:
+def api_create_job(
+    body: NewJobRequest, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     """Give the agent a contract. Same path as `turnstyl job new`.
 
     Validates the buyer address and the source, then hands the text to
@@ -834,6 +1047,25 @@ def api_create_job(body: NewJobRequest) -> dict[str, Any]:
             detail="buyer must be a 0x-prefixed 40-hex-character address",
         )
     buyer = buyer.lower()
+    # A job is created in a wallet's name, and its contents belong to that
+    # wallet from this moment on. Only that wallet may open one.
+    ident = caller(authorization)
+    if not ident.signed_in:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                f"creating a job as {buyer} needs a session for that wallet. "
+                f"{SIGN_IN_HINT}"
+            ),
+        )
+    if not ident.is_operator and ident.address != buyer:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"you are signed in as {ident.address}; a job cannot be created "
+                f"in the name of {buyer}"
+            ),
+        )
     source = body.source or ""
     size = len(source.encode("utf-8"))
     if size < 1 or size > SOURCE_MAX_BYTES:
@@ -888,7 +1120,9 @@ def api_create_job(body: NewJobRequest) -> dict[str, Any]:
 
 
 @app.post("/api/jobs/{job_id}/pay")
-def api_simulate_pay(job_id: str) -> dict[str, Any]:
+def api_simulate_pay(
+    job_id: str, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     """Mark the job's open invoice paid. Fake backend only.
 
     The same thing `turnstyl pay` does, so the browser flow can be exercised
@@ -908,6 +1142,7 @@ def api_simulate_pay(job_id: str) -> dict[str, Any]:
     state = store.get_job_state(job_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    require_visible(caller(authorization), state.buyer, f"the invoice on job {job_id}")
     invoice = state.open_invoice
     if invoice is None or invoice.paid:
         raise HTTPException(
@@ -928,11 +1163,14 @@ def api_simulate_pay(job_id: str) -> dict[str, Any]:
 # /api/buyers/{address}
 # ----------------------------------------------------------------------
 @app.get("/api/buyers/{address}")
-def api_buyer(address: str) -> dict[str, Any]:
+def api_buyer(
+    address: str, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     store = open_store()
     if store is None:
         return missing({"buyer": None})
 
+    ident = caller(authorization)
     key = store.buyer_key(address)
     ledger = store.get_buyer(key)
     known = store.buyer_exists(key)
@@ -951,7 +1189,7 @@ def api_buyer(address: str) -> dict[str, Any]:
     default_spec = jobtypes.get(None)
     decision, reason = policy.decide(2, ledger, probe, default_spec)
 
-    return {
+    return redact_buyer({
         "memory_missing": False,
         "buyer": key,
         "known": known,
@@ -974,7 +1212,7 @@ def api_buyer(address: str) -> dict[str, Any]:
             "is keccak256(\"<job_id>:<step>\") computed here, the same bytes "
             "payments.memo_bytes32 puts on chain"
         ),
-    }
+    }, ident)
 
 
 def outstanding_view(ledger: S.BuyerLedger) -> list[dict[str, Any]]:
@@ -994,7 +1232,9 @@ def outstanding_view(ledger: S.BuyerLedger) -> list[dict[str, Any]]:
 
 
 @app.post("/api/buyers/{address}/settle/{job_id}/{step}")
-def api_settle_outstanding(address: str, job_id: str, step: int) -> dict[str, Any]:
+def api_settle_outstanding(
+    address: str, job_id: str, step: int, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     """Settle one outstanding item on a closed job. Fake backend only.
 
     The same thing `turnstyl pay` followed by a reconcile does. On the Base
@@ -1012,6 +1252,7 @@ def api_settle_outstanding(address: str, job_id: str, step: int) -> dict[str, An
         )
     store = TurnstylStore(TurnstylMemory(db_path()))
     key = store.buyer_key(address)
+    require_visible(caller(authorization), key, f"the ledger of {key}")
     if not store.buyer_exists(key):
         raise HTTPException(status_code=404, detail=f"buyer {key} is unknown to memory")
     ledger = store.get_buyer(key)
@@ -1183,6 +1424,13 @@ def _x402_check(job_id: str, step: int, request: Request, address: str | None = 
     state = store.get_job_state(job_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"no job {job_id!r} in {db_path()}")
+    # A session for this job's buyer, on top of the payer check below. The 402
+    # quote is public; moving money on this job's behalf is not.
+    require_visible(
+        caller(request.headers.get("authorization")),
+        state.buyer,
+        f"paying for job {job_id}",
+    )
     if address is not None and store.buyer_key(address) != state.buyer:
         raise HTTPException(
             status_code=400,
@@ -1435,10 +1683,12 @@ def _x402_install() -> None:
 def api_journal(
     job: str | None = Query(default=None, description="Filter to one job id."),
     limit: int = Query(default=50, ge=1, le=500),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     store = open_store()
     if store is None:
         return missing({"events": [], "job": job, "limit": limit})
+    ident = caller(authorization)
 
     # Filtering happens after the read, so ask for a wider window than the caller
     # wants when they are narrowing to one job.
@@ -1448,17 +1698,22 @@ def api_journal(
         extra = event.get("extra") or {}
         if job and extra.get("job_id") != job:
             continue
+        # Each event is trimmed to what its own job's buyer allows: the whole
+        # entry for them and the operator, one sentence for everyone else.
         events.append(
-            {
-                "ts": event.get("ts"),
-                "decision": extra.get("decision"),
-                "step": extra.get("step"),
-                "buyer": extra.get("buyer"),
-                "evaluated": event.get("evaluated") or [],
-                "acted": event.get("acted") or [],
-                "forward": event.get("forward") or [],
-                "extra": extra,
-            }
+            redact_journal_event(
+                {
+                    "ts": event.get("ts"),
+                    "decision": extra.get("decision"),
+                    "step": extra.get("step"),
+                    "buyer": extra.get("buyer"),
+                    "evaluated": event.get("evaluated") or [],
+                    "acted": event.get("acted") or [],
+                    "forward": event.get("forward") or [],
+                    "extra": extra,
+                },
+                ident,
+            )
         )
         if len(events) >= limit:
             break
@@ -1467,6 +1722,7 @@ def api_journal(
         "memory_missing": False,
         "job": job,
         "limit": limit,
+        "viewer": ident.kind,
         "count": len(events),
         "events": events,
         "source": "journal (COLD tier), newest first",
@@ -1476,6 +1732,13 @@ def api_journal(
 # ----------------------------------------------------------------------
 # Static page
 # ----------------------------------------------------------------------
+# The operator's token exists from startup, so it is in .env before anyone
+# goes looking for it. Never printed: the operator reads it from their own
+# .env and pastes it into the app's settings drawer.
+auth.operator_token()
+if auth.operator_problem():
+    print(f"turnstyl auth: {auth.operator_problem()}", flush=True)
+
 # Decide once, at import, and say so once. The paywall can only be registered
 # while the app is being built, so the facilitator health check happens here
 # rather than on a startup event.
@@ -1506,6 +1769,10 @@ app.add_middleware(
         "Content-Type",
         "Accept",
         "ngrok-skip-browser-warning",
+        # The buyer's session, and the operator's token. Without this on the
+        # allow list the browser's preflight fails and the app can only ever
+        # see the public view.
+        "Authorization",
         # x402 sends the signed authorisation in a header; v1 name accepted too
         "PAYMENT-SIGNATURE",
         "X-PAYMENT",
@@ -1525,6 +1792,23 @@ app.add_middleware(
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     page = WEB_DIR / "index.html"
+    if not page.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=f"turnstyl: {page} is missing; the web UI was not installed.",
+        )
+    return FileResponse(page)
+
+
+@app.get("/app.html", include_in_schema=False)
+def app_page() -> FileResponse:
+    """The buyer and operator app: jobs, payments, reports, verification.
+
+    Served here so the same relative paths work locally at /app.html and on
+    GitHub Pages at /turnstyl/app.html; index.html is the story page and links
+    to this one.
+    """
+    page = WEB_DIR / "app.html"
     if not page.is_file():
         raise HTTPException(
             status_code=500,

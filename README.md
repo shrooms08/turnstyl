@@ -174,22 +174,61 @@ Contracts: `cd contracts && forge test`. `forge init --no-git` vendored
 
 ## Web UI
 
-One page, served from the same process that reads the agent's memory: a scroll
-story at the top and a live operator console at the bottom. It reads only from
-Sibyl Memory through the read-only API; nothing on the page can write.
+Two pages, served from the same process that reads the agent's memory, sharing
+one stylesheet at `web/static/turnstyl.css`:
+
+* **`/`** is the story. A scroll narrative over a 5,000-particle scene, ending
+  in a compact operator strip: is the agent up, where its memory file is, how
+  many jobs are in it, the last decision it made in one sentence, and a button
+  into the app.
+* **`/app.html`** is the app. Connect a wallet, sign in, submit a contract, pay
+  invoices on either rail, read reports, verify outputs against the chain.
+  `app.html?job=<id>` opens one job.
 
 ```bash
 .venv/bin/turnstyl serve --db ./data/turnstyl.db     # then open http://127.0.0.1:8787
 ```
 
-Scrolling drives a 5,000-particle scene that morphs through a scatter between
-sections: brain (the hero), coin (every step is paid), bulb (restart it, it
-remembers), scatter (the delete test), then the turnstyl mark for the last story
-and the console. The console lists every job the store knows, and a job page
-shows all four metered steps as cards, the open invoice, the decision timeline
-and the buyer ledger. Delete the memory file while the page is open and it stays
-up: the scene locks to a red scatter, the counters read "memory deleted", and
-every panel says what was lost rather than showing a stale copy.
+Scrolling drives the scene through a scatter between sections: brain (the hero),
+coin (every step is paid), bulb (restart it, it remembers), scatter (the delete
+test), then the turnstyl mark. Delete the memory file while either page is open
+and it stays up: the scene locks to a red scatter, the counters read "memory
+deleted", and every panel says what was lost rather than showing a stale copy.
+
+## Who sees what
+
+A job's contents are the thing the buyer paid for, so they belong to that buyer.
+The meter stays public; the work does not.
+
+| | public | the job's buyer | the operator |
+| --- | --- | --- | --- |
+| job list | id, buyer as `0x1234…abcd`, service, status, step, timestamps | full addresses on their own rows | everything |
+| job detail | every step's price, status, payment and commit transactions, and output sha256 | plus the outputs and the contract hash | plus the outputs and the contract hash |
+| journal | decision, time, step, the one-sentence summary | plus the memory reads and actions behind it | plus the memory reads and actions behind it |
+| ledger | trust tier, completed paid jobs | the whole ledger | the whole ledger |
+| report.md, report.json, verify | 401 | 200 | 200 |
+| creating a job, paying, settling | 401 | their own jobs | any job |
+
+A buyer proves an address by signing this message, and nothing else:
+
+```
+turnstyl login
+
+address: <lowercase address>
+nonce: <32 hex characters>
+issued: <iso 8601 time>
+```
+
+`GET /api/auth/nonce?address=0x…` returns the message in full;
+`POST /api/auth/verify` with `{address, signature}` returns a bearer token good
+for 24 hours. Nothing is spent and no transaction is sent. A wrong buyer gets
+403, no buyer gets 401, and both say which address is which.
+
+The operator override is `OPERATOR_TOKEN` in `.env`, generated there on first
+startup if it is missing. Paste it into the app's Settings drawer to see every
+job in the store; it is held in that tab's `sessionStorage` and is gone when the
+tab closes. Nonces and sessions live in the server process, so a restart signs
+everyone out.
 
 ![hero: the brain over the headline](docs/screenshots/hero.png)
 

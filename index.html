@@ -237,6 +237,14 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
 .src:focus{border-color:var(--line-2)}
 .drop{margin-top:10px;border:1px dashed var(--line-2);padding:12px 14px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;text-align:center}
 .drop.over{border-color:var(--gold);color:var(--gold)}
+.types{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-bottom:14px}
+.type{background:var(--card-2);border:1px solid var(--line);padding:14px 16px;cursor:pointer;text-align:left;color:inherit;font:inherit;display:flex;flex-direction:column;gap:8px;transition:border-color .25s ease,background .25s ease}
+.type:hover{border-color:var(--line-2)}
+.type.on{border-color:rgba(226,176,74,.55);background:#0C0A05}
+.type .tn{font-family:var(--disp);font-weight:300;font-size:17px}
+.type .td{font-size:13px;line-height:1.45;color:var(--dim)}
+.type .tp{font-family:var(--mono);font-size:11px;color:var(--mute);line-height:1.6}
+.type .tp b{color:var(--gold);font-weight:400}
 .actions{margin-top:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .actions .wait{margin-top:0}
 .vbtn{align-self:flex-start}
@@ -484,7 +492,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   var S = {
     status:null, jobs:null, job:null, buyer:null, journal:null,
     missing:false, connected:false, jobId:null,
-    openStep:null, openMem:{}, memTouched:{}, mine:false,
+    openStep:null, openMem:{}, memTouched:{}, mine:false, jobType:null,
     statusFails:0, offline:false
   };
   // per-step verification results for the open job; rendered inline
@@ -623,15 +631,30 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   // Always four cards. The API now returns unrun steps as "not_started" with
   // their base price; if an older API omits them, they are synthesised here
   // from the same pricing rules, so either shape renders the full ladder.
-  var STEP_NAMES = { 1:"scope", 2:"findings", 3:"patch", 4:"verify" };
-  var BASE_PRICES = { 1:0.00, 2:0.50, 3:0.75, 4:0.25 };
+  // The services on offer come from /api/status; a job type is a spec, and the
+  // page never hardcodes one. This is only the shape to fall back to when the
+  // API has not answered yet.
+  var FALLBACK_TYPE = { id:"audit", name:"Security audit", description:"",
+    steps:[{n:1,name:"scope",base_price_usdc:0},{n:2,name:"findings",base_price_usdc:0.5},
+           {n:3,name:"patch",base_price_usdc:0.75},{n:4,name:"verify",base_price_usdc:0.25}] };
+  function jobTypes(){
+    var t = (S.status && S.status.job_types) || [];
+    return t.length ? t : [FALLBACK_TYPE];
+  }
+  function typeSpec(id){
+    var all = jobTypes();
+    for(var i=0;i<all.length;i++) if(all[i].id === id) return all[i];
+    return all[0];
+  }
   function fourSteps(job){
+    var spec = typeSpec(job && job.job_type);
     var byNo = {};
     (job && job.steps || []).forEach(function(s){ byNo[Number(s.step)] = s; });
-    return [1,2,3,4].map(function(n){
-      return byNo[n] || { step:n, name:STEP_NAMES[n], status:"not_started", price_usdc:BASE_PRICES[n],
-                          paid:false, cached:false, tokens_in:null, tokens_out:null, seconds:null,
-                          output_sha256:null, commit_tx:null, pay_tx:null, output:null };
+    return spec.steps.map(function(sp){
+      return byNo[sp.n] || { step:sp.n, name:sp.name, status:"not_started",
+                             price_usdc:sp.base_price_usdc,
+                             paid:false, cached:false, tokens_in:null, tokens_out:null, seconds:null,
+                             output_sha256:null, commit_tx:null, pay_tx:null, output:null };
     });
   }
   function stepState(step, job){
@@ -655,8 +678,13 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(step.tokens_in != null || step.tokens_out != null)
       facts.push("tokens " + (step.tokens_in==null?"—":step.tokens_in) + " in / " + (step.tokens_out==null?"—":step.tokens_out) + " out");
     if(step.seconds != null) facts.push(Number(step.seconds).toFixed(1) + "s");
-    if(step.step === 3 && step.compiles != null)
-      facts.push('<span style="color:'+(step.compiles?"#4FB56E":"#E5484D")+'">PATCH COMPILES ' + (step.compiles ? "yes" : "no") + "</span>");
+    if(step.tests_total != null)
+      facts.push('<span style="color:'+(step.tests_failed ? "#E2B04A" : "#4FB56E")+'">TESTS ' +
+                 esc(step.tests_passed) + " passed, " + esc(step.tests_failed) + " failed</span>");
+    else if(step.compiles != null)
+      facts.push('<span style="color:'+(step.compiles?"#4FB56E":"#E5484D")+'">' +
+                 (step.name === "tests" ? "TESTS COMPILE " : "PATCH COMPILES ") +
+                 (step.compiles ? "yes" : "no") + "</span>");
 
     var txs = "";
     if(step.pay_tx) txs += '<div>pay ' + txLink(step.pay_tx) + "</div>";
@@ -871,6 +899,7 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     var head = '<div class="card"><div class="kv">' +
       '<div><div class="k">job id</div><div class="v big">'+cp(job.job_id)+'</div></div>' +
       '<div><div class="k">buyer</div><div class="v">'+cp(job.buyer)+youPill(job.buyer)+'</div></div>' +
+      '<div><div class="k">service</div><div class="v">'+esc(job.job_type_name || job.job_type || "audit")+'</div></div>' +
       '<div><div class="k">contract hash</div><div class="v">'+cp(job.contract_hash)+'</div></div>' +
       '<div><div class="k">status</div><div class="v">'+statusPill(job.status)+'</div></div>' +
       '<div><div class="k">current step</div><div class="v">'+esc(job.current_step==null?"—":job.current_step)+' of 4</div></div>' +
@@ -1012,7 +1041,8 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
   function buildAuditPanel(){
     var host = $("#auditPanel");
     if(!host || host.firstChild) return;
-    host.innerHTML = '<div class="card"><h3>new audit</h3>' +
+    host.innerHTML = '<div class="card"><h3>new job</h3>' +
+      '<div class="types" id="typePicker"></div>' +
       '<textarea class="src" id="srcText" spellcheck="false" placeholder="// paste Solidity source here, or drop a .sol file below"></textarea>' +
       '<div class="drop" id="dropZone">drop a .sol file here, or click to choose</div>' +
       '<div class="links"><a href="https://faucet.circle.com" target="_blank" rel="noopener">get test USDC on Base Sepolia</a>' +
@@ -1021,6 +1051,12 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
       '<div class="actions"><button type="button" class="btn" id="submitBtn" disabled>Submit for scope (free)</button>' +
       '<span class="wait" id="auditMsg"></span></div></div>';
     var ta = $("#srcText"), dz = $("#dropZone"), fi = $("#srcFile");
+    host.addEventListener("click", function(e){
+      var t = e.target.closest && e.target.closest("[data-type]");
+      if(!t) return;
+      S.jobType = t.getAttribute("data-type");
+      syncAuditPanel();
+    });
     function fill(file){
       if(!file) return;
       var rd = new FileReader();
@@ -1044,6 +1080,21 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     var ta = $("#srcText"), btn = $("#submitBtn"), msg = $("#auditMsg");
     if(!ta || !btn || !msg) return;
     var text = ta.value.trim();
+    // the picker: name, one-line description, and the per-step prices
+    var all = jobTypes();
+    if(!S.jobType || !all.some(function(t){ return t.id === S.jobType; }))
+      S.jobType = (S.status && S.status.default_job_type) || all[0].id;
+    var picker = $("#typePicker");
+    if(picker) picker.innerHTML = all.map(function(t){
+      var prices = t.steps.map(function(sp){
+        return sp.n + " " + esc(sp.name) + " " +
+               (sp.base_price_usdc ? "<b>" + usdc(sp.base_price_usdc) + "</b>" : "free");
+      }).join(" · ");
+      return '<button type="button" class="type'+(t.id===S.jobType?" on":"")+'" data-type="'+esc(t.id)+'">' +
+        '<span class="tn">'+esc(t.name)+'</span>' +
+        '<span class="td">'+esc(t.description||"")+'</span>' +
+        '<span class="tp">'+prices+'</span></button>';
+    }).join("");
     var rl = $("#receiptsLink"), stx = S.status || {};
     if(rl && stx.receipts_address) rl.href = (stx.explorer || "https://sepolia.basescan.org") + "/address/" + stx.receipts_address;
     if(S.offline){
@@ -1056,14 +1107,18 @@ button.chip{cursor:pointer;font:inherit;font-family:var(--mono);font-size:13px;f
     if(btn.dataset.busy === "1"){ btn.disabled = true; msg.textContent = "submitting… scope runs now, free"; return; }
     if(!W.addr){ btn.disabled = true; msg.textContent = W.available ? "connect a wallet to submit" : "no wallet found"; return; }
     btn.disabled = !text;
-    msg.textContent = auditNote || (text ? "scope is free; step 2 is invoiced at " + usdc(BASE_PRICES[2]) + " USDC" : "paste or drop a contract");
+    var chosen = typeSpec(S.jobType), second = chosen.steps[1];
+    msg.textContent = auditNote || (text
+      ? "step 1 (" + chosen.steps[0].name + ") is free; step 2 (" + second.name +
+        ") is invoiced at " + usdc(second.base_price_usdc) + " USDC"
+      : "paste or drop a contract");
   }
   function submitAudit(){
     var ta = $("#srcText"), btn = $("#submitBtn");
     if(!ta || !btn || !W.addr || !ta.value.trim()) return;
     btn.dataset.busy = "1"; auditNote = ""; syncAuditPanel();
     fetch(apiUrl("/api/jobs"), { method:"POST", headers:{ "content-type":"application/json", accept:"application/json", "ngrok-skip-browser-warning":"true" },
-      body: JSON.stringify({ buyer:W.addr, source:ta.value, filename:"pasted.sol" }) })
+      body: JSON.stringify({ buyer:W.addr, source:ta.value, filename:"pasted.sol", job_type:S.jobType }) })
       .then(function(r){ return r.json().then(function(b){ return { ok:r.ok, status:r.status, body:b }; }); })
       .then(function(res){
         btn.dataset.busy = "";

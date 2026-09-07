@@ -14,7 +14,7 @@ import {ThreeCanvas} from '@remotion/three';
 import React from 'react';
 import {AbsoluteFill, Easing, interpolate, useCurrentFrame} from 'remotion';
 import {CAMERA_FOV, CAMERA_Z, Layout} from '../layout';
-import {Particles, SceneGeometry, SceneMode} from './Particles';
+import {Particles, SceneDriver, SceneGeometry, SceneMode} from './Particles';
 
 const cubic = Easing.bezier(0.33, 0, 0.15, 1);
 
@@ -24,7 +24,17 @@ export const SceneCanvas: React.FC<{
   readonly layout: Layout;
   /** How far back the brain sits behind the refusal line, in beats 1-2. */
   readonly brainOpacity: number;
-}> = ({mode, span, layout, brainOpacity}) => {
+  /** Supplied by the narrated story; the teaser leaves it off. */
+  readonly driver?: SceneDriver;
+  /** Layer opacity override, for callers that drive it themselves. */
+  readonly layerOpacityOverride?: number;
+  /**
+   * Drawing-buffer multiplier. Left off, the canvas renders 1:1, which is what
+   * the teaser wants. The story raises it so 1px wireframes supersample rather
+   * than alias at 4K.
+   */
+  readonly dpr?: number;
+}> = ({mode, span, layout, brainOpacity, driver, layerOpacityOverride, dpr}) => {
   const frame = useCurrentFrame();
 
   // The mark and the wordmark straddle the frame centre: the mark's centre sits
@@ -34,7 +44,9 @@ export const SceneCanvas: React.FC<{
   // Beat 6 keeps the scatter behind the cards; beat 7 brings the mark forward,
   // because by then it is the only thing on the frame.
   const layerOpacity =
-    mode === 'intro'
+    layerOpacityOverride !== undefined
+      ? layerOpacityOverride
+      : mode === 'intro'
       ? brainOpacity
       : interpolate(frame, [86, 96], [0.55, 1], {
           extrapolateLeft: 'clamp',
@@ -57,10 +69,11 @@ export const SceneCanvas: React.FC<{
         width={layout.width}
         height={layout.height}
         camera={{fov: CAMERA_FOV, position: [0, 0, CAMERA_Z], near: 0.1, far: 100}}
+        dpr={dpr}
         gl={{antialias: true, preserveDrawingBuffer: true, alpha: true}}
         style={{background: 'transparent'}}
       >
-        <Particles mode={mode} span={span} geometry={geometry} />
+        <Particles mode={mode} span={span} geometry={geometry} driver={driver} />
       </ThreeCanvas>
     </AbsoluteFill>
   );

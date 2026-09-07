@@ -26,7 +26,7 @@ const cubic = Easing.bezier(0.33, 0, 0.15, 1);
 const cRed = new THREE.Color(RED);
 
 /** What the field is doing on one frame. Pure. */
-type SceneState = {
+export type SceneState = {
   visible: boolean;
   /** 0 = wholly form A, 1 = wholly form B. */
   blend: number;
@@ -169,11 +169,20 @@ function outroState(
   };
 }
 
+/**
+ * A driver the caller supplies instead of `mode`. The teaser uses the two
+ * built-in modes; the narrated story brings its own (see story/scene.tsx), so
+ * the shared field can be flown a different way without either piece having to
+ * know about the other.
+ */
+export type SceneDriver = (frame: number, fps: number) => SceneState;
+
 export const Particles: React.FC<{
   readonly mode: SceneMode;
   readonly span: number;
   readonly geometry: SceneGeometry;
-}> = ({mode, span, geometry}) => {
+  readonly driver?: SceneDriver;
+}> = ({mode, span, geometry, driver}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const f = forms();
@@ -208,8 +217,9 @@ export const Particles: React.FC<{
   const logoH = Math.max(0.001, f.logoMaxY - f.logoMinY);
 
   useLayoutEffect(() => {
-    const st =
-      mode === 'intro'
+    const st = driver
+      ? driver(frame, fps)
+      : mode === 'intro'
         ? introState(frame, fps, geometry, span, brainH)
         : outroState(frame, fps, geometry, brainH, logoH);
 
@@ -273,7 +283,7 @@ export const Particles: React.FC<{
     }
     mesh.instanceMatrix.needsUpdate = true;
     (mesh.instanceColor as THREE.InstancedBufferAttribute).needsUpdate = true;
-  }, [frame, fps, mode, span, geometry, mesh, f, brainH, logoH]);
+  }, [frame, fps, mode, span, geometry, driver, mesh, f, brainH, logoH]);
 
   return (
     <group ref={groupRef}>

@@ -1,15 +1,27 @@
-# turnstyl teaser
+# turnstyl video
 
-A 20-second teaser for turnstyl, built with [Remotion](https://remotion.dev).
-Two compositions, same beats, same 600 frames at 30fps:
+Two pieces, built with [Remotion](https://remotion.dev), sharing one set of
+fonts, colours, easing and the particle scene.
+
+**The teaser** — 20 seconds, silent, seven beats. It plays muted, so the
+on-screen text carries the whole message and every line is sized to read at
+400px wide.
 
 | composition | size | output |
 | --- | --- | --- |
 | `teaser-square` | 1080x1080 | `out/turnstyl-teaser-square.mp4` |
 | `teaser-wide` | 1920x1080 | `out/turnstyl-teaser-wide.mp4` |
 
-It plays muted, so the on-screen text carries the whole message and every line
-is sized to read at 400px wide.
+**The story** — 41 seconds, narrated, ten shots. One camera moves continuously
+through a dark 3D space of floating UI panels, cut only at frames 390, 864 and
+1040. This one plays *with* sound: there are no burned-in subtitles, and the
+only words on screen are design elements at display size.
+
+| composition | size | output |
+| --- | --- | --- |
+| `story-4k` | 3840x2160 | `out/turnstyl-story-4k.mp4` |
+| `story-wide` | 1920x1080 | `out/turnstyl-story-wide.mp4` |
+| `story-square` | 1080x1080 | `out/turnstyl-story-square.mp4` |
 
 This folder is deliberately separate from the Python package. It has its own
 `package.json` and its own toolchain, and it touches nothing in `src/`,
@@ -45,6 +57,15 @@ npx remotion render teaser-square out/turnstyl-teaser-square.mp4 \
 
 npx remotion render teaser-wide out/turnstyl-teaser-wide.mp4 \
   --codec=h264 --crf=18 --concurrency=4
+
+npx remotion render story-4k out/turnstyl-story-4k.mp4 \
+  --codec=h264 --crf=16 --concurrency=4
+
+npx remotion render story-wide out/turnstyl-story-wide.mp4 \
+  --codec=h264 --crf=18 --concurrency=4
+
+npx remotion render story-square out/turnstyl-story-square.mp4 \
+  --codec=h264 --crf=18 --concurrency=4
 ```
 
 `out/` is gitignored.
@@ -52,17 +73,54 @@ npx remotion render teaser-wide out/turnstyl-teaser-wide.mp4 \
 ## What is in here
 
 ```
+public/vo/          the nine narration files, 01.mp3 to 09.mp3
 src/
-  Root.tsx          the two compositions
-  Teaser.tsx        the beat sequence, shared by both
-  layout.ts         the only thing that differs between square and wide
+  Root.tsx          all five compositions
+  Teaser.tsx        the silent teaser's beat sequence
+  layout.ts         square vs wide, for the teaser
   theme.ts          Outfit and JetBrains Mono, and the four brand colours
-  timing.ts         every beat boundary, in frames
+  timing.ts         every teaser beat boundary, in frames
   data.ts           every figure on screen, with where it came from
-  beats/            one file per beat
+  beats/            one file per teaser beat
   components/       the typed line, the counters, the card face
-  scene/            the particle scene
+  scene/            the particle scene, shared by both pieces
+  story/
+    Story.tsx       the narrated piece: camera, panels, overlays, narration
+    config.ts       design units, the scale factor, and the 3D world
+    camera.ts       the camera path and the projection helper
+    Stage.tsx       the CSS perspective container and panel placement
+    panels.tsx      the four panels, built from the app's own CSS
+    panelStyle.ts   the tokens lifted from web/static/turnstyl.css
+    overlays.tsx    the only words on screen, and the red bleed
+    scene.tsx       how the story drives the shared particle field
+    Narration.tsx   the nine <Audio> placements and the duration check
+    timing.ts       shot boundaries and the VO table
 ```
+
+### Resolution
+
+Nothing in the story is written in output pixels. Every size, offset, radius and
+camera distance is a *design unit*, multiplied at render time by
+`scale = width / designWidth`. `story-4k` and `story-wide` share a design width
+of 1920, so 4K is exactly 2x wide and the same picture — frame 500 rendered at
+both and compared aligns at offset (0,0). `story-square` has its own design
+width because a 1:1 frame is a different composition, not a cropped one, and
+`config.ts` gives it its own panel placements.
+
+The particle canvas renders above 1:1 (`dpr` in `config.ts`) so its 1px
+wireframes supersample instead of aliasing at 4K.
+
+No type layer uses a CSS filter, blur or `opacity`; text fades on its colour's
+own alpha channel so it is never rasterised as a scaled bitmap. Panels do use
+`opacity`, which is what fades them in and out.
+
+### Narration
+
+The nine files are placed at their own start frames and never concatenated, so
+re-recording one line moves nothing else. `story/Narration.tsx` measures each
+file on build and warns if it has drifted more than 3 frames from the duration
+recorded in `story/timing.ts`, or if it has grown long enough to overrun into
+the next line.
 
 ### The numbers
 

@@ -149,7 +149,14 @@
   };
   var V = { jobId:null, byStep:{}, shown:{}, busy:false, err:null, summary:null };
   var W = { available:false, addr:null, chainId:null, balance:null, busy:false, err:null, menu:false };
-  var P = { jobId:null, step:null, status:null, tx:null, busy:false };
+  // `error` is the one sentence shown; `details` is the raw text behind the
+  // disclosure; `ctx` is what a retry or an on-chain fallback needs.
+  var P = { jobId:null, step:null, status:null, tx:null, busy:false,
+            error:null, details:null, rail:null, ctx:null };
+  function payReset(jobId, step, status, ctx, rail){
+    P = { jobId:jobId, step:Number(step), status:status, tx:null, busy:true,
+          error:null, details:null, rail:rail || null, ctx:ctx || null };
+  }
   // A: who the API thinks we are. `token` is a wallet session; `operator` is
   // the pasted OPERATOR_TOKEN, which outranks it when both are present.
   // Both credentials can be held at once: an operator who is also a buyer sees
@@ -458,13 +465,76 @@
     }).join("");
   }
 
+  // Every failure a payment can hand back, as one sentence a person can act
+  // on. The raw text is never shown in the line itself: it goes behind the
+  // details disclosure, where an RPC dump cannot break the layout.
+  function explainPayError(raw, ctx){
+    var t = String(raw == null ? "" : raw).toLowerCase();
+    var amount = ctx && ctx.amount != null ? usdc(ctx.amount) : "the invoice";
+    var have = (W.balance == null) ? null : usdc(W.balance);
+    if(/user rejected|user denied|denied transaction|action_rejected|\b4001\b|^cancelled$/.test(t))
+      return { msg:"You cancelled the request in your wallet. Nothing was sent.", retry:true };
+    if(/already (been )?(paid|settled)|nothing owed|no open invoice|has nothing owed/.test(t))
+      return { msg:"This invoice is already settled. Reload the job to see where it is now.", retry:false };
+    if(/insufficient|exceeds balance|balance too low|not enough (usdc|funds)/.test(t))
+      return { msg:"Not enough USDC in this wallet" +
+                   (have == null ? "" : ": you have " + have) +
+                   " and this step costs " + amount +
+                   ". Top up on Base Sepolia and try again.", retry:true };
+    if(/expired|validbefore|valid_before|authorization.{0,20}(expir|no longer)|deadline/.test(t))
+      return { msg:"The payment authorization expired before the facilitator submitted it. " +
+                   "Nothing was charged: sign a fresh one and try again.", retry:true };
+    if(/invalid.{0,3}signature|signature.{0,20}(invalid|reject|fail|verif)|authorization_valid|verification failed|invalid_exact/.test(t))
+      return { msg:"The facilitator would not accept the signature for this payment. " +
+                   "Nothing was charged. Signing again usually clears it.", retry:true };
+    if(/wrong network|unsupported.{0,12}(network|chain)|chain mismatch|chainid|wrong chain|network mismatch/.test(t))
+      return { msg:"Your wallet is on the wrong network. Switch it to Base Sepolia and try again.", retry:true };
+    if(/failed to fetch|networkerror|load failed|err_|not answering|connection refused|timed out|timeout/.test(t))
+      return { msg:"The agent did not answer. It runs on the operator's machine, so it may be " +
+                   "offline; nothing was charged.", retry:true };
+    return { msg:"The payment could not be submitted. Nothing was charged.", retry:true };
+  }
+
+  // A failure ends an attempt: short sentence, raw text kept, buttons offered.
+  function payFailed(raw, ctx, rail){
+    var mapped = explainPayError(raw, ctx);
+    P.busy = false;
+    P.status = null;
+    P.error = mapped.msg;
+    P.canRetry = mapped.retry !== false;
+    P.details = String(raw == null ? "" : raw);
+    P.ctx = ctx || P.ctx;
+    P.rail = rail || P.rail;
+    render();
+  }
+
+  function payErrorBlock(busyHere){
+    if(!busyHere || !P.error) return "";
+    var ctx = P.ctx || {};
+    var retry = P.canRetry === false ? "" :
+      '<button type="button" class="btn" id="payRetryBtn">Try again</button>';
+    // Only after a failed gasless attempt: the receipts contract is the other
+    // rail, and it is one click away rather than a different page.
+    var fallback = (P.rail === "x402" && ctx.memo)
+      ? '<button type="button" class="btn quiet" id="payFallbackBtn">Pay on chain instead</button>'
+      : "";
+    var hint = fallback ? '<span class="hint">on chain needs a little ETH for gas</span>' : "";
+    var details = P.details
+      ? '<details><summary>details</summary><pre>'+esc(P.details)+'</pre></details>'
+      : "";
+    return '<div class="payerr"><div class="msg">'+esc(P.error)+'</div>' +
+      ((retry || fallback) ? '<div class="acts">'+retry+fallback+hint+'</div>' : "") +
+      details + '</div>';
+  }
+
   function payControls(job, inv){
     var st = S.status || {};
     if(S.offline) return '<div class="actions"><span class="wait">agent offline: payments are held until the operator\'s machine is back</span></div>';
     var busyHere = (P.jobId === job.job_id && P.step === inv.step);
     var line = busyHere && P.status ? P.status : "";
     var link = (busyHere && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (busyHere && P.tx ? ' ' + cp(P.tx) : "");
-    var status = line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "";
+    var status = (line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "")
+      + payErrorBlock(busyHere);
     if(!mineJob(job))
       return '<div class="actions"><span class="wait">sign in as this job\'s buyer to pay its invoice</span></div>';
     if(st.payments_backend === "fake"){
@@ -491,7 +561,8 @@
     var busyHere = (P.jobId === o.job_id && P.step === Number(o.step));
     var line = busyHere && P.status ? P.status : "";
     var link = (busyHere && P.tx && !isFake(P.tx)) ? ' ' + txLink(P.tx) : (busyHere && P.tx ? ' ' + cp(P.tx) : "");
-    var status = line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "";
+    var status = (line ? '<span class="wait"><span class="blip"></span>'+esc(line)+link+'</span>' : "")
+      + payErrorBlock(busyHere);
     var attrs = ' data-settle="1" data-job="'+esc(o.job_id)+'" data-step="'+esc(o.step)+'" data-memo="'+esc(o.memo||"")+'" data-amount="'+esc(o.amount_usdc)+'" data-buyer="'+esc(b.buyer)+'"';
     if(st.payments_backend === "fake")
       return '<div class="actions"><button type="button" class="btn"'+attrs+(busyHere && P.busy ? " disabled" : "")+'>Simulate payment</button>' + status + '</div>';
@@ -1143,14 +1214,20 @@
   function payMemo(jobId, step, memo, amountUsdc, doneText){
     var st = S.status;
     if(!st || !W.addr || P.busy) return;
-    P = { jobId:jobId, step:Number(step), status:"checking allowance", tx:null, busy:true };
+    var ctx = { jobId:jobId, step:Number(step), amount:amountUsdc, memo:memo,
+                settleFor:null, doneText:doneText };
+    payReset(jobId, step, "checking allowance", ctx, "receipts");
     render();
     var units = BigInt(Math.round(Number(amountUsdc) * 1e6));
     if(!/^0x[0-9a-fA-F]{64}$/.test(String(memo || ""))){
-      P.status = "no on-chain memo for this item (fake backend?)"; P.busy = false; render(); return;
+      payFailed("this item has no on-chain memo, so it cannot be paid through the "
+                + "receipts contract (memo: " + String(memo) + ")", ctx, "receipts");
+      return;
     }
     if(!st.usdc_address || !st.receipts_address){
-      P.status = "server did not report the USDC or receipts address"; P.busy = false; render(); return;
+      payFailed("the agent did not report its USDC or receipts contract address, so "
+                + "there is nowhere to send the payment", ctx, "receipts");
+      return;
     }
     provider().getSigner().then(function(signer){
       var usdcC = new ethers.Contract(st.usdc_address, st.usdc_abi, signer);
@@ -1166,10 +1243,16 @@
         P.tx = tx.hash; P.status = "confirming"; render();
         return tx.wait();
       }).then(function(){
-        P.status = doneText; P.busy = false; render();
+        P.status = doneText; P.busy = false; P.error = null; P.details = null; render();
         refreshBalance();
       });
-    }).catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+    }).catch(function(e){
+      var raw = errText(e);
+      // ethers wraps the node's words a few layers down; keep them for details.
+      var deep = (e && (e.info || e.error || e.data)) ? JSON.stringify(e.info || e.error || e.data) : "";
+      var body = (e && (e.shortMessage || e.message)) || "";
+      payFailed([raw, body, deep].filter(Boolean).join("\n\n"), ctx, "receipts");
+    });
   }
 
   // ── x402: the buyer signs a USDC transfer, a facilitator submits it ──
@@ -1185,9 +1268,16 @@
                encodeURIComponent(jobId) + "/" + encodeURIComponent(step))
       : apiUrl("/api/jobs/" + encodeURIComponent(jobId) + "/pay-x402/" + encodeURIComponent(step));
   }
-  function payX402(jobId, step, amountUsdc, settleFor, doneText){
+  // A signed authorization is good for this long. Deliberately generous: the
+  // facilitator submits it, and a slow one must not expire a signature the
+  // buyer has already given. The buyer is not charged until it is submitted.
+  var X402_WINDOW_SECONDS = 1800;
+
+  function payX402(jobId, step, amountUsdc, settleFor, doneText, memo){
     if(P.busy || !W.addr) return;
-    P = { jobId:jobId, step:Number(step), status:"asking for the price", tx:null, busy:true };
+    var ctx = { jobId:jobId, step:Number(step), amount:amountUsdc,
+                settleFor:settleFor || null, doneText:doneText, memo:memo || null };
+    payReset(jobId, step, "asking for the price", ctx, "x402");
     render();
     var url = x402Url(jobId, step, settleFor);
 
@@ -1225,11 +1315,14 @@
             { name:"value", type:"uint256" }, { name:"validAfter", type:"uint256" },
             { name:"validBefore", type:"uint256" }, { name:"nonce", type:"bytes32" }
           ]};
+          // A fresh nonce for every attempt, never reused after a failure: an
+          // EIP-3009 nonce is single-use, so retrying with the old one is
+          // rejected even when nothing was ever submitted.
           var nonce = ethers.hexlify(ethers.randomBytes(32));
           var message = {
             from: W.addr, to: want.payTo, value: want.amount,
             validAfter: "0",
-            validBefore: String(Math.floor(Date.now()/1000) + (want.maxTimeoutSeconds || 600)),
+            validBefore: String(Math.floor(Date.now()/1000) + X402_WINDOW_SECONDS),
             nonce: nonce
           };
           return r[2].signTypedData(domain, types, message).then(function(signature){
@@ -1255,25 +1348,33 @@
         });
       })
       .then(function(res){
-        if(!res.ok){
-          var why = (res.body && res.body.detail) || "";
-          if(!why && res.receipt){
-            try{
-              var rec = JSON.parse(new TextDecoder().decode(
-                Uint8Array.from(atob(res.receipt), function(c){ return c.charCodeAt(0); })));
-              why = rec.errorMessage || rec.error_message || rec.errorReason || rec.error_reason || "";
-            }catch(_){}
-          }
-          P.status = "refused (" + res.status + ")" + (why ? ": " + why : "");
-          P.busy = false; render(); return;
+        // The facilitator's own reason first: it knows why it would not submit.
+        var reason = "", receipt = null;
+        if(res.receipt){
+          try{
+            receipt = JSON.parse(new TextDecoder().decode(
+              Uint8Array.from(atob(res.receipt), function(c){ return c.charCodeAt(0); })));
+            reason = receipt.reason || receipt.errorMessage || receipt.error_message
+                  || receipt.errorReason || receipt.error_reason || "";
+          }catch(_){}
+        }
+        if(!res.ok || (receipt && receipt.success === false)){
+          var detail = (res.body && res.body.detail) || "";
+          var raw = [reason, detail].filter(Boolean).join(" | ")
+                 || ("the agent answered " + res.status);
+          payFailed(raw + "\n\n" + JSON.stringify(
+            { status:res.status, body:res.body, settlement:receipt }, null, 2), ctx, "x402");
+          return;
         }
         var settlement = res.body.settlement || {};
         P.tx = settlement.transaction || null;
         P.status = doneText;
-        P.busy = false; render();
+        P.busy = false; P.error = null; P.details = null; render();
         refreshBalance();
       })
-      .catch(function(e){ P.status = errText(e); P.busy = false; render(); });
+      .catch(function(e){
+        payFailed(errText(e) + (e && e.stack ? "\n\n" + e.stack : ""), ctx, "x402");
+      });
   }
 
   function simulateSettle(buyer, jobId, step){
@@ -1320,7 +1421,25 @@
     if(hit("payX402Btn")){
       var inv0 = S.job && S.job.open_invoice;
       if(inv0) payX402(S.job.job_id, inv0.step, inv0.amount_usdc, null,
-                       "confirmed, gasless; the agent will run the step");
+                       "confirmed, gasless; the agent will run the step", inv0.memo);
+      return;
+    }
+    // A failed attempt offers the same rail again, or the other one.
+    if(hit("payRetryBtn")){
+      var c = P.ctx; if(!c) return;
+      P.busy = false;
+      if(P.rail === "x402")
+        payX402(c.jobId, c.step, c.amount, c.settleFor, c.doneText, c.memo);
+      else
+        payMemo(c.jobId, c.step, c.memo, c.amount, c.doneText);
+      return;
+    }
+    if(hit("payFallbackBtn")){
+      var f = P.ctx; if(!f || !f.memo) return;
+      P.busy = false;
+      payMemo(f.jobId, f.step, f.memo, f.amount,
+              f.settleFor ? "confirmed on chain; the agent will reconcile it on the next pass"
+                          : "confirmed on chain; the agent will run the step");
       return;
     }
     if(hit("payBtn")){ payInvoice(S.job); return; }
@@ -1330,7 +1449,7 @@
       var o = settle.dataset;
       if((S.status||{}).payments_backend === "fake") simulateSettle(o.buyer, o.job, o.step);
       else if(o.x402 === "1")
-        payX402(o.job, o.step, o.amount, o.buyer, "settled, gasless; the debt is cleared");
+        payX402(o.job, o.step, o.amount, o.buyer, "settled, gasless; the debt is cleared", o.memo);
       else payMemo(o.job, o.step, o.memo, o.amount, "confirmed; the agent will reconcile it on the next pass");
       return;
     }

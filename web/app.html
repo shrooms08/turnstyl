@@ -405,9 +405,26 @@
   // it by redacting; the page reads that answer rather than guessing.
   function mineJob(job){ return !!(job && job.redacted !== true); }
 
+  // "Current" is a claim about a job still in flight. A complete job is not at
+  // a step, it is finished, so nothing on it is current: every step that ran
+  // reads DONE and anything that never ran reads NOT RUN.
+  var LIVE = { "new":1, "awaiting_payment":1, "running":1 };
+  function isLive(job){ return !!LIVE[job && job.status]; }
+  function stepBadge(step, job){
+    if(step.status === "done") return '<span class="pill violet">done</span>';
+    if(!isLive(job)) return '<span class="pill">not run</span>';
+    return (Number(job.current_step) === Number(step.step))
+      ? '<span class="pill solid">current</span>'
+      : "";
+  }
+
   function stepCard(step, job){
     var st = stepState(step, job);
-    var isCur = Number(job.current_step) === Number(step.step);
+    // The gold card is the same claim as the CURRENT badge, so it follows it.
+    var isCur = isLive(job) && Number(job.current_step) === Number(step.step)
+                && step.status !== "done";
+    var badge = stepBadge(step, job);
+    var neverRan = step.status !== "done" && !isLive(job);
     var open = S.openStep === step.step;
     var facts = [];
     if(step.tokens_in != null || step.tokens_out != null)
@@ -429,10 +446,12 @@
 
     var canRead = mineJob(job);
     return '<button class="step'+(isCur?" current":"")+(open?" open":"")+'" data-step="'+step.step+'" type="button">' +
-      '<div class="no"><span>step '+step.step+'</span>'+(isCur?'<span class="pill solid">current</span>':"")+'</div>' +
+      '<div class="no"><span>step '+step.step+'</span>'+badge+'</div>' +
       '<div class="nm">'+esc(step.name||"—")+'</div>' +
       '<div class="price">'+usdc(step.price_usdc)+'<small>USDC</small></div>' +
-      '<div><span class="pill '+st.cls+'">'+st.label+'</span></div>' +
+      // NOT RUN in the badge already says it; the state pill would only repeat
+      // it in different words.
+      (neverRan ? "" : '<div><span class="pill '+st.cls+'">'+st.label+'</span></div>') +
       (step.cached ? '<span class="tag">served from memory</span>' : "") +
       (facts.length ? '<div class="facts">'+facts.map(function(f){ return "<div>"+f+"</div>"; }).join("")+"</div>" : "") +
       (txs ? '<div class="txs">'+txs+"</div>" : "") +

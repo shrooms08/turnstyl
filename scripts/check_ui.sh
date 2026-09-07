@@ -489,6 +489,58 @@ d=json.load(sys.stdin)
 print('ok' if d['complete'] is False and 'model_spend_usd_estimated' not in d['figures'] else 'bad')" 2>/dev/null)
 [ "$DGPUB" = "ok" ] && ok "the public digest is counts only" || bad "public digest is counts only" "got: $DGPUB"
 
+# ---------------------------------------------------------------- step badges
+echo
+echo "step badges"
+hasapp "the badge is decided in one place"     "function stepBadge("
+hasapp "current is only claimed while a job is live" 'var LIVE = { "new":1, "awaiting_payment":1, "running":1 };'
+hasapp "a step that ran reads done"            '<span class="pill violet">done</span>'
+hasapp "a step that never ran on a finished job reads not run" '<span class="pill">not run</span>'
+hasapp "current needs a live job and its own step" "Number(job.current_step) === Number(step.step)"
+hasapp "the gold card follows the same claim"  "var isCur = isLive(job) && Number(job.current_step)"
+hasapp "and never marks a step that already ran" 'step.status !== "done"'
+# the badge used to be printed straight from isCur, with no status test at all
+if grep -qF "isCur?'<span" "$APP"; then
+  bad "the unconditional current badge is gone" "app.html still prints the badge from isCur alone"
+else
+  ok "the unconditional current badge is gone"
+fi
+# The rule, applied to what this store actually holds.
+BADGES=$(curl -s "${OPH[@]}" "$BASE/api/jobs" 2>/dev/null | .venv/bin/python -c "
+import json, sys, urllib.request
+base, tok = '$BASE', '$OPTOK'
+jobs = (json.load(sys.stdin).get('jobs') or [])
+LIVE = {'new', 'awaiting_payment', 'running'}
+def badge(step, job):
+    if step.get('status') == 'done': return 'done'
+    if job.get('status') not in LIVE: return 'not run'
+    return 'current' if step.get('step') == job.get('current_step') else ''
+complete = live = bad = 0
+seen_done = seen_current = False
+for row in jobs:
+    req = urllib.request.Request(base + '/api/jobs/' + row['job_id'])
+    req.add_header('Authorization', 'Bearer ' + tok)
+    with urllib.request.urlopen(req, timeout=10) as f:
+        job = json.load(f)
+    marks = [badge(s, job) for s in job.get('steps') or []]
+    if job['status'] == 'complete':
+        complete += 1
+        if 'current' in marks: bad += 1
+        if 'done' in marks: seen_done = True
+    elif job['status'] in LIVE:
+        live += 1
+        if 'current' in marks: seen_current = True
+    for s, m in zip(job.get('steps') or [], marks):
+        if s.get('status') == 'done' and m != 'done': bad += 1
+print(complete, live, int(bad), int(seen_done), int(seen_current))" 2>/dev/null)
+set -- $BADGES
+[ "${3:-1}" = "0" ] && ok "no completed job in this store marks a step current, and every step that ran reads done" \
+  || bad "step badges against the store" "got: $BADGES (complete live bad seen_done seen_current)"
+[ "${1:-0}" -gt 0 ] && [ "${4:-0}" = "1" ] && ok "at least one completed job was checked, with DONE steps ($1 complete)" \
+  || bad "a completed job to check" "complete=${1:-0} seen_done=${4:-0}; seed one so this check is not vacuous"
+[ "${2:-0}" -gt 0 ] && [ "${5:-0}" = "1" ] && ok "an in-flight job still marks its own step current ($2 in flight)" \
+  || bad "an in-flight job marks a step current" "live=${2:-0} seen_current=${5:-0}"
+
 # ---------------------------------------------------------------- payment errors
 echo
 echo "payment errors"

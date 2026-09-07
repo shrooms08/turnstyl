@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,6 +72,75 @@ class Outcome:
     complete: bool = False
     resumed: bool = False
     note: str = ""
+
+
+def promote_arrears(store: TurnstylStore, buyer: str, now=None) -> list[dict]:
+    """Turn arrears that have run out of grace into defaults. Returns what moved.
+
+    This is the only place a default is recorded now. It is called wherever a
+    buyer is read for a decision (``Engine._reconcile``) and by the worker on
+    every pass, so a debt cannot sit past its grace period unnoticed simply
+    because nobody asked about that buyer.
+
+    Idempotent: an item is promoted once, and `closed_at` is cleared as it goes
+    so the same debt cannot be counted twice.
+    """
+    now = now or datetime.now(timezone.utc)
+    buyer_key = store.buyer_key(buyer)
+    ledger = store.get_buyer(buyer_key)
+    late = policy.overdue(ledger, now)
+    if not late:
+        return []
+
+    before = ledger.trust_tier
+    moved = []
+    for item in late:
+        ledger.defaults += 1
+        moved.append(
+            {"job_id": item.job_id, "step": item.step, "amount_usdc": item.amount_usdc,
+             "closed_at": item.closed_at}
+        )
+        item.closed_at = None          # promoted once; still owed, no longer arrears
+    # A fresh default restarts both earn-back clocks from zero: the one that
+    # buys credit back, and the one that lifts a block.
+    ledger.consecutive_paid_since_default = 0
+    ledger.consecutive_paid_since_block = 0
+    if ledger.defaults >= S.BLOCKED_MIN_DEFAULTS:
+        ledger.completed_paid_jobs_at_block = ledger.completed_paid_jobs
+    ledger.trust_tier = policy.recompute_trust_tier(ledger)
+    store.put_buyer(buyer_key, ledger)
+
+    owed = sum(m["amount_usdc"] for m in moved)
+    steps = ", ".join(f"step {m['step']} of job {m['job_id']}" for m in moved)
+    store.journal(
+        S.JournalEntry(
+            evaluated=[
+                f"entity buyer/{buyer_key} -> {len(moved)} arrears item(s) unsettled "
+                f"more than {S.GRACE_HOURS:g}h after their job closed"
+            ],
+            acted=[
+                f"{owed:.2f} USDC owed on {steps} passed its grace period and is "
+                f"now a default; defaults={ledger.defaults}, both earn-back "
+                f"clocks reset to 0"
+            ],
+            forward=["paid work stays refused until the debt is settled"],
+            extra={
+                "buyer": buyer_key,
+                "decision": "ARREARS_DEFAULTED",
+                "defaults": ledger.defaults,
+                "amount": round(owed, 2),
+                "summary": (
+                    f"{owed:.2f} USDC went unpaid for more than {S.GRACE_HOURS:g} "
+                    f"hours after the job closed, so it is now a default."
+                ),
+            },
+        )
+    )
+    events.trust_changed(
+        store, buyer_key, before, ledger.trust_tier, ledger,
+        reason=f"a debt went unsettled past its {S.GRACE_HOURS:g}h grace period",
+    )
+    return moved
 
 
 class Engine:
@@ -345,7 +415,8 @@ class Engine:
         self._sync_invoice(state, [])
         ledger = self.store.get_buyer(state.buyer)
         decision, reason = policy.decide(
-            state.current_step, ledger, state, self.spec_for(state)
+            state.current_step, ledger, state, self.spec_for(state),
+            datetime.now(timezone.utc),
         )
         inv = state.open_invoice
         signature = (inv.step, inv.paid, inv.amount_usdc) if inv is not None else None
@@ -474,10 +545,14 @@ class Engine:
 
         A no-op on the fake backend. On Base it walks the buyer's outstanding
         invoices against Paid logs, so a debt cleared on chain is cleared here
-        before any decision is made about new work.
+        before any decision is made about new work. Settlement is checked before
+        the grace period is: a debt paid in the last minute must clear rather
+        than default on the same pass.
         """
         try:
-            return self.payments.reconcile(buyer)
+            cleared = self.payments.reconcile(buyer)
+            promote_arrears(self.store, buyer)
+            return cleared
         except Exception as e:  # noqa: BLE001 - reconciliation must never block work
             self.store.journal(
                 S.JournalEntry(
@@ -624,7 +699,9 @@ class Engine:
         ledger = self.store.get_buyer(buyer_key)
         read.append(f"entity buyer/{buyer_key}")
 
-        decision, reason = policy.decide(step, ledger, state, spec)
+        decision, reason = policy.decide(
+            step, ledger, state, spec, datetime.now(timezone.utc)
+        )
 
         if decision in (S.WAIT_FOR_PAYMENT, S.REFUSE):
             amount = (
@@ -1186,26 +1263,28 @@ class Engine:
         # live invoice and becomes a debt carried into the next job.
         carried = [o for o in ledger.outstanding if o.job_id == state.job_id]
         if carried:
+            # Arrears, not a default. A buyer who has not paid yet and a buyer
+            # who is not going to pay look identical at this moment, and only
+            # the clock tells them apart. The debt is refused work and suspends
+            # credit straight away; it becomes a default, with the counters it
+            # resets, once GRACE_HOURS have passed unsettled.
+            closed_at = S.utc_now()
+            for item in carried:
+                item.closed_at = closed_at
             ledger.open_invoices = max(0, ledger.open_invoices - len(carried))
             ledger.unpaid_from_prior_jobs += len(carried)
-            ledger.defaults += len(carried)
-            # A fresh default restarts both earn-back clocks from zero: the one
-            # that buys credit back, and the one that lifts a block.
-            ledger.consecutive_paid_since_default = 0
-            ledger.consecutive_paid_since_block = 0
-            if ledger.defaults >= S.BLOCKED_MIN_DEFAULTS:
-                # Credit after this block is earned on jobs completed after it.
-                ledger.completed_paid_jobs_at_block = ledger.completed_paid_jobs
+            owed = sum(o.amount_usdc for o in carried)
             acted.append(
                 f"entity buyer/{state.buyer} -> {len(carried)} delivered step(s) "
                 f"unpaid at close; unpaid_from_prior_jobs="
-                f"{ledger.unpaid_from_prior_jobs}, defaults={ledger.defaults}, "
-                f"consecutive_paid_since_default and consecutive_paid_since_block "
-                f"reset to 0"
+                f"{ledger.unpaid_from_prior_jobs}, in arrears {owed:.2f} USDC, "
+                f"defaults still {ledger.defaults}; it becomes a default in "
+                f"{S.GRACE_HOURS:g}h if it is not settled"
             )
             closing = (
-                f"Job closed with {sum(o.amount_usdc for o in carried):.2f} USDC owed on step "
-                f"{', '.join(str(o.step) for o in carried)}. Credit removed."
+                f"Job closed with {owed:.2f} USDC owed on step "
+                f"{', '.join(str(o.step) for o in carried)}. Credit suspended; "
+                f"settle within {S.GRACE_HOURS:g}h and no default is recorded."
             )
         else:
             # Every paid step settled: this is what credit is extended on.

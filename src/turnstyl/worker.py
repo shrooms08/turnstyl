@@ -25,7 +25,7 @@ from pathlib import Path
 
 from . import reflect
 from . import schema as S
-from .engine import Engine
+from .engine import Engine, promote_arrears
 from .memory import TurnstylMemory, TurnstylStore, default_db_path
 from .payments import get_backend
 
@@ -130,6 +130,14 @@ class Worker:
             buyer = row["name"]
             try:
                 cleared = engine.payments.reconcile(buyer)
+                # Settlement first, then the clock: a debt paid at the last
+                # moment clears rather than defaulting on the same pass.
+                promoted = promote_arrears(store, buyer)
+                if promoted:
+                    _log(
+                        f"worker: buyer {buyer[:10]}… defaulted on "
+                        f"{len(promoted)} arrears item(s) past their grace period"
+                    )
             except Exception as e:  # noqa: BLE001 - say it once, keep sweeping
                 key = ("reconcile", str(e)[:80])
                 if self.last_seen.get(f"{buyer}:reconcile") != key:

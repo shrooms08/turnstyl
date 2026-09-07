@@ -1378,7 +1378,9 @@ def api_buyer(
     # The trust question is about the buyer, not the service: any type's first
     # paid step gives the same answer, so the default type asks it.
     default_spec = jobtypes.get(None)
-    decision, reason = policy.decide(2, ledger, probe, default_spec)
+    decision, reason = policy.decide(
+        2, ledger, probe, default_spec, datetime.now(timezone.utc)
+    )
 
     return redact_buyer({
         "memory_missing": False,
@@ -1390,6 +1392,35 @@ def api_buyer(
             "would_decide": decision,
             "explanation": reason,
             "jobs_until_credit": policy.jobs_until_credit(ledger),
+            # A debt inside its grace period is not a default yet, and the page
+            # counts it down rather than calling the buyer a defaulter.
+            "arrears": (
+                {
+                    "line": policy.arrears_line(ledger, datetime.now(timezone.utc)),
+                    "usdc": round(sum(i.amount_usdc for i in policy.arrears(ledger)), 2),
+                    "items": [
+                        {
+                            "job_id": i.job_id,
+                            "step": i.step,
+                            "amount_usdc": i.amount_usdc,
+                            "closed_at": i.closed_at,
+                            "due_at": (
+                                policy.due_at(i).strftime("%Y-%m-%dT%H:%M:%SZ")
+                                if policy.due_at(i) else None
+                            ),
+                            "hours_left": (
+                                round(policy.hours_left(i, datetime.now(timezone.utc)), 2)
+                                if policy.hours_left(i, datetime.now(timezone.utc)) is not None
+                                else None
+                            ),
+                        }
+                        for i in policy.arrears(ledger)
+                    ],
+                    "grace_hours": S.GRACE_HOURS,
+                }
+                if policy.arrears(ledger)
+                else None
+            ),
             # What a blocked buyer must do, in the words the refusal uses. None
             # when the buyer is not blocked, so a reader never has to guess.
             "unblock": (

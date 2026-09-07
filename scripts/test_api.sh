@@ -296,6 +296,43 @@ APUB=$(jpub "/api/jobs/$AJOB")
 AJ=$(jget "/api/journal?job=$AJOB&limit=20")
 [ "$(echo "$AJ" | jq_ "any(e['decision']=='FLAGGED_UNTRUSTED_SOURCE' for e in d['events'])")" = "True" ] && ok "the journal records the scan as one decision" || bad "journal records the scan" "$(echo "$AJ" | jq_ "[e['decision'] for e in d['events']]")"
 
+# ---------------------------------------------------------------- arrears before default
+# A job that closes with delivered work unpaid puts the buyer in arrears. It
+# only becomes a default after the grace period, so a buyer who simply has not
+# paid yet is not called a defaulter.
+AR=$($PY -c "
+import sys; sys.path.insert(0,'src')
+from datetime import datetime, timedelta, timezone
+from turnstyl import policy, jobtypes
+from turnstyl import schema as S
+now = datetime.now(timezone.utc)
+def item(hours):
+    return S.OutstandingItem(job_id='9f3dc77280a6', step=2, amount_usdc=0.23, memo='0x',
+                             closed_at=(now - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z')
+fresh = S.BuyerLedger(defaults=0, unpaid_from_prior_jobs=1, outstanding=[item(3)])
+stale = S.BuyerLedger(defaults=0, unpaid_from_prior_jobs=1, outstanding=[item(S.GRACE_HOURS + 1)])
+open_job = S.BuyerLedger(defaults=0, open_invoices=1,
+                         outstanding=[S.OutstandingItem(job_id='j', step=2, amount_usdc=0.23, memo='0x')])
+st = S.JobState(job_id='j', buyer='0xa', contract_hash='0'*64, current_step=2)
+spec = jobtypes.get('audit')
+print(policy.arrears_line(fresh, now))
+print(policy.decide(2, fresh, st, spec, now)[0])
+print(policy.decide(1, fresh, st, spec, now)[0])
+print(len(policy.overdue(fresh, now)), len(policy.overdue(stale, now)))
+print(len(policy.arrears(open_job)))
+print(policy.decide(2, stale, st, spec, now)[1].split(';')[0])
+print(S.GRACE_HOURS)
+" 2>&1)
+grep -qE "^in arrears: 0\.23 USDC owed on job 9f3dc77280a6 step 2, due in 2[01]h before it counts as a default$" <<< "$(echo "$AR" | sed -n 1p)" && ok "the arrears line reads as specified: $(echo "$AR" | sed -n 1p)" || bad "arrears line" "got: $(echo "$AR" | sed -n 1p)"
+[ "$(echo "$AR" | sed -n 2p)" = "REFUSE" ] && ok "paid work is refused while in arrears" || bad "arrears refuses paid work" "got $(echo "$AR" | sed -n 2p)"
+[ "$(echo "$AR" | sed -n 3p)" = "RUN_FREE" ] && ok "the free step still runs while in arrears" || bad "arrears free step" "got $(echo "$AR" | sed -n 3p)"
+[ "$(echo "$AR" | sed -n 4p)" = "0 1" ] && ok "inside grace nothing is overdue; past it exactly one is" || bad "grace boundary" "got $(echo "$AR" | sed -n 4p)"
+[ "$(echo "$AR" | sed -n 5p)" = "0" ] && ok "a debt on an open job is not arrears" || bad "open-job debt is not arrears" "got $(echo "$AR" | sed -n 5p)"
+grep -q "unpaid on a completed job" <<< "$(echo "$AR" | sed -n 6p)" && ok "past grace the refusal returns to the default wording" || bad "past-grace wording" "got: $(echo "$AR" | sed -n 6p)"
+[ "$(echo "$AR" | sed -n 7p)" = "24.0" ] && ok "the grace period is 24 hours by default" || bad "grace hours" "got $(echo "$AR" | sed -n 7p)"
+GR=$(TURNSTYL_GRACE_HOURS=1 $PY -c "import sys;sys.path.insert(0,'src');from turnstyl import schema as S;print(S.GRACE_HOURS)" 2>&1)
+[ "$GR" = "1.0" ] && ok "and TURNSTYL_GRACE_HOURS overrides it" || bad "grace from env" "got $GR"
+
 # ---------------------------------------------------------------- blocked is recoverable
 # The tier rule and the terms it publishes, checked against policy directly:
 # driving a live buyer to two defaults would take a whole second demo.
@@ -367,7 +404,12 @@ B=$(jget "/api/buyers/$BUYER")
 API_MEMO=$(echo "$B" | jq_ "d['outstanding'][0]['memo']")
 PY_MEMO=$($PY -c "import sys;sys.path.insert(0,'src');from turnstyl.payments import memo_bytes32,hex0x;print(hex0x(memo_bytes32('$JOB',2)))")
 [ -n "$API_MEMO" ] && [ "$API_MEMO" = "$PY_MEMO" ] && ok "outstanding memo equals payments.memo_bytes32($JOB, 2): $API_MEMO" || bad "outstanding memo equals payments.memo_bytes32" "api=$API_MEMO py=$PY_MEMO"
-[ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], d['ledger']['defaults'], d['trust']['completed_paid_jobs']")" = "1 1 3" ] && ok "unpaid_from_prior_jobs 1, defaults 1, completed_paid_jobs still 3" || bad "ledger after the default" "$(echo "$B" | jq_ "d['ledger']")"
+# The close puts the buyer in arrears, not in default: the debt is counted and
+# credit is suspended, but nothing is called a default until the grace period.
+[ "$(echo "$B" | jq_ "d['ledger']['unpaid_from_prior_jobs'], d['ledger']['defaults'], d['trust']['completed_paid_jobs']")" = "1 0 3" ] && ok "unpaid_from_prior_jobs 1, defaults still 0, completed_paid_jobs still 3" || bad "ledger after the close" "$(echo "$B" | jq_ "d['ledger']")"
+[ "$(echo "$B" | jq_ "bool(d['ledger']['outstanding'][0]['closed_at'])")" = "True" ] && ok "the debt carries the moment its job closed" || bad "closed_at on the carried debt" "$(echo "$B" | jq_ "d['ledger']['outstanding']")"
+[ "$(echo "$B" | jq_ "(d['trust'].get('arrears') or {}).get('line','').startswith('in arrears:')")" = "True" ] && ok "the buyer endpoint counts the grace period down: $(echo "$B" | jq_ "d['trust']['arrears']['line']")" || bad "trust.arrears line" "$(echo "$B" | jq_ "d['trust'].get('arrears')")"
+[ "$(echo "$B" | jq_ "d['trust']['arrears']['grace_hours'], len(d['trust']['arrears']['items']), d['trust']['arrears']['items'][0]['hours_left'] > 0")" = "24.0 1 True" ] && ok "with the grace hours, the item and its remaining time" || bad "trust.arrears shape" "$(echo "$B" | jq_ "d['trust']['arrears']")"
 SR=$(curl -s "${AUTH[@]}" -w '\n%{http_code}' -X POST "$BASE/api/buyers/$BUYER/settle/$JOB/2"); SC=$(echo "$SR" | tail -1); SB=$(echo "$SR" | sed '$d')
 [ "$SC" = "200" ] && [ "$(echo "$SB" | jq_ "d['settled']['step'], d['settled']['simulated']")" = "2 True" ] && ok "POST /api/buyers/{addr}/settle/{job}/{step} settles it (fake backend; reconciled by $(echo "$SB" | jq_ "d['reconciled_by']"))" || bad "settle endpoint" "got $SC: $(echo "$SB" | head -c 200)"
 B=$(jget "/api/buyers/$BUYER")

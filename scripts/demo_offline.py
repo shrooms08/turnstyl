@@ -23,11 +23,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from turnstyl import jobtypes  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
 from turnstyl import digest  # noqa: E402
 from turnstyl import events  # noqa: E402
 from turnstyl import injection  # noqa: E402
 from turnstyl import policy  # noqa: E402
 from turnstyl import schema as S  # noqa: E402
+from turnstyl.engine import promote_arrears
 from turnstyl.memory import TurnstylMemory, TurnstylStore  # noqa: E402
 
 BUYER = "0x0964dc1e37aca77c6df395db7c0eec848b1ceff8"
@@ -284,8 +287,40 @@ def beat_e() -> list[str]:
     return jobs
 
 
+def age_arrears(job_id: str, hours: float | None = None) -> None:
+    """Backdate this job's arrears so its grace period has run out.
+
+    The demo cannot wait a day. Backdating closed_at states exactly the fact a
+    day would have produced, and the promotion itself is the agent's own code
+    path (engine.promote_arrears), not a shortcut around it.
+    """
+    hours = S.GRACE_HOURS + 1 if hours is None else hours
+    st = store()
+    ledger = st.get_buyer(BUYER)
+    when = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f"
+    )[:-3] + "Z"
+    touched = 0
+    for item in ledger.outstanding:
+        if item.job_id == job_id and item.closed_at:
+            item.closed_at = when
+            touched += 1
+    if not touched:
+        raise SystemExit(
+            f"turnstyl demo: job {job_id} has no arrears item to age; the close "
+            f"did not record one"
+        )
+    st.put_buyer(BUYER, ledger)
+
+
+def force_default(job_id: str) -> list[dict]:
+    """Age the arrears and let the agent notice, which records the default."""
+    age_arrears(job_id)
+    return promote_arrears(store(), BUYER)
+
+
 def beat_f() -> tuple[str, str]:
-    print("BEAT f: CREDIT. Fourth job: step 2 runs before its invoice clears")
+    print("BEAT f: CREDIT and GRACE. Work on credit, arrears, settled in time, then one left too long")
     _, flat = cli("job", "new", str(CONTRACT), "--buyer", BUYER)
     job_id = only_job_id()
     raw, flat2 = cli("job", "run", job_id)
@@ -305,13 +340,70 @@ def beat_f() -> tuple[str, str]:
     for step in (3, 4):
         pay_and_run(job_id, step, "f", r)
     ledger = store().get_buyer(BUYER)
-    r.append(check("f", "job closed with step 2 unpaid: defaults == 1, unpaid_from_prior_jobs == 1",
-                   ledger.defaults == 1 and ledger.unpaid_from_prior_jobs == 1,
+
+    # 1. The close records arrears, not a default. Not paying yet and not
+    #    paying look the same at this moment; only the clock separates them.
+    r.append(check("f", "the close records arrears, not a default",
+                   ledger.defaults == 0 and ledger.unpaid_from_prior_jobs == 1,
                    f"defaults={ledger.defaults}, unpaid={ledger.unpaid_from_prior_jobs}"))
+    late = policy.arrears(ledger)
+    r.append(check("f", "the debt carries the moment its job closed",
+                   len(late) == 1 and bool(late[0].closed_at),
+                   str([(i.job_id, i.closed_at) for i in ledger.outstanding])))
+    r.append(check("f", "credit is suspended while it is owed",
+                   ledger.unpaid_from_prior_jobs == 1,
+                   f"unpaid={ledger.unpaid_from_prior_jobs}"))
+    arrears_reason = policy.arrears_line(ledger, datetime.now(timezone.utc))
+    r.append(check("f", "and the refusal counts the grace period down",
+                   arrears_reason.startswith("in arrears:")
+                   and "before it counts as a default" in arrears_reason,
+                   arrears_reason))
+    cli("job", "new", str(CONTRACT), "--buyer", BUYER)
+    _, refused = cli("job", "run", only_job_id())
+    r.append(check("f", "paid work is refused while in arrears, in those words",
+                   "DECISION: REFUSE" in refused and "in arrears:" in refused,
+                   refused[:400]))
     r.append(check("f", "a job closed with a debt is not a completed paid job (still 3)",
                    ledger.completed_paid_jobs == 3, f"completed_paid_jobs={ledger.completed_paid_jobs}"))
-    beat_result("f", "credit extended on three paid jobs, then one default", r)
+
+    # 2. Settled inside the grace period: no default, nothing reset.
+    csd_before = ledger.consecutive_paid_since_default
+    cli("pay", job_id, "2")
+    cli("ledger", BUYER)                      # reconciliation runs on the next read
+    ledger = store().get_buyer(BUYER)
+    r.append(check("f", "settling within grace records no default",
+                   ledger.defaults == 0, f"defaults={ledger.defaults}"))
+    r.append(check("f", "and clears the arrears entirely",
+                   not policy.arrears(ledger) and ledger.unpaid_from_prior_jobs == 0,
+                   f"arrears={len(policy.arrears(ledger))}, unpaid={ledger.unpaid_from_prior_jobs}"))
+    r.append(check("f", "the earn-back clock was never reset",
+                   ledger.consecutive_paid_since_default > csd_before,
+                   f"{csd_before} -> {ledger.consecutive_paid_since_default}"))
+    r.append(check("f", "so the buyer is trusted again",
+                   ledger.trust_tier == S.TRUST_TRUSTED, f"trust_tier={ledger.trust_tier}"))
+
+    # 3. A second credit close, left past its grace period: that is a default.
+    cli("job", "new", str(CONTRACT), "--buyer", BUYER)
+    job_id = only_job_id()
+    _, credit_flat = cli("job", "run", job_id)
+    r.append(check("f", "credit is extended again after the debt was settled",
+                   "DECISION: RUN_ON_CREDIT" in credit_flat, credit_flat[:300]))
+    for step in (3, 4):
+        pay_and_run(job_id, step, "f", r)
+    moved = force_default(job_id)
+    ledger = store().get_buyer(BUYER)
+    r.append(check("f", "left past grace, the arrears becomes a default",
+                   len(moved) == 1 and ledger.defaults == 1,
+                   f"moved={len(moved)}, defaults={ledger.defaults}"))
+    r.append(check("f", "and the earn-back clock is reset by it",
+                   ledger.consecutive_paid_since_default == 0,
+                   f"consecutive={ledger.consecutive_paid_since_default}"))
+    r.append(check("f", "the journal records the promotion",
+                   any((e.get("extra") or {}).get("decision") == "ARREARS_DEFAULTED"
+                       for e in store().read_journal(limit=40))))
+    beat_result("f", "arrears, settled in time, then one left too long", r)
     notes.append(f"beat f RUN_ON_CREDIT line:\n    {line}")
+    notes.append(f"beat f arrears line:\n    {arrears_reason}")
     return job_id, line
 
 
@@ -690,7 +782,12 @@ def beat_l() -> None:
     for step in (3, 4):
         pay_and_run(defaulting, step, "l", r)
     ledger = store().get_buyer(BUYER)
-    r.append(check("l", "the job closed with that step unpaid: a second default",
+    r.append(check("l", "the close records arrears, not a default yet",
+                   ledger.defaults == 1 and len(policy.arrears(ledger)) == 1,
+                   f"defaults={ledger.defaults}, arrears={len(policy.arrears(ledger))}"))
+    force_default(defaulting)                 # left past its grace period
+    ledger = store().get_buyer(BUYER)
+    r.append(check("l", "left past grace it becomes a second default",
                    ledger.defaults == 2, f"defaults={ledger.defaults}"))
     r.append(check("l", "which blocks the buyer",
                    ledger.trust_tier == S.TRUST_BLOCKED, f"trust_tier={ledger.trust_tier}"))

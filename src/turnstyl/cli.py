@@ -458,6 +458,11 @@ def ledger(buyer: str = typer.Argument(..., help="Buyer wallet address.")) -> No
             f"{book.consecutive_paid_since_default} "
             f"(credit returns at {S.EARN_BACK_PAID_STEPS})",
         )
+    late = policy.arrears(book)
+    if late:
+        from datetime import datetime, timezone
+
+        grid.add_row("in arrears", policy.arrears_line(book, datetime.now(timezone.utc)))
     grid.add_row("trust tier", book.trust_tier)
     if book.trust_tier == S.TRUST_BLOCKED:
         grid.add_row("paid steps since block",

@@ -726,7 +726,7 @@
         cell("jobs until credit", esc((T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit)==null?"—":(T.jobs_until_credit!=null?T.jobs_until_credit:T.steps_until_credit))) +
         (T.would_decide ? cell("would decide", decisionPill(T.would_decide)) : "") +
       "</div>" +
-      unblockLine(T) +
+      arrearsLine(T) + unblockLine(T) +
       (T.explanation ? '<div class="expl">'+esc(T.explanation)+"</div>" : "") +
       (outs ? '<div class="outs"><div class="k" style="font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)">outstanding</div>'+outs+"</div>" : "") +
       "</div>";
@@ -745,6 +745,24 @@
     return '<div class="card warn"><h3>untrusted source</h3>' +
       '<p>This contract contains text that tries to instruct the auditor. It was found by a mechanical scan of the comments and strings before any model saw the file, recorded here, and handed to the audit as evidence rather than followed.</p>' +
       '<div class="hits">'+hits+'</div></div>';
+  }
+
+  // Owed, but not yet a default. The card counts the grace period down in the
+  // same words the refusal uses, so a buyer who is simply late is not told
+  // they have defaulted.
+  function arrearsLine(trust){
+    var a = trust && trust.arrears;
+    if(!a) return "";
+    var soon = (a.items || []).reduce(function(m, i){
+      return (i.hours_left != null && (m == null || i.hours_left < m)) ? i.hours_left : m;
+    }, null);
+    var clock = soon == null ? "" :
+      (soon <= 0 ? '<span class="clock">past its grace period</span>'
+                 : '<span class="clock">' + esc(soon >= 1 ? Math.round(soon) + "h" :
+                     Math.max(1, Math.round(soon * 60)) + "m") + ' left</span>');
+    return '<div class="arrears"><b>in arrears</b><br>' + esc(a.line) + '<br>' +
+      'Settle it and no default is recorded. ' + clock +
+      ' of the ' + esc(a.grace_hours) + 'h grace period.</div>';
   }
 
   // A blocked tier is a stop, not an ending, and the card says how it lifts in

@@ -573,6 +573,21 @@ hasapp "and it says why it is never reused"    "never reused after a failure"
 hasapp "the facilitator's own reason comes first" "receipt.reason || receipt.errorMessage"
 hasapp "a failed settlement is a failure even on a 200" "receipt.success === false"
 
+# ---------------------------------------------------------------- arrears countdown
+echo
+echo "arrears"
+hasapp "the ledger card shows arrears"        "function arrearsLine("
+hasapp "in the words the refusal uses"        ">in arrears</b>"
+hasapp "it says settling avoids the default"  "Settle it and no default is recorded"
+hasapp "and counts the grace period down"     "of the ' + esc(a.grace_hours) + 'h grace period"
+hasapp "past grace it says so rather than counting" "past its grace period"
+has   "the arrears block is styled"           ".arrears{margin-top:14px"
+ARJ=$(curl -s "${OPH[@]}" "$BASE/api/buyers/0x0000000000000000000000000000000000000001" 2>/dev/null | .venv/bin/python -c "
+import json,sys
+d=json.load(sys.stdin)
+print('none' if (d.get('trust') or {}).get('arrears') is None else 'present')" 2>/dev/null)
+[ "$ARJ" = "none" ] && ok "trust.arrears is null for a buyer who owes nothing" || bad "trust.arrears when nothing is owed" "got: $ARJ"
+
 # ---------------------------------------------------------------- blocked recovery
 echo
 echo "blocked"

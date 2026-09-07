@@ -25,6 +25,8 @@ existed carry no type and are read as "audit", which is what they were.
 """
 from __future__ import annotations
 
+import os
+
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -92,6 +94,13 @@ BLOCKED_MIN_UNPAID_PRIOR_JOBS = 2
 BLOCKED_MIN_DEFAULTS = 2
 EARN_BACK_PAID_STEPS = 4
 UNBLOCK_PAID_STEPS = 6
+
+# A job that closes with delivered work unpaid puts the buyer in arrears, not
+# in default. Not paying yet is not the same as not paying, and the agent has
+# no way to tell them apart at the moment a job closes. The debt is refused
+# work and suspends credit immediately; it only becomes a default, with the
+# counters it resets, once it has gone this long unsettled.
+GRACE_HOURS = float(os.environ.get("TURNSTYL_GRACE_HOURS") or 24)
 
 # Job statuses
 STATUS_NEW = "new"
@@ -301,6 +310,10 @@ class OutstandingItem(_Model):
     amount_usdc: float
     memo: str = ""
     invoice_block: int | None = None
+    # Set when the job this item belongs to closed with it still unpaid. That
+    # is the moment the grace period starts; None means the job is still open,
+    # so nothing is owed yet in the sense that matters here.
+    closed_at: str | None = None
 
 
 class BuyerLedger(_Model):

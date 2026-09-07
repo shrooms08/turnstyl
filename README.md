@@ -98,7 +98,25 @@ Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
 - **RUN_PAID**: the invoice for this step is settled
 - **RUN_ON_CREDIT**: unpaid, but the buyer is trusted
 - **WAIT_FOR_PAYMENT**: unpaid and credit not earned
-- **REFUSE**: the buyer left work unpaid when a previous job closed
+- **REFUSE**: the buyer owes for work delivered on a job that has since closed
+
+A job that closes with delivered work still unpaid puts the buyer **in arrears**,
+not in default. Not having paid yet and not being going to pay look identical at
+that moment, and only the clock separates them. The debt counts immediately: paid
+work is refused and credit is suspended. It becomes a default, with the counters
+that resets, only after `TURNSTYL_GRACE_HOURS` (24 by default) unsettled. Settle
+inside the window and no default is recorded and nothing is reset. The refusal
+counts it down:
+
+```
+in arrears: 0.23 USDC owed on job 9f3dc77280a6 step 2, due in 21h before it
+counts as a default
+```
+
+The promotion is the only place a default is now written. It runs wherever a
+buyer is read for a decision and on every worker pass, always after settlement
+is checked, so a debt paid at the last moment clears rather than defaulting on
+the same pass.
 
 Trust tiers: **trusted** needs three completed jobs with every paid step settled
 (`completed_paid_jobs >= 3`), nothing outstanding, and either no default or an

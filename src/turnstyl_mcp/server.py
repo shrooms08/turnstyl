@@ -632,6 +632,9 @@ async def _pay_and_run(job_id: str, max_usdc: float) -> dict[str, Any]:
 
     # The worker runs the step once the invoice is settled. Poll for it rather
     # than returning a payment with nothing to show for it.
+    # Wait for the whole pass, not for the step card. The step is written to
+    # the job before the agent invoices the next one, so returning the moment
+    # it reads "done" hands back a payment with no next invoice beside it.
     deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
     ran: dict[str, Any] | None = None
     while time.monotonic() < deadline:
@@ -644,7 +647,12 @@ async def _pay_and_run(job_id: str, max_usdc: float) -> dict[str, Any]:
         )
         if current and current.get("status") == "done":
             ran = current
-            break
+            moved_on = (
+                job.get("status") == "complete"
+                or (job.get("open_invoice") or {}).get("step", step) != step
+            )
+            if moved_on:
+                break
         await asyncio.sleep(POLL_SECONDS)
 
     next_invoice = invoice_view(job)

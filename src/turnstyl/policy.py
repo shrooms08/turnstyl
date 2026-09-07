@@ -6,6 +6,8 @@ produced it — which is exactly what the journal event records.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from .jobtypes import JobType, StepSpec
 from .schema import (
     BLOCKED_MIN_DEFAULTS,
@@ -14,6 +16,7 @@ from .schema import (
     CACHED_MULTIPLIER,
     EXPENSIVE_MULTIPLIER,
     EXPENSIVE_TOKEN_THRESHOLD,
+    GRACE_HOURS,
     PRICE_FLOOR_USDC,
     PROMPT_PAYER_MULTIPLIER,
     REFUSE,
@@ -30,6 +33,7 @@ from .schema import (
     BuyerPattern,
     Decision,
     JobState,
+    OutstandingItem,
     StepCost,
     TrustTier,
 )
@@ -139,6 +143,79 @@ def steps_until_credit(buyer_entity: BuyerLedger) -> int:
     return jobs_until_credit(buyer_entity)
 
 
+def parse_iso(value: str | None) -> datetime | None:
+    """A stored timestamp, or None. Never guesses at an unparseable one."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def arrears(buyer_entity: BuyerLedger) -> list[OutstandingItem]:
+    """Debts carried past a job's close. Items on an open job are not arrears."""
+    return [item for item in buyer_entity.outstanding if item.closed_at]
+
+
+def due_at(item: OutstandingItem) -> datetime | None:
+    """When this arrears item stops being late and starts being a default."""
+    closed = parse_iso(item.closed_at)
+    return None if closed is None else closed + timedelta(hours=GRACE_HOURS)
+
+
+def overdue(buyer_entity: BuyerLedger, now: datetime) -> list[OutstandingItem]:
+    """Arrears that have run out of grace. These are the ones that become
+    defaults; the clock is passed in so this module still has none."""
+    out = []
+    for item in arrears(buyer_entity):
+        deadline = due_at(item)
+        if deadline is not None and now >= deadline:
+            out.append(item)
+    return out
+
+
+def hours_left(item: OutstandingItem, now: datetime) -> float | None:
+    deadline = due_at(item)
+    return None if deadline is None else (deadline - now).total_seconds() / 3600.0
+
+
+def arrears_line(buyer_entity: BuyerLedger, now: datetime | None) -> str:
+    """How the arrears read in a refusal, a ledger card, or an explanation.
+
+    Written once so the countdown cannot drift between them. Without a clock
+    the deadline is named instead of counted down, which is what a caller that
+    has no `now` to give should say.
+    """
+    items = arrears(buyer_entity)
+    if not items:
+        return ""
+    owed = round(sum(i.amount_usdc for i in items), 2)
+    first = items[0]
+    where = f"job {first.job_id}" + (f" step {first.step}" if len(items) == 1 else "")
+    if now is None:
+        deadline = due_at(first)
+        when = deadline.strftime("%Y-%m-%dT%H:%MZ") if deadline else "an unknown time"
+        return (
+            f"in arrears: {owed:.2f} USDC owed on {where}, due {when} before it "
+            f"counts as a default"
+        )
+    left = hours_left(first, now)
+    if left is None:
+        return f"in arrears: {owed:.2f} USDC owed on {where}"
+    if left <= 0:
+        return (
+            f"in arrears: {owed:.2f} USDC owed on {where}, past its grace period "
+            f"and counting as a default on the next pass"
+        )
+    when = f"{left:.0f}h" if left >= 1 else f"{max(1, round(left * 60))}m"
+    return (
+        f"in arrears: {owed:.2f} USDC owed on {where}, due in {when} before it "
+        f"counts as a default"
+    )
+
+
 def outstanding_usdc(buyer_entity: BuyerLedger) -> float:
     """What this buyer owes on closed jobs, in USDC."""
     return round(sum(item.amount_usdc for item in buyer_entity.outstanding), 2)
@@ -226,6 +303,7 @@ def decide(
     buyer_entity: BuyerLedger,
     job_state: JobState,
     job_type: JobType,
+    now: datetime | None = None,
 ) -> tuple[Decision, str]:
     """Decide whether to run ``step`` for this buyer, and say why.
 
@@ -280,6 +358,12 @@ def decide(
             )
         return REFUSE, f"{unblock_terms(buyer_entity)}; {facts}"
     if buyer_entity.unpaid_from_prior_jobs > 0:
+        # Late is not the same as gone. While a debt is inside its grace period
+        # the refusal says so and counts down, rather than calling the buyer a
+        # defaulter for work they may be about to pay for.
+        late = arrears_line(buyer_entity, now)
+        if late and not overdue(buyer_entity, now or datetime.now(timezone.utc)):
+            return REFUSE, f"{late}; {facts}"
         return REFUSE, (
             f"buyer left {buyer_entity.unpaid_from_prior_jobs} step(s) unpaid on a "
             f"completed job; {facts}"

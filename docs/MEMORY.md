@@ -36,6 +36,32 @@ on chain tells the agent which invoice it already collected, so it charges again
 | consolidation | two things. Per job: `Engine._complete` (`engine.py:808`) copies the four step outputs into `findings/<contract_hash>` and archives the job entity via `TurnstylStore.archive_job_entity` (`memory.py:293`). Per day: `digest.build` (`digest.py`) writes `("digest", <YYYY-MM-DD>)` from `turnstyl digest` and `GET /api/digest` | closed jobs leave the working set and their outputs become the cache that prices the next audit; a counted day becomes one entity read instead of a walk of the journal |
 | semantic search (FTS5) | `TurnstylStore.search_findings` (`memory.py:329`), called from `Engine._memory_hints` (`engine.py:297`) on every `job new` | queries `findings/*` with the contract's own function names and prints any hit as a dim "memory hint" line |
 
+## Arrears: owed, but not yet a default
+
+`Engine._complete` no longer increments `defaults` when a job closes with
+delivered work unpaid. It stamps `closed_at` on each carried `OutstandingItem`
+instead, which makes it an arrears item. `unpaid_from_prior_jobs` still counts
+it, so paid work is refused and credit is suspended from that moment; what is
+withheld is the word "default" and the counters it resets.
+
+`engine.promote_arrears(store, buyer)` is now the only place a default is
+recorded. It reads the ledger, finds arrears whose `closed_at` is more than
+`GRACE_HOURS` old (`TURNSTYL_GRACE_HOURS`, 24 by default), and for each one
+increments `defaults`, resets both earn-back clocks, snapshots
+`completed_paid_jobs_at_block` if that takes the buyer to two, recomputes the
+tier and journals one `ARREARS_DEFAULTED` event. It clears `closed_at` as it
+goes, so the same debt cannot be promoted twice.
+
+It is called from `Engine._reconcile`, which runs at the top of every decision
+path, and from the worker's buyer sweep on every pass. Both call it *after*
+settlement is checked, so a debt paid in the last minute clears rather than
+defaulting on the same pass.
+
+`policy` stays free of clocks: `arrears`, `overdue`, `hours_left` and
+`arrears_line` all take `now` as an argument, and `decide` accepts an optional
+`now` so a caller with a clock gets the countdown and one without gets the
+deadline named instead.
+
 ## Blocked is a stop, not an ending
 
 Two defaults block a buyer. The block holds while `unpaid_from_prior_jobs > 0`,

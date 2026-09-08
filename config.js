@@ -1,1 +1,1 @@
-window.TURNSTYL_API = "https://walking-difference-por-hang.trycloudflare.com";
+window.TURNSTYL_API = "https://minutes-purse-relative-suggested.trycloudflare.com";

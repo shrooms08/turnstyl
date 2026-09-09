@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Publish web/ to the gh-pages branch of origin with a git worktree. No build:
-# index.html, config.js and static/ are copied as they are.
+# index.html, app.html, docs.html, config.js, static/ and the documentation
+# markdown in docs/site/ are copied as they are.
 #
 #   scripts/pages.sh                 publish the whole page
 #   scripts/pages.sh --config-only   publish only web/config.js (tunnel.sh uses this)
@@ -17,7 +18,7 @@ OWNER=${SLUG%%/*}; NAME=${SLUG##*/}
 PAGES_URL="https://${OWNER}.github.io/${NAME}/"
 WT=.gh-pages-worktree
 
-for f in web/index.html web/app.html web/config.js; do
+for f in web/index.html web/app.html web/docs.html web/config.js; do
   [ -f "$f" ] || { echo "turnstyl pages: $f is missing; nothing to publish" >&2; exit 1; }
 done
 
@@ -37,6 +38,12 @@ else
   # The app is a second page, not a route: Pages serves it at
   # /turnstyl/app.html, and both pages use the same relative static/ paths.
   cp web/app.html "$WT/app.html"
+  # The docs site is a third page plus its markdown. docs.html fetches
+  # docs/site/<slug>.md at runtime, so the markdown has to ship beside it and
+  # keep the same relative path the local server serves it at.
+  cp web/docs.html "$WT/docs.html"
+  rm -rf "$WT/docs"; mkdir -p "$WT/docs/site"
+  cp docs/site/*.md "$WT/docs/site/"
   # Never knock a live session offline: the local config.js is the empty
   # default unless tunnel.sh wrote it, so when gh-pages already publishes a
   # URL and the local file is empty, the published one is kept.
@@ -47,7 +54,7 @@ else
   fi
   rm -rf "$WT/static"; mkdir -p "$WT/static"
   cp -R web/static/. "$WT/static/"
-  find "$WT/static" \( -name .DS_Store -o -name .gitkeep \) -delete
+  find "$WT/static" "$WT/docs" \( -name .DS_Store -o -name .gitkeep \) -delete
   touch "$WT/.nojekyll"
 fi
 

@@ -11,6 +11,14 @@ suite, but they are demonstrations of the layer, not the claim. A service is a
 spec; the engine, the memory, the payments, the credit rules and the on-chain
 verification underneath are shared.
 
+**Documentation:** <https://shrooms08.github.io/turnstyl/docs.html> — thirteen
+pages covering the concepts, the memory layout, the two services and how to add
+a third, the payment rails, verification, the MCP server, every HTTP endpoint,
+the security model, deployment and the evals. The Markdown behind it is
+[`docs/site/`](docs/site) and is the source of truth; the page renders it at
+runtime with no build step. Start with
+[Quickstart](https://shrooms08.github.io/turnstyl/docs.html#quickstart).
+
 ## The delete test
 
 Delete `data/turnstyl.db` and the agent forgets it was ever paid: it invoices
@@ -360,7 +368,8 @@ The app, with the worker so paid steps run themselves:
 
 `/` is the story over a particle scene; `/app.html` is the app, where a buyer
 connects a wallet, submits a contract, pays on either rail, reads the report and
-verifies it against the chain. Contracts: `cd contracts && forge test`.
+verifies it against the chain; `/docs.html` is the documentation site, rendering
+`docs/site/*.md` at runtime. Contracts: `cd contracts && forge test`.
 
 The tunnel, from the repo on the operator's machine:
 
@@ -429,7 +438,9 @@ stylesheet and the markup are written here.
 
 ## Live
 
-<https://shrooms08.github.io/turnstyl/>
+<https://shrooms08.github.io/turnstyl/> — the story.
+[app.html](https://shrooms08.github.io/turnstyl/app.html) is the app,
+[docs.html](https://shrooms08.github.io/turnstyl/docs.html) the documentation.
 
 The page is always up. The agent behind it is not: the API and the worker run on
 the operator's Mac, reached through a Cloudflare quick tunnel whose URL the page

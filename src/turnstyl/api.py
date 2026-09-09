@@ -2197,6 +2197,48 @@ def app_page() -> FileResponse:
     return FileResponse(page)
 
 
+@app.get("/docs.html", include_in_schema=False)
+def docs_page() -> FileResponse:
+    """The documentation site: a shell that renders docs/site/*.md at runtime.
+
+    Served here so the same relative paths work locally at /docs.html and on
+    GitHub Pages at /turnstyl/docs.html; scripts/pages.sh copies the markdown
+    alongside it.
+    """
+    page = WEB_DIR / "docs.html"
+    if not page.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=f"turnstyl: {page} is missing; the web UI was not installed.",
+        )
+    return FileResponse(page)
+
+
+DOCS_SITE_DIR = Path(__file__).resolve().parents[2] / "docs" / "site"
+DOC_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,60}$")
+
+
+@app.get("/docs/site/{slug}.md", include_in_schema=False)
+def docs_markdown(slug: str) -> FileResponse:
+    """One documentation page's Markdown source.
+
+    The markdown in docs/site/ is the source of truth and docs.html fetches it;
+    nothing is copied into web/ and nothing is built. The slug is matched
+    against a fixed pattern and the result is required to sit inside
+    DOCS_SITE_DIR, so no path outside it is reachable however it is spelt.
+    """
+    if not DOC_SLUG_RE.match(slug):
+        raise HTTPException(status_code=404, detail=f"no documentation page {slug!r}")
+    page = (DOCS_SITE_DIR / f"{slug}.md").resolve()
+    if not page.is_file() or DOCS_SITE_DIR.resolve() not in page.parents:
+        raise HTTPException(status_code=404, detail=f"no documentation page {slug!r}")
+    return FileResponse(
+        page,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/config.js", include_in_schema=False)
 def config_js() -> FileResponse:
     """The API origin the page should talk to. Same-origin here (""), a

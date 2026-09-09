@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>turnstyl — docs</title>
+<link rel="icon" type="image/svg+xml" href="static/brand/mark-light.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&family=Outfit:wght@200;300;400&family=Work+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="static/turnstyl.css">
+</head>
+<body>
+
+<div class="topbar" id="topbar">
+  <a class="mark" href="./" style="border:0"><img src="static/brand/lockup-a.svg" alt="turnstyl" height="22" style="height:22px;width:auto;display:block"></a>
+  <div class="right">
+    <a class="navlink" href="./">Story</a>
+    <a class="navlink" href="app.html">App</a>
+    <a class="navlink" href="https://github.com/shrooms08/turnstyl" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</div>
+
+<div class="shell" id="top">
+  <div class="wrap">
+    <button type="button" class="docmenu" id="docMenu" aria-expanded="false" aria-controls="docNav"><span class="bars"><i></i><i></i><i></i></span> Contents</button>
+
+    <div class="docs">
+      <nav class="docnav" id="docNav" aria-label="documentation">
+        <h3>documentation</h3>
+        <input type="search" class="docsearch" id="docSearch" placeholder="filter by heading" spellcheck="false" autocomplete="off" aria-label="filter the contents by heading text">
+        <ul id="docList"></ul>
+        <div class="docnote">
+          Source of truth is Markdown in
+          <a href="https://github.com/shrooms08/turnstyl/tree/master/docs/site" target="_blank" rel="noopener">docs/site/</a>.
+          This page renders it at runtime; there is no build step.
+        </div>
+      </nav>
+
+      <main class="docbody" id="docBody">
+        <div class="docload" id="docLoad">loading…</div>
+        <article class="md" id="docMd"></article>
+        <div class="docfoot" id="docFoot"></div>
+      </main>
+    </div>
+  </div>
+
+  <footer class="wrap">
+    <div class="fmark">turnstyl</div>
+    <div class="fl">
+      <a href="https://github.com/shrooms08/turnstyl" target="_blank" rel="noopener">github.com/shrooms08/turnstyl</a>
+      <span>memory by Sibyl Memory, payments on Base</span>
+    </div>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  /* The page list. Each entry is a slug (the file at docs/site/<slug>.md, and
+     the hash in the URL) and the title shown in the sidebar. Adding a page is
+     adding a row here and a file there; nothing else changes. */
+  var PAGES = [
+    { slug: "overview",   title: "Overview" },
+    { slug: "quickstart", title: "Quickstart" },
+    { slug: "concepts",   title: "Concepts" },
+    { slug: "memory",     title: "Memory" },
+    { slug: "services",   title: "Services" },
+    { slug: "buying",     title: "Buying" },
+    { slug: "verify",     title: "Verify" },
+    { slug: "mcp",        title: "MCP" },
+    { slug: "api",        title: "API" },
+    { slug: "security",   title: "Security" },
+    { slug: "deploy",     title: "Deploy" },
+    { slug: "evals",      title: "Evals" },
+    { slug: "faq",        title: "FAQ" }
+  ];
+  var HOME = PAGES[0].slug;
+
+  var $ = function(s, r){ return (r || document).querySelector(s); };
+  function esc(v){
+    return String(v == null ? "" : v).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  var list   = $("#docList");
+  var body   = $("#docMd");
+  var load   = $("#docLoad");
+  var foot   = $("#docFoot");
+  var nav    = $("#docNav");
+  var menu   = $("#docMenu");
+  var search = $("#docSearch");
+
+  /* Fetched markdown, by slug. A page is fetched once per load; search fetches
+     the rest in the background so it can match headings it has not shown yet. */
+  var cache = {};
+  var current = null;
+
+  marked.setOptions({ gfm: true, breaks: false, headerIds: false, mangle: false });
+
+  function url(slug){ return "docs/site/" + slug + ".md"; }
+
+  function fetchPage(slug){
+    if (cache[slug]) return Promise.resolve(cache[slug]);
+    return fetch(url(slug), { cache: "no-cache" }).then(function(r){
+      if (!r.ok) throw new Error("HTTP " + r.status + " for " + url(slug));
+      return r.text();
+    }).then(function(text){ cache[slug] = text; return text; });
+  }
+
+  /* ── headings, for the sidebar and the search ─────────────────────
+     Read off the markdown rather than the rendered DOM, so a page that has
+     not been shown yet can still be searched. Fenced code is skipped: a "#"
+     comment in a shell block is not a heading. */
+  function headings(md){
+    var out = [], fence = false;
+    (md || "").split("\n").forEach(function(line){
+      if (/^\s*(```|~~~)/.test(line)) { fence = !fence; return; }
+      if (fence) return;
+      var m = /^(#{2,3})\s+(.+?)\s*$/.exec(line);
+      if (!m) return;
+      var text = m[2].replace(/`/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").trim();
+      if (text) out.push({ level: m[1].length, text: text, id: anchor(text) });
+    });
+    return out;
+  }
+
+  function anchor(text){
+    return String(text).toLowerCase().replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-");
+  }
+
+  /* ── the sidebar ─────────────────────────────────────────────────── */
+  function renderNav(){
+    var q = (search.value || "").trim().toLowerCase();
+    var shown = 0;
+    list.innerHTML = "";
+    PAGES.forEach(function(p){
+      var heads = cache[p.slug] ? headings(cache[p.slug]) : [];
+      var titleHit = !q || p.title.toLowerCase().indexOf(q) !== -1;
+      var hits = q ? heads.filter(function(h){ return h.text.toLowerCase().indexOf(q) !== -1; }) : [];
+      if (q && !titleHit && !hits.length) return;   /* filtered out */
+      shown++;
+      var li = document.createElement("li");
+      li.className = (p.slug === current ? "on" : "") + (q && hits.length ? " hit" : "");
+      var a = document.createElement("a");
+      a.href = "#" + p.slug;
+      a.innerHTML = mark(p.title, q);
+      if (p.slug === current) { a.className = "on"; a.setAttribute("aria-current", "page"); }
+      li.appendChild(a);
+
+      /* Sub-entries: the open page's own h2s, or, while filtering, whichever
+         headings matched. */
+      var subs = q ? hits : (p.slug === current ? heads.filter(function(h){ return h.level === 2; }) : []);
+      if (subs.length) {
+        var ul = document.createElement("ul");
+        ul.className = "subs";
+        subs.slice(0, q ? 8 : 40).forEach(function(h){
+          var s = document.createElement("li");
+          var sa = document.createElement("a");
+          sa.href = "#" + p.slug + "/" + h.id;
+          sa.innerHTML = mark(h.text, q);
+          s.appendChild(sa);
+          ul.appendChild(s);
+        });
+        li.appendChild(ul);
+      }
+      list.appendChild(li);
+    });
+    if (!shown) {
+      var none = document.createElement("li");
+      none.innerHTML = '<div class="none">nothing matches “' + esc(search.value) + '”</div>';
+      list.appendChild(none);
+    }
+  }
+
+  function mark(text, q){
+    if (!q) return esc(text);
+    var i = text.toLowerCase().indexOf(q);
+    if (i === -1) return esc(text);
+    return esc(text.slice(0, i)) + "<mark>" + esc(text.slice(i, i + q.length)) +
+           "</mark>" + esc(text.slice(i + q.length));
+  }
+
+  /* ── rendering one page ──────────────────────────────────────────── */
+  function decorate(){
+    /* Headings get ids so #slug/heading works and is linkable. */
+    body.querySelectorAll("h2, h3").forEach(function(h){
+      if (!h.id) h.id = anchor(h.textContent || "");
+    });
+
+    /* Code blocks: wrap, label the language, add a copy button. */
+    body.querySelectorAll("pre").forEach(function(pre){
+      if (pre.parentNode && pre.parentNode.classList.contains("cb")) return;
+      var code = pre.querySelector("code");
+      var lang = "";
+      if (code) {
+        var cls = (code.className || "").match(/language-([\w-]+)/);
+        if (cls) lang = cls[1];
+      }
+      var box = document.createElement("div");
+      box.className = "cb";
+      pre.parentNode.insertBefore(box, pre);
+      box.appendChild(pre);
+
+      if (lang) {
+        var tag = document.createElement("span");
+        tag.className = "lang";
+        tag.textContent = lang;
+        box.appendChild(tag);
+      }
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "copy";
+      btn.textContent = "copy";
+      btn.addEventListener("click", function(){
+        var text = (code || pre).textContent || "";
+        var done = function(){
+          btn.textContent = "copied";
+          btn.classList.add("done");
+          setTimeout(function(){ btn.textContent = "copy"; btn.classList.remove("done"); }, 1400);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, fallback);
+        } else { fallback(); }
+        function fallback(){
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); done(); } catch (e) { btn.textContent = "select it"; }
+          document.body.removeChild(ta);
+        }
+      });
+      box.appendChild(btn);
+    });
+
+    /* Tables scroll inside their own box rather than widening the page. */
+    body.querySelectorAll("table").forEach(function(t){
+      if (t.parentNode && t.parentNode.classList.contains("tw")) return;
+      var w = document.createElement("div");
+      w.className = "tw";
+      t.parentNode.insertBefore(w, t);
+      w.appendChild(t);
+    });
+
+    /* External links open in a new tab; in-site hashes stay in this one. */
+    body.querySelectorAll("a[href]").forEach(function(a){
+      var href = a.getAttribute("href") || "";
+      if (/^https?:/i.test(href)) {
+        a.target = "_blank";
+        a.rel = "noopener";
+      }
+    });
+  }
+
+  function renderFoot(slug){
+    var i = PAGES.findIndex(function(p){ return p.slug === slug; });
+    var prev = i > 0 ? PAGES[i - 1] : null;
+    var next = i >= 0 && i < PAGES.length - 1 ? PAGES[i + 1] : null;
+    foot.innerHTML =
+      (prev ? '<a href="#' + prev.slug + '">← ' + esc(prev.title) + "</a>" : "") +
+      (next ? '<a class="nx" href="#' + next.slug + '">' + esc(next.title) + " →</a>" : "");
+  }
+
+  function show(slug, hash){
+    current = slug;
+    var page = PAGES.filter(function(p){ return p.slug === slug; })[0];
+    document.title = "turnstyl — " + (page ? page.title.toLowerCase() : "docs");
+    load.style.display = "";
+    load.textContent = "loading " + slug + "…";
+    body.innerHTML = "";
+    foot.innerHTML = "";
+    renderNav();
+
+    fetchPage(slug).then(function(md){
+      if (current !== slug) return;          /* a later click won */
+      load.style.display = "none";
+      body.innerHTML = marked.parse(md);
+      decorate();
+      renderNav();
+      renderFoot(slug);
+      var target = hash ? document.getElementById(hash) : null;
+      if (target) {
+        target.scrollIntoView({ block: "start" });
+      } else {
+        window.scrollTo(0, 0);
+      }
+    }).catch(function(err){
+      if (current !== slug) return;
+      load.style.display = "none";
+      body.innerHTML =
+        '<div class="docfail"><h3>this page did not load</h3>' +
+        "<p>The documentation is Markdown fetched from <code>" + esc(url(slug)) +
+        "</code> at runtime. That request failed, so there is nothing to render.</p>" +
+        "<p>If you are running the agent locally, serve the repository root so " +
+        "<code>docs/site/</code> is reachable: <code>.venv/bin/turnstyl serve --db ./data/turnstyl.db</code>. " +
+        'Otherwise read it <a href="https://github.com/shrooms08/turnstyl/blob/master/docs/site/' +
+        esc(slug) + '.md" target="_blank" rel="noopener">on GitHub</a>.</p>' +
+        '<div class="why">' + esc(err && err.message ? err.message : err) + "</div></div>";
+      renderFoot(slug);
+    });
+  }
+
+  /* ── hash routing ────────────────────────────────────────────────
+     #slug, or #slug/heading-id. An unknown slug falls back to the first
+     page rather than showing an error, so an old link still lands. */
+  function route(){
+    var raw = (location.hash || "").replace(/^#/, "");
+    var parts = raw.split("/");
+    var slug = parts[0] || HOME;
+    var known = PAGES.some(function(p){ return p.slug === slug; });
+    if (!known) slug = HOME;
+    var hash = parts.slice(1).join("/") || "";
+    nav.classList.remove("open");
+    menu.setAttribute("aria-expanded", "false");
+    if (slug === current && hash) {
+      var t = document.getElementById(hash);
+      if (t) { t.scrollIntoView({ block: "start" }); return; }
+    }
+    show(slug, hash);
+  }
+
+  window.addEventListener("hashchange", route);
+
+  search.addEventListener("input", function(){
+    renderNav();
+    /* Fetch the rest in the background the first time anyone searches, so the
+       filter can see headings on pages that have not been opened. */
+    PAGES.forEach(function(p){
+      if (!cache[p.slug]) fetchPage(p.slug).then(renderNav).catch(function(){});
+    });
+  });
+  search.addEventListener("keydown", function(e){
+    if (e.key === "Escape") { search.value = ""; renderNav(); }
+  });
+
+  menu.addEventListener("click", function(){
+    var open = nav.classList.toggle("open");
+    menu.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  renderNav();
+  route();
+})();
+</script>
+</body></html>

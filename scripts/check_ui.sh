@@ -22,8 +22,10 @@ BASE="${1:-http://127.0.0.1:8787}"
 TMPDIR_RUN=$(mktemp -d)
 PAGE="$TMPDIR_RUN/page.html"      # index.html: the story and the scene
 APP="$TMPDIR_RUN/app.html"        # app.html: the buyer and operator app
-CSS="$TMPDIR_RUN/turnstyl.css"    # the stylesheet both pages load
-ALL="$TMPDIR_RUN/all.txt"         # all three, for checks that do not care which
+DOCS="$TMPDIR_RUN/docs.html"      # docs.html: the documentation site shell
+MD="$TMPDIR_RUN/md"               # docs/site/*.md, fetched one per page
+CSS="$TMPDIR_RUN/turnstyl.css"    # the stylesheet all three pages load
+ALL="$TMPDIR_RUN/all.txt"         # all of them, for checks that do not care which
 STATUS="$TMPDIR_RUN/status.json"
 trap 'rm -rf "$TMPDIR_RUN"' EXIT
 FAILURES=0
@@ -42,6 +44,9 @@ hasapp(){ # hasapp <description> <fixed-string> : must be on app.html
 }
 noidx(){ # noidx <description> <fixed-string> : must NOT be on index.html
   if grep -qF -- "$2" "$PAGE"; then bad "$1" "still on the story page: $2"; else ok "$1"; fi
+}
+hasdocs(){ # hasdocs <description> <fixed-string> : must be on docs.html
+  if grep -qF -- "$2" "$DOCS"; then ok "$1"; else bad "$1" "not found in /docs.html: $2"; fi
 }
 
 echo "turnstyl UI check against $BASE"
@@ -65,10 +70,18 @@ if [ "$ACODE" != "200" ]; then
   exit 1
 fi
 ok "GET /app.html returns 200 ($(wc -c < "$APP" | tr -d ' ') bytes)"
+DCODE=$(curl -s -o "$DOCS" -w "%{http_code}" "$BASE/docs.html" 2>/dev/null)
+if [ "$DCODE" != "200" ]; then
+  bad "GET /docs.html reachable" "HTTP ${DCODE:-no response}"
+  echo
+  echo "RESULT: FAIL - the docs page is not served, nothing else can be checked."
+  exit 1
+fi
+ok "GET /docs.html returns 200 ($(wc -c < "$DOCS" | tr -d ' ') bytes)"
 CCODE0=$(curl -s -o "$CSS" -w "%{http_code}" "$BASE/static/turnstyl.css" 2>/dev/null)
 [ "$CCODE0" = "200" ] && ok "GET /static/turnstyl.css returns 200 ($(wc -c < "$CSS" | tr -d ' ') bytes)" \
   || bad "GET /static/turnstyl.css returns 200" "HTTP ${CCODE0:-no response}"
-cat "$PAGE" "$APP" "$CSS" > "$ALL"
+cat "$PAGE" "$APP" "$DOCS" "$CSS" > "$ALL"
 
 # ---------------------------------------------------------------- scene wiring
 echo
@@ -704,6 +717,82 @@ hasidx "the story strip says agents can buy too" "agents can buy from this too"
 hasidx "and it is part of the operator strip"   'id="agentsLine"'
 grep -qF ".agents summary{cursor:pointer" "$CSS" && ok "the stylesheet carries the panel rules" || bad "stylesheet carries the panel rules"
 grep -qF ".agents .atools{display:flex" "$CSS" && ok "and the tool chips" || bad "stylesheet carries the tool chips"
+
+# ---------------------------------------------------------------- docs site
+echo
+echo "documentation site"
+# The pages, in the order docs.html lists them. This array is the check: a
+# page added to docs/site/ without a row in docs.html's PAGES, or the other way
+# round, fails here rather than at a reader.
+DOC_PAGES=(overview quickstart concepts memory services buying verify mcp api security deploy evals faq)
+
+mkdir -p "$MD"
+for slug in "${DOC_PAGES[@]}"; do
+  MCODE=$(curl -s -o "$MD/$slug.md" -w "%{http_code}" "$BASE/docs/site/$slug.md" 2>/dev/null)
+  if [ "$MCODE" = "200" ]; then
+    SIZE=$(wc -c < "$MD/$slug.md" | tr -d ' ')
+    if [ "$SIZE" -lt 1000 ]; then
+      bad "docs/site/$slug.md is a real page" "only $SIZE bytes; a stub, not a page"
+    else
+      ok "GET /docs/site/$slug.md returns 200 ($SIZE bytes)"
+    fi
+  else
+    bad "GET /docs/site/$slug.md" "HTTP ${MCODE:-no response}"
+  fi
+done
+
+# The sidebar lists every page. docs.html holds the list as { slug, title }
+# rows, so both halves are checked.
+for slug in "${DOC_PAGES[@]}"; do
+  hasdocs "sidebar lists $slug" "slug: \"$slug\""
+done
+DOC_ROWS=$(grep -c 'slug: "' "$DOCS")
+[ "$DOC_ROWS" = "${#DOC_PAGES[@]}" ] \
+  && ok "the sidebar lists exactly ${#DOC_PAGES[@]} pages and no others" \
+  || bad "the sidebar lists exactly ${#DOC_PAGES[@]} pages" "docs.html has $DOC_ROWS slug rows"
+
+# Every page's own H1, so a page that fetched 200 but is empty is caught.
+for slug in "${DOC_PAGES[@]}"; do
+  if head -1 "$MD/$slug.md" 2>/dev/null | grep -q '^# '; then
+    ok "docs/site/$slug.md opens with an H1"
+  else
+    bad "docs/site/$slug.md opens with an H1" "first line is not a '# ' heading"
+  fi
+done
+
+# A path outside docs/site/ must not be reachable through the markdown route.
+TCODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/docs/site/MEMORY.md" 2>/dev/null)
+[ "$TCODE" = "404" ] && ok "a file outside docs/site/ is not served (404)" \
+  || bad "a file outside docs/site/ is not served" "HTTP $TCODE for docs/site/MEMORY.md"
+
+echo
+echo "docs page wiring"
+hasdocs "loads marked.js from the CDN"     "https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"
+hasdocs "loads the shared stylesheet"      'href="static/turnstyl.css"'
+hasdocs "fetches markdown at runtime"      'return "docs/site/" + slug + ".md";'
+hasdocs "routes on the hash"               'window.addEventListener("hashchange", route)'
+hasdocs "the sidebar is sticky"            'class="docnav"'
+hasdocs "search box filters the sidebar"   'id="docSearch"'
+hasdocs "the mobile menu button"           'id="docMenu"'
+hasdocs "code blocks get a copy button"    'btn.className = "copy"'
+hasdocs "tables scroll in their own box"   'w.className = "tw"'
+hasdocs "a failed fetch says what to do"   'class="docfail"'
+grep -qF ".docs{display:grid" "$CSS" && ok "the stylesheet carries the two-column layout" \
+  || bad "stylesheet carries the docs layout"
+grep -qF ".md .cb code{font-family:var(--mono)" "$CSS" && ok "code blocks are JetBrains Mono" \
+  || bad "code blocks are JetBrains Mono"
+grep -qF ".md .cb{position:relative;margin:0 0 22px;background:#050505" "$CSS" && ok "on a near-black surface" \
+  || bad "code blocks sit on a near-black surface"
+grep -qF "@media (max-width:900px)" "$CSS" && ok "the sidebar collapses under 900px" \
+  || bad "the sidebar collapses under 900px"
+
+echo
+echo "docs link in both headers"
+hasidx  "index.html header links to the docs" '<a class="navlink" href="docs.html">Docs</a>'
+hasapp  "app.html header links to the docs"   '<a class="navlink" href="docs.html">Docs</a>'
+hasdocs "the docs page links back to the app" '<a class="navlink" href="app.html">App</a>'
+hasdocs "and back to the story"               '<a class="navlink" href="./">Story</a>'
+if grep -qF 'id="walletRow"' "$DOCS"; then bad "the docs page carries no wallet chip" "walletRow is on docs.html"; else ok "the docs page carries no wallet chip"; fi
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

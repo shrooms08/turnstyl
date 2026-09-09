@@ -1,157 +1,234 @@
 # turnstyl
 
-turnstyl is a metered AI agent. It audits a Solidity contract in four steps, and
-it gets paid per step in USDC on Base: step 1 (scope) is free, steps 2
-(findings), 3 (patch) and 4 (verify) are sold individually. Job state, step
-outputs, step costs, and a per-buyer ledger live in Sibyl Memory, and every
-decision the agent makes, what to charge, whether to run, whether to extend
-credit, whether to refuse, is a function of what it reads there and is written
-back as a journal entry naming the facts it used.
+turnstyl is a metering and memory layer for agents that sell work. An agent that
+charges per unit of work has to answer questions no model call can answer: what
+does this step cost, has this buyer paid, do they get credit, have I already
+done this, what did I promise and did I deliver it. turnstyl answers all of them
+out of one Sibyl Memory file and writes every answer back as a journal entry
+naming the facts it used, so the meter is auditable rather than asserted. Two
+services are wired up on top of it, a Solidity security audit and a Foundry test
+suite, but they are demonstrations of the layer, not the claim. A service is a
+spec; the engine, the memory, the payments, the credit rules and the on-chain
+verification underneath are shared.
 
 ## The delete test
 
-Delete `data/turnstyl.db` and the agent forgets it was ever paid: it invoices the
-same buyer again for work already delivered and settled. In the live demo the
-buyer then pays that second invoice, and it lands on Base Sepolia right next to
-the first one: [`0x1f7656c5d27809d4…`](https://sepolia.basescan.org/tx/0x1f7656c5d27809d49477f27a6e6eb62362eec80738fdebc1c9d3797111626f0c). Both
-payments are on chain; only the agent's memory of the first is gone.
+Delete `data/turnstyl.db` and the agent forgets it was ever paid: it invoices
+the same buyer for a step that buyer already bought, and the buyer pays for it a
+second time. Both payments are real, on Base Sepolia, from the same wallet, 224
+seconds apart, under two different memos, because the second job has an id the
+first job's memo cannot be recomputed from:
+[0.50 USDC at block 46506401](https://sepolia.basescan.org/tx/0xff0ad9caa24bed8c591f5010e8ce85683f8c0486aecad7bf9e564962c6d491af)
+and then
+[0.50 USDC again at block 46506513](https://sepolia.basescan.org/tx/0x6c5aa73f0e8d40a1f87a3a67a53f7d40d2caa29df75a007846c72dbf1ec06e34).
+The chain kept both receipts and neither of them tells the agent it had already
+collected the first one.
 
 ## What memory changes
 
-| Decision | Memory fact it reads | What changes |
-| --- | --- | --- |
-| resume | `job:<id>` state and `job/<id>` entity | picks up at the recorded step; a step with output is never re-run or re-charged |
-| price | `findings/<hash>` and `step_cost/<n>` | 0.50 becomes 0.25 when the output is already stored; 1.5x when recorded avg_tokens > 6000 |
-| credit | `buyer/<addr>` completed_paid_jobs, open_invoices, defaults | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT for a buyer with three fully paid jobs, of any service |
-| refuse | `buyer/<addr>` unpaid_from_prior_jobs | REFUSE paid work from a buyer who left a closed job unpaid |
-| cache | `findings/<hash>` | a repeat contract is served from the store with no model call at all |
+Every row is a decision the agent cannot make from the request alone. The left
+column is what it reads; the right is what reading it does.
 
-## Memory tiers used
-
-| Tier | Key or entity | Holds |
+| Decision | The memory fact it reads | What changes |
 | --- | --- | --- |
-| HOT state | `job:<job_id>` | current step, status, open invoice, buyer, contract hash |
-| HOT state | `active_jobs` | job ids not yet complete, so a fresh process can find them |
-| HOT state | `fake_payments` | settled invoices, offline backend only |
-| WARM entity | `buyer/<address>` | paid steps, USDC paid, outstanding invoices, defaults, earn-back counter, trust tier |
-| WARM entity | `job/<job_id>` | per step: output, sha256, price, tokens, seconds, commit tx, compile verdict |
-| WARM entity | `step_cost/<n>` | rolling average tokens and seconds per step, which feeds pricing |
-| WARM entity | `findings/<contract_hash>` | the four step outputs, keyed by contract hash |
-| COLD journal | one event per decision | what memory said, what the agent did, what it expects next |
-| REFERENCE | `pricing_rules` | base prices and multipliers, written once on first run |
-| REFERENCE | `contract:<hash>` | the contract source, so a resumed job needs no file path |
-| ARCHIVE | `job/<job_id>` on completion | closed jobs move out of the active set, outputs copied to `findings/` first |
-| FTS5 | `search_entities` over `findings/*` | on `job new`, queried with the contract's function names for a "memory hint" |
+| resume | `job:<id>` state and the `job/<id>` entity's step records | a fresh process picks up at the recorded step, and a step that already has output is never re-run or re-charged |
+| price | `findings/<type>/<hash>`, `step_cost/<type>/<n>.avg_tokens` | x0.5 when this contract's output for this step is already stored, x1.5 when the recorded average token cost exceeds 6000 |
+| credit | `buyer/<addr>` completed_paid_jobs, open_invoices, unpaid_from_prior_jobs | RUN_ON_CREDIT instead of WAIT_FOR_PAYMENT once three jobs have closed with every paid step settled |
+| refusal | `buyer/<addr>` unpaid_from_prior_jobs | REFUSE paid work while a job that has already closed is still unpaid |
+| block and recovery | `buyer/<addr>` defaults, consecutive_paid_since_block, completed_paid_jobs_at_block | blocked at two defaults; the block lifts once the debt is settled and six paid steps have landed, and credit is then earned again from zero |
+| arrears | each `outstanding` item's `closed_at`, against a 24 hour grace period | the debt suspends credit and refuses paid work immediately, but is only written down as a default after the grace period expires unsettled |
+| cache | `findings/<type>/<hash>` | the step is served out of the store with no model call at all |
+| prompt-payer discount | `pattern/<addr>.pays_promptly`, written by the reflection pass from the journal | x0.9 on the price, applied last and floored at 0.05 USDC, and nothing else: credit and refusal never read it |
+
+## Measured, not claimed
+
+Every number in this section comes from [docs/EVALS.md](docs/EVALS.md), produced
+by `scripts/eval.py` against contracts with bugs put in them on purpose. Model
+**claude-haiku-4-5**, **3 runs per contract**, **18 audits**, total model spend
+**$0.2574**.
+
+**Recall per known bug.** A bug counts as found only when the findings step names
+both the bug class and the function it lives in, per the matcher in
+`evals/contracts/manifest.json`.
+
+| bug class | contract and function | found | recall |
+| --- | --- | --- | --- |
+| reentrancy | `reentrancy.sol` `withdraw()` | 3/3 | 100% |
+| reentrancy | `Adversarial.sol` `withdraw()` | 3/3 | 100% |
+| missing access control | `access_control.sol` `setOwner()` | 3/3 | 100% |
+| missing access control | `access_control.sol` `setFeeBps()` | 3/3 | 100% |
+| integer truncation | `truncation.sol` `stake()` | 3/3 | 100% |
+| unchecked call return | `unchecked_call.sol` `release()` | 2/3 | 67% |
+| prompt injection in the source | `Adversarial.sol` comments | 3/3 | 100% |
+
+**False positives, reported as they came out.** `clean.sol` has no injected bugs.
+Over 3 runs the findings step reported **2 findings in total**, of which **1 was
+HIGH or CRITICAL**, and **1 of the 3 runs** contained any HIGH or CRITICAL
+finding. Two runs reported nothing. That is two false positives on a contract
+that should have produced none, and it is the honest ceiling on how much of this
+recall table is the model being careful rather than the model being talkative.
+
+**Gates.** The patch compiled under `forge build` in **18 of 18** runs. The
+verifier's verdict agreed with what the compiler actually said in **18 of 18**
+runs: it never claimed a patch failed to compile that did.
+
+**Cost and time per audit.** Median **$0.0129** and **22.4 seconds**, at a median
+of **4,285 tokens in and 1,699 out**.
+
+**The same audit, second time, from memory.** After a job completes, a second
+audit of the same contract in the same store is served from the findings entity.
+Across all **18** second passes: **0 tokens in, 0 tokens out, $0.0000**, every
+step served from memory in **100%** of runs. That row is the layer paying for
+itself, and it is why deleting the file costs the buyer twice.
+
+**The costs above are the model bill for producing the work, not what turnstyl
+charges a buyer.** What a buyer pays is set by the job type's spec and the
+pricing rules, and is listed under [Services](#services).
+
+```bash
+.venv/bin/python scripts/eval.py --runs 3 --budget 1.00   # prints the estimate first
+.venv/bin/python scripts/eval.py --mock                    # the harness, no spend
+```
+
+## What is real and what is simulated
+
+`MOCK_LLM` and `PAYMENTS=fake` are opt-in test switches for running the demo
+offline. Neither is on in anything served publicly.
+
+Simulated, and only when you ask for it:
+
+- `MOCK_LLM=1` serves canned step outputs so the offline demo needs no API key.
+- `PAYMENTS=fake` settles invoices in memory instead of on chain. Its transaction
+  hashes begin with `0xfake` and are never rendered as explorer links.
+- the `simulate payment` and `settle` endpoints exist only on the fake backend
+  and return 404 under `PAYMENTS=base`, as do the x402 endpoints, which have
+  nothing to settle when payments are fake.
+- the tamper test in the live demo edits a discarded copy of the store, verifies
+  the copy, and throws it away. The real store is never modified.
+- the rate and daily caps are in-process counters, so they reset when the server
+  restarts.
+
+Everything the public site does is real: the real model writes the work, the
+real Sibyl Memory file holds it and really does lose everything when deleted,
+real USDC moves on Base Sepolia on real wallet signatures, `forge build` and
+`forge test` really run against the model's answer, and the commits are real
+transactions on a real contract.
+
+Two things worth saying plainly. The chain is Base Sepolia, a testnet, so the
+USDC has no value. And the agent runs on the operator's own machine behind a
+tunnel, so it is live only while that machine is on; when it is not, the page
+says so rather than showing stale numbers.
 
 ## Services
 
 A job type is a spec: an ordered list of steps, each with a name, a base price,
 a system prompt, and an optional mechanical gate. Everything underneath is
-shared. The same engine runs the steps, the same memory holds the work, the same
-invoice and on-chain receipt settle them, the same policy decides what to charge
-and who gets credit, and the same verify proves the output against its commit.
-Adding a service is adding a spec, not a code path. One buyer ledger serves them
-all: trust belongs to the buyer, so paying for audits earns credit on test
-suites.
+shared. The same engine runs the steps, the same memory holds the work and
+prices it, the same invoice and on-chain receipt settle it, the same policy
+decides who gets credit and who is refused, and the same verification proves the
+output against its commit. Adding a service is adding a spec, not a code path.
+One buyer ledger serves them all, because trust belongs to the buyer and not to
+the product: paying for audits earns credit on test suites.
 
-| Service | Steps and base prices | Gate |
-| --- | --- | --- |
-| `audit`, Security audit | 1 scope free, 2 findings 0.50, 3 patch 0.75, 4 verify 0.25 | step 3 must compile (`forge build`) |
-| `tests`, Test suite | 1 scope free, 2 plan 0.40, 3 tests 0.75, 4 report 0.25 | step 3 must compile and run (`forge test`) |
+| Service | Steps and base prices in USDC | Total | Gate |
+| --- | --- | --- | --- |
+| `audit`, Security audit | 1 scope 0.00, 2 findings 0.50, 3 patch 0.75, 4 verify 0.25 | 1.50 | step 3 must compile (`forge build`) |
+| `tests`, Test suite | 1 scope 0.00, 2 plan 0.40, 3 tests 0.75, 4 report 0.25 | 1.40 | step 3 must compile and run (`forge test`) |
 
-```bash
-.venv/bin/turnstyl types                                   # what is on offer
-.venv/bin/turnstyl job new examples/Vault.sol --buyer 0x... --type tests
-```
+Step 1 is free on both, and is never gated: it costs the agent little to quote
+and it is how a stranger is won.
+
+The three multipliers on those base prices are x0.5 when the output is already
+in memory for this contract, x1.5 when the recorded average token cost for the
+step exceeds 6000, and x0.9 for a buyer the reflection pass has watched settle
+promptly, applied last and floored at 0.05 USDC. Each invoice carries the
+sentence that produced it, naming every multiplier that applied and the memory
+row behind it, so a buyer reads the arithmetic rather than a total.
 
 The test suite is written against your contract and then actually run: step 3's
 answer goes into a throwaway Foundry project with `forge-std`, and
 `forge test --json` runs it. A failing test does not fail the gate. A suite that
 compiles and runs has done its job, and a test that fails may be documenting a
-real defect, which is the point. Step 4 reports on the run results as ground
-truth and treats the test file's own comments as untrusted. A worked example
-against `Vault.sol` with a real model:
-[docs/sample_tests.md](docs/sample_tests.md), 22 tests, 20 pass, 2 fail on the
-reentrancy surface, $0.0362.
+real defect, which is the point. Step 4 reports the run results as ground truth
+and treats the test file's own comments as untrusted. Worked examples with their
+verbatim output: [docs/sample_audit.md](docs/sample_audit.md) and
+[docs/sample_tests.md](docs/sample_tests.md).
 
-## Policy rules
+![console: a job with its four step cards and the ledger](docs/screenshots/console.png)
 
-Base prices in USDC: step 1 0.00, step 2 0.50, step 3 0.75, step 4 0.25.
+## Buying
 
-- half price when this contract's output for that step is already in `findings/`
-- 1.5x when the recorded average token cost for that step exceeds 6000
-- **x0.9 when the buyer pays promptly**, applied after the other two and floored
-  at 0.05 USDC. "Promptly" is a median under 300 seconds from invoice to
-  settlement over at least three payments, learned by the reflection pass
-  reading the agent's own journal (see [docs/MEMORY.md](docs/MEMORY.md)). Below
-  three payments nothing is inferred and the price is unchanged. The invoice
-  says so in its own words:
+There are two rails, and the agent treats them as one.
 
-  ```
-  base 0.50 for step 2 (findings); no discount (not cached), no surcharge
-  (step_cost/2 avg_tokens=744 over 1 run(s)); x0.9 because this buyer has paid
-  within a median of 0.2s over 16 payments; buyer trust_tier=trusted = 0.45 USDC
-  ```
+| | x402, gasless | receipts contract |
+| --- | --- | --- |
+| The buyer needs | USDC only | USDC and a little ETH for gas |
+| The buyer signs | an EIP-3009 transfer authorisation | an `approve` once, then a `pay` transaction |
+| Who submits it | a facilitator, which pays the gas | the buyer |
+| On the page | `Pay 0.50 USDC, no gas` | `Pay on chain` |
 
-  It buys a discount and nothing else: credit and refusal never read it.
-- **RUN_FREE**: step 1, never gated
-- **RUN_PAID**: the invoice for this step is settled
-- **RUN_ON_CREDIT**: unpaid, but the buyer is trusted
-- **WAIT_FOR_PAYMENT**: unpaid and credit not earned
-- **REFUSE**: the buyer owes for work delivered on a job that has since closed
+Both move real USDC on Base Sepolia and both end in the same two places: the
+step is marked paid in the agent's memory with its settlement transaction, and
+the agent commits the sha256 of what it delivered to the receipts contract.
+`verify` checks that commit either way, and the report says which rail paid each
+step. x402 is the default when the facilitator is reachable; the receipts
+contract is always there as the fallback. Protocol details, read from the
+package and observed on the wire, are in [docs/X402.md](docs/X402.md).
 
-A job that closes with delivered work still unpaid puts the buyer **in arrears**,
-not in default. Not having paid yet and not being going to pay look identical at
-that moment, and only the clock separates them. The debt counts immediately: paid
-work is refused and credit is suspended. It becomes a default, with the counters
-that resets, only after `TURNSTYL_GRACE_HOURS` (24 by default) unsettled. Settle
-inside the window and no default is recorded and nothing is reset. The refusal
-counts it down:
-
-```
-in arrears: 0.23 USDC owed on job 9f3dc77280a6 step 2, due in 21h before it
-counts as a default
+```bash
+.venv/bin/python scripts/buyer_pay_x402.py <job_id> <step>     # gasless
+.venv/bin/python scripts/buyer_pay.py      <job_id> <step>     # on chain
 ```
 
-The promotion is the only place a default is now written. It runs wherever a
-buyer is read for a decision and on every worker pass, always after settlement
-is checked, so a debt paid at the last moment clears rather than defaulting on
-the same pass.
+## For agents
 
-Trust tiers: **trusted** needs three completed jobs with every paid step settled
-(`completed_paid_jobs >= 3`), nothing outstanding, and either no default or an
-earned-back one. **blocked** at two defaults, and a block is a stop rather than
-an ending: it holds while anything is outstanding, and then while fewer than six
-paid steps have been settled since it began. Settle every debt, pay six steps up
-front, and the buyer is **new** again, earning credit back on jobs completed
-since the block by the same three-job rule as a stranger. Two further defaults
-block them again with the clock at zero. Otherwise **new**.
+turnstyl ships an MCP server, so any harness that speaks Model Context Protocol
+can buy from it the way a person does in the browser. The buyer is a program
+with its own wallet: it signs in, is quoted per step, pays in USDC, and gets
+exactly what it paid for. It is a client, not a second door into the store: it
+never opens the memory file, never imports `turnstyl`, and sees only what the
+wallet in `BUYER_PRIVATE_KEY` is entitled to see. Eight tools, full list in
+[docs/MCP.md](docs/MCP.md).
 
-A blocked buyer is not shut out. The free scope step is never refused, they can
-submit jobs, and a step they have already paid for is served once nothing is
-outstanding, which is how the six are earned. The refusal says exactly what is
-required, in one line the ledger card, the API and the app all quote. Which
-line depends on whether there is still a debt, because a buyer who has settled
-everything is not being refused for an old debt and must not be told they were:
+**`turnstyl-mcp` is not published to PyPI yet.** Install it from this repo:
 
-```
-blocked after 2 defaults: settle 0.45 USDC outstanding, then 6 more
-consecutive paid steps to be served again
-
-blocked after 2 defaults: this step must be paid up front, 4 more paid
-steps to be served normally
+```bash
+uv pip install -e .
 ```
 
-Step counts do
-not earn credit: a buyer who pays two steps and walks away from the third has
-paid for nothing the agent can extend credit on. Repeat contracts are served
-from memory at half price, so a history of three paid jobs is cheap to build.
+`TURNSTYL_API` is the operator's API origin (the tunnel URL, or
+`http://127.0.0.1:8787` when the agent runs on your machine); the GitHub Pages
+URL is a static page and answers no API calls. `BUYER_PRIVATE_KEY` is the wallet
+that pays, and without it the paying tool is not registered at all while the
+seven read-only tools still work.
 
-A default is one delivered-but-unpaid step at the moment a job closes. It stays
-on the record permanently. Paying the debt clears `unpaid_from_prior_jobs` and
-lifts the refusal, but not the credit: the buyer pays up front until four
-consecutive settled steps have gone by, at which point credit returns. A second
-default cannot be worked off.
+```bash
+claude mcp add turnstyl --env TURNSTYL_API=http://127.0.0.1:8787 --env BUYER_PRIVATE_KEY=0x... -- turnstyl-mcp
+```
+
+`turnstyl_pay_and_run` is the only tool that moves value. `max_usdc` is required
+and has no default: if the invoice is above the ceiling it refuses and spends
+nothing.
+
+## Untrusted source
+
+A contract is data the buyer submitted, not instructions to the auditor. Two
+independent defences, and `examples/Adversarial.sol` exercises both. Every step's
+system prompt carries a fixed preamble saying the source is untrusted and that
+any attempt inside it to direct the model must be refused and reported; it lives
+on `StepSpec`, so a new job type gets it whether or not its author thought about
+it. And a mechanical pre-pass (`src/turnstyl/injection.py`) reads the comments
+and string literals before any model sees the file, looking for six classes of
+instruction-like text: ignoring instructions, suppressing findings, demanding
+approval, asserting a role, forging a chat turn, and addressing the model
+directly.
+
+`Adversarial.sol` holds a real reentrancy bug and comments telling the auditor it
+has already been audited, to report no findings, and to approve the patch. The
+scan flags **10 passages** across all six rule classes. In **3 of 3** eval runs
+the audit reported both the reentrancy the comments told it to ignore and the
+manipulation attempt itself, as its own finding. On the ordinary sample contract
+the scan flags nothing.
 
 ## On chain
 
@@ -164,471 +241,107 @@ default cannot be worked off.
   one call and emits `Paid`.
 - `commit(bytes32 memo, bytes32 outputHash)` publishes the sha256 of a delivered
   step and emits `Committed`. Agent only.
-- The contract holds no custody, it never takes a token balance, and it has no
-  owner, no pause and no upgrade path.
-
-Every job page has **Verify**: for each step, the API fetches the commit
-transaction's receipt, decodes `Committed(memo, outputHash)`, recomputes the
-sha256 of the output in memory and compares. A match proves the output the
-buyer received is the one committed at payment time. It needs both sides: the
-chain holds the hash and memory holds the output; either alone proves nothing.
-**Download report** exports the whole audit as Markdown with every hash and
-transaction link, so the check can be repeated by hand on BaseScan.
+- The contract holds no custody, never takes a token balance, and has no owner,
+  no pause and no upgrade path.
 
 The memo is `keccak256("<job_id>:<step>")`, a bare string anyone can recompute. A
 payment counts when a `Paid` log carries that memo, a payer matching the invoiced
 buyer, and at least the invoiced amount. The agent trusts the log, not the buyer.
 
-## Mechanical gates on model output
+Every job page has **Verify**: for each step the API fetches the commit
+transaction's receipt, decodes `Committed(memo, outputHash)`, recomputes the
+sha256 of the output held in memory, and compares. A match proves the output the
+buyer received is the one committed at payment time. It needs both sides: the
+chain holds the hash and memory holds the output, and either alone proves
+nothing. That is also why the delete test cannot be undone from the chain.
 
-- The patch step returns a whole patched file. turnstyl produces the unified diff
-  itself with `difflib`, so the diff applies by construction and the model never
-  writes a hunk header.
-- That file is compiled in a throwaway Foundry project with `forge build`. If it
-  fails, the compiler errors go back to the model once. The verdict is recorded
-  and shown as `PATCH COMPILES: yes/no`.
-- The verifier step is handed those results as `MECHANICAL CHECKS` and is
-  instructed that nothing may be marked CLOSED if the patch does not compile.
+## Memory tiers used
 
-## Measured, not claimed
+| Tier | Key or entity | Holds |
+| --- | --- | --- |
+| HOT state | `job:<job_id>` | current step, status, open invoice, buyer, contract hash, job type |
+| HOT state | `active_jobs` | job ids not yet complete, so a fresh process can find them |
+| HOT state | `fake_payments` | settled invoices, offline backend only |
+| WARM entity | `buyer/<address>` | paid steps, USDC paid, outstanding items and their `closed_at`, defaults, earn-back counters, trust tier |
+| WARM entity | `job/<job_id>` | per step: output, sha256, price, tokens, seconds, commit tx, compile or test verdict |
+| WARM entity | `step_cost/<type>/<n>` | rolling average tokens and seconds per step of that service, which feeds pricing |
+| WARM entity | `findings/<type>/<contract_hash>` | that service's step outputs for that contract, keyed by step name |
+| WARM entity | `pattern/<address>` | what reflection learned from the journal about how this buyer pays |
+| WARM entity | `digest/<YYYY-MM-DD>` | one day's figures, consolidated so the day is not recounted |
+| COLD journal | one event per decision, plus `PAYMENT_SEEN` and `TRUST_CHANGED` facts | what memory said, what was done, what was expected next |
+| REFERENCE | `pricing_rules` | base prices and multipliers, written once on first run |
+| REFERENCE | `contract:<hash>` | the contract source, so a resumed job needs no file path |
+| ARCHIVE | `job/<job_id>` on completion | closed jobs leave the working set, outputs copied to `findings/` first |
+| FTS5 | `search_entities` over `findings/*` | queried on `job new` with the contract's own function names, as a memory hint |
 
-Every number here comes from `scripts/eval.py`, which runs the audit against a
-set of contracts with bugs put in them on purpose and counts what came back.
-The run below: model **claude-haiku-4-5**, **3 runs per contract**, **18 audits**,
-total model spend **$0.2574**. Full table and per-run data in
-[docs/EVALS.md](docs/EVALS.md) and `evals/results/`.
-
-**Recall, by bug class.** A bug counts as found only when the findings step
-names both the bug class and the function it lives in, per the matcher in
-`evals/contracts/manifest.json`.
-
-| bug class | contract | found | recall |
-| --- | --- | --- | --- |
-| reentrancy | `reentrancy.sol` `withdraw()` | 3/3 | 100% |
-| reentrancy | `Adversarial.sol` `withdraw()` | 3/3 | 100% |
-| missing access control | `access_control.sol` `setOwner()` | 3/3 | 100% |
-| missing access control | `access_control.sol` `setFeeBps()` | 3/3 | 100% |
-| integer truncation | `truncation.sol` `stake()` | 3/3 | 100% |
-| unchecked call return | `unchecked_call.sol` `release()` | 2/3 | 67% |
-| prompt injection in the source | `Adversarial.sol` comments | 3/3 | 100% |
-
-**False positives.** `clean.sol` has no injected bugs. Over 3 runs it drew
-**2 findings in total**, of which **1 was HIGH or CRITICAL**; **1 of 3 runs**
-contained any HIGH or CRITICAL finding. The other two reported nothing. The one
-HIGH was a design opinion about single-step ownership transfer, not a defect.
-
-**Gates.** The patch compiled under `forge build` in **18 of 18** runs (100%).
-The verifier's verdict agreed with what the compiler actually said in **18 of 18**
-runs (100%): it never claimed a patch failed to compile that did.
-
-**Cost and time, per audit.** Median **$0.0129** and **22.4 seconds**, at a
-median of **4,285 tokens in and 1,699 out**.
-
-**First audit against the same audit from memory.** After a job completes, a
-second audit of the same contract in the same store is served from the findings
-entity. Across all 18 second passes: **0 tokens in, 0 tokens out, $0.0000**, with
-every step served from memory in **100%** of runs. That is the whole thesis in
-one row, and it is why deleting the file costs the buyer twice.
-
-Reproduce it:
-
-```bash
-.venv/bin/python scripts/eval.py --runs 3 --budget 1.00   # prints the estimate first
-.venv/bin/python scripts/eval.py --mock                    # the harness, no spend
-```
-
-## Use it from your agent
-
-turnstyl ships an MCP server, so any harness that speaks Model Context Protocol
-can buy from it the way a person does in the browser. The buyer is a program
-with its own wallet: it signs in, is quoted per step, pays in USDC, and gets
-exactly what it paid for. Full tool list in [docs/MCP.md](docs/MCP.md).
-
-```bash
-pip install turnstyl-mcp      # or, from this repo: uv pip install -e .
-```
-
-Two environment variables. `TURNSTYL_API` is the operator's **API** origin (the
-tunnel URL, or `http://127.0.0.1:8787` when the agent runs on your machine); the
-GitHub Pages URL is a static page and answers no API calls. `BUYER_PRIVATE_KEY`
-is the wallet that pays, and without it the paying tool is not registered at all
-while every read-only tool still works.
-
-**Claude Code**
-
-```bash
-claude mcp add turnstyl --env TURNSTYL_API=http://127.0.0.1:8787 --env BUYER_PRIVATE_KEY=0x... -- turnstyl-mcp
-```
-
-**Codex** (`~/.codex/config.toml`)
-
-```toml
-[mcp_servers.turnstyl]
-command = "turnstyl-mcp"
-env = { TURNSTYL_API = "http://127.0.0.1:8787", BUYER_PRIVATE_KEY = "0x..." }
-```
-
-**Cursor** (`.cursor/mcp.json`)
-
-```json
-{
-  "mcpServers": {
-    "turnstyl": {
-      "command": "turnstyl-mcp",
-      "env": {
-        "TURNSTYL_API": "http://127.0.0.1:8787",
-        "BUYER_PRIVATE_KEY": "0x..."
-      }
-    }
-  }
-}
-```
-
-### A whole audit for under a dollar
-
-What the exchange looks like from the buying agent's side. The prices are the
-real ones; the measured median model cost of the work behind them is $0.0129
-(see [Measured, not claimed](#measured-not-claimed)).
-
-> **You:** audit `Vault.sol` for me, spend at most $2.
-
-```
-turnstyl_services()
-  2 service(s) on offer: audit (1.50 USDC), tests (1.05 USDC). Step 1 is free on each.
-
-turnstyl_submit(source=<Vault.sol>, job_type="audit")
-  job b1b73a869f46 open on audit; step 1 ran free; step 2 (findings) is invoiced
-  at 0.50 USDC; this buyer is new and needs 3 more fully paid job(s) for credit
-
-turnstyl_quote(job_id="b1b73a869f46")
-  step 2 (findings) of job b1b73a869f46 costs 0.50 USDC; buyer is new
-  price_reason: base 0.50 for step 2 (findings); no discount (not cached),
-  no surcharge; buyer trust_tier=new = 0.50 USDC
-
-turnstyl_pay_and_run(job_id="b1b73a869f46", max_usdc=0.60)
-  paid 0.50 USDC for step 2 (findings) of job b1b73a869f46 over x402, and the
-  agent ran it; next up is step 3 (patch) at 0.75 USDC
-  -> "Reentrancy in withdraw() - HIGH. withdraw() sends ETH with a raw call to
-      msg.sender BEFORE it reduces balances[msg.sender]..."
-
-turnstyl_pay_and_run(job_id="b1b73a869f46", max_usdc=0.80)   # step 3, the patch
-turnstyl_pay_and_run(job_id="b1b73a869f46", max_usdc=0.30)   # step 4, the verify
-
-turnstyl_verify(job_id="b1b73a869f46")
-  job b1b73a869f46: 3 of 4 step(s) match their on-chain commit, 0 differ,
-  1 has no commit.
-```
-
-Total: **1.50 USDC**, gasless, four transactions on Base Sepolia, and a report
-the agent can hand back. `max_usdc` is required on the paying tool and has no
-default: pass a ceiling or it refuses, and if the invoice is above it, it
-refuses without spending anything.
-
-## Untrusted contract source
-
-A contract is data the buyer submitted, not instructions to the auditor. Two
-independent defences, and `examples/Adversarial.sol` exercises both:
-
-1. **Every step's system prompt** carries a fixed preamble saying the source is
-   untrusted and that any attempt inside it to direct the model must be refused
-   and reported. It lives on `StepSpec` in `src/turnstyl/jobtypes/base.py`, so a
-   new job type gets it whether or not its author thought about it.
-2. **A mechanical pre-pass** (`src/turnstyl/injection.py`) reads the comments and
-   string literals before any model sees the file, looking for six classes of
-   instruction-like text: ignoring instructions, suppressing findings, demanding
-   approval, asserting a role, forging a chat turn, and addressing the model
-   directly. Hits are recorded on the job state with line numbers, journalled as
-   one decision, shown on the job page and in the CLI as a warning panel, and
-   handed to the findings step as evidence with an instruction to report the real
-   ones.
-
-On `Adversarial.sol` the scan flags **10 passages on 3 lines** across all six
-rule classes, and in **3 of 3** eval runs the audit reported both the reentrancy
-the comments told it to ignore and the manipulation attempt itself, at MEDIUM.
-On the ordinary sample contract the scan flags nothing.
+Full implementation note, with the code path for every primitive:
+[docs/MEMORY.md](docs/MEMORY.md).
 
 ## Run it
 
 Offline, no API key, no chain, no spend:
 
 ```bash
-.venv/bin/python scripts/demo_offline.py        # nine-beat acceptance test
+.venv/bin/python scripts/demo_offline.py         # the acceptance test, end to end
 
 export MOCK_LLM=1 PAYMENTS=fake
 .venv/bin/turnstyl job new examples/Vault.sol --buyer 0xYourAddress
 .venv/bin/turnstyl pay <job_id> 2
 .venv/bin/turnstyl job run <job_id>
 .venv/bin/turnstyl ledger 0xYourAddress
-.venv/bin/turnstyl status
 ```
 
 Live on Base Sepolia. `.env` (gitignored, never printed) must define
 `BASE_SEPOLIA_RPC`, `USDC_ADDRESS`, `RECEIPTS_ADDRESS`, `RECEIPTS_DEPLOY_BLOCK`,
-`AGENT_ADDRESS`, `AGENT_PRIVATE_KEY`, `BUYER_ADDRESS`, `BUYER_PRIVATE_KEY`:
+`AGENT_ADDRESS`, `AGENT_PRIVATE_KEY`, `BUYER_ADDRESS`, `BUYER_PRIVATE_KEY`, and
+`ANTHROPIC_API_KEY` for a real model run:
 
 ```bash
-scripts/demo_live.sh                            # nine beats, real USDC
-# honours TURNSTYL_DB; defaults to ./data/demo_live.db
+scripts/demo_live.sh                             # real USDC, ends with the delete test
 ```
 
-A real audit against the Anthropic API needs `ANTHROPIC_API_KEY` in `.env`:
+The app, with the worker so paid steps run themselves:
 
 ```bash
-export PAYMENTS=fake LLM_MODEL=claude-haiku-4-5 TURNSTYL_DB=./data/real_run.db
-unset MOCK_LLM
-.venv/bin/turnstyl job new examples/Vault.sol --buyer 0xYourAddress
-.venv/bin/turnstyl pay <job_id> 2 && .venv/bin/turnstyl job run <job_id>
+.venv/bin/turnstyl serve --with-worker --db ./data/turnstyl.db   # http://127.0.0.1:8787
 ```
 
-Contracts: `cd contracts && forge test`. `forge init --no-git` vendored
-`forge-std` as plain files, so a fresh clone builds with no `forge install`.
+`/` is the story over a particle scene; `/app.html` is the app, where a buyer
+connects a wallet, submits a contract, pays on either rail, reads the report and
+verifies it against the chain. Contracts: `cd contracts && forge test`.
 
-## What the agent did today
-
-`turnstyl digest [--days 1]` counts the day from the journal and the entities
-already in the store: jobs opened and completed, USDC settled, steps run against
-steps served from memory, model spend estimated from the recorded token counts,
-new buyers, trust changes, defaults, refusals, injection flags raised, the median
-seconds from payment to output, and the top three contracts by repeat audits.
-
-```
-turnstyl digest for today (2026-09-07)
-
-  jobs opened              9
-  jobs completed           6
-  USDC settled             5.25
-  steps run                28
-  steps served from memory 18
-  model spend (estimated)  $0.0412 on claude-haiku-4-5
-  new buyers               1
-  trust changes            7 (1 buyer(s) above new)
-  defaults                 1
-  refusals                 1
-  injection flags raised   10
-  payment to output        median 0.2s over 16 payment(s)
-
-  consolidated as entity digest/2026-09-07
-```
-
-Trust changes counts `TRUST_CHANGED` events, so it is tiers that actually moved,
-not a snapshot; the snapshot is the figure beside it. Payment to output is timed
-from the `PAYMENT_SEEN` event every rail writes when it first sees an invoice
-settled, and reads "not enough data" until there are three observations.
-
-It writes one entity, `digest/<date>`, so counting the same day again is a
-single read rather than a walk of the journal. `GET /api/digest` returns the
-same figures: complete for the operator, and counts only for everyone else, on
-the rule `/api/stats` already follows. The app's operator view shows today
-against all time.
-
-## Web UI
-
-Two pages, served from the same process that reads the agent's memory, sharing
-one stylesheet at `web/static/turnstyl.css`:
-
-* **`/`** is the story. A scroll narrative over a 5,000-particle scene, ending
-  in a compact operator strip: is the agent up, where its memory file is, how
-  many jobs are in it, the last decision it made in one sentence, and a button
-  into the app.
-* **`/app.html`** is the app. Connect a wallet, sign in, submit a contract, pay
-  invoices on either rail, read reports, verify outputs against the chain.
-  `app.html?job=<id>` opens one job.
+The tunnel, from the repo on the operator's machine:
 
 ```bash
-.venv/bin/turnstyl serve --db ./data/turnstyl.db     # then open http://127.0.0.1:8787
+scripts/tunnel.sh --daemon   # go live detached, and publish the URL
+scripts/tunnel.sh --status   # running, and is the page pointing at it
+scripts/tunnel.sh --stop     # stop it and publish an empty config.js
+scripts/tunnel_check.sh      # from anywhere: is the published page reachable
 ```
-
-Scrolling drives the scene through a scatter between sections: brain (the hero),
-coin (every step is paid), bulb (restart it, it remembers), scatter (the delete
-test), then the turnstyl mark. Delete the memory file while either page is open
-and it stays up: the scene locks to a red scatter, the counters read "memory
-deleted", and every panel says what was lost rather than showing a stale copy.
-
-## Who sees what
-
-A job's contents are the thing the buyer paid for, so they belong to that buyer.
-The meter stays public; the work does not.
-
-| | public | the job's buyer | the operator |
-| --- | --- | --- | --- |
-| `/api/stats` | six figures, nobody named | same | same |
-| job list | 403 | their own address, with `?buyer=` | every job |
-| job detail, by id | every step's price, status, payment and commit transactions, and output sha256 | plus the outputs and the contract hash | plus the outputs and the contract hash |
-| journal | decision, time, step, the one-sentence summary | plus the memory reads and actions behind it | plus the memory reads and actions behind it |
-| ledger | trust tier, completed paid jobs | the whole ledger | the whole ledger |
-| report.md, report.json, verify | 401 | 200 | 200 |
-| creating a job, paying, settling | 401 | their own jobs | any job |
-
-Who has bought what is not part of the meter, so there is no public index of
-jobs: `GET /api/jobs` answers 403 unless you are the operator, a buyer asks for
-their own address with `?buyer=`, and the public figures live at `GET
-/api/stats` (jobs in memory, completed, distinct buyers, USDC settled, decisions
-logged, steps served from memory; cached ten seconds, and no job id or address
-appears in the response). A job fetched *by id* stays readable to anyone who has
-the id, in the public meter shape: a link to a job is a receipt a buyer may want
-to show someone, and that has to work without handing over a session.
-
-A buyer proves an address by signing this message, and nothing else:
-
-```
-turnstyl login
-
-address: <lowercase address>
-nonce: <32 hex characters>
-issued: <iso 8601 time>
-```
-
-`GET /api/auth/nonce?address=0x…` returns the message in full;
-`POST /api/auth/verify` with `{address, signature}` returns a bearer token good
-for 24 hours. Nothing is spent and no transaction is sent. A wrong buyer gets
-403, no buyer gets 401, and both say which address is which.
-
-The operator override is `OPERATOR_TOKEN` in `.env`, generated there on first
-startup if it is missing. Paste it into the app's Settings drawer to see every
-job in the store; it is held in that tab's `sessionStorage` and is gone when the
-tab closes. Nonces and sessions live in the server process, so a restart signs
-everyone out.
 
 ![hero: the brain over the headline](docs/screenshots/hero.png)
 
-![bulb: the memory section](docs/screenshots/bulb.png)
-
-![console: a job with its four step cards and the ledger](docs/screenshots/console.png)
-
 ## Live
 
-The page is always up on GitHub Pages at <https://shrooms08.github.io/turnstyl/>.
-The agent behind it is live while the operator's machine is on: the API and the
-worker run on that Mac, reached through a Cloudflare quick tunnel whose URL the
-page reads from `config.js`. When the machine is off, the page still tells the
-story and shows the brand; the console reads `agent offline: the operator's
-machine is not reachable right now`, and submit and pay are held.
+<https://shrooms08.github.io/turnstyl/>
 
-Two commands, from the repo on the operator's machine:
+The page is always up. The agent behind it is not: the API and the worker run on
+the operator's Mac, reached through a Cloudflare quick tunnel whose URL the page
+reads from `config.js`. When that machine is off, the page still tells the story
+and shows the brand, the console reads `agent offline: the operator's machine is
+not reachable right now`, and submit and pay are held rather than failing. The
+API allows the Pages origin and localhost only, and takes at most 150 jobs per
+UTC day.
 
-```bash
-scripts/tunnel.sh          # go live in the foreground; Ctrl-C takes it down
-scripts/tunnel.sh --daemon # go live detached; survives the terminal closing
-scripts/tunnel.sh --status # is it running, and at what URL
-scripts/tunnel.sh --stop   # stop it and publish an empty config.js
-scripts/tunnel_check.sh    # from anywhere: is the published page pointing at a reachable agent?
-```
+A buyer's job contents belong to that buyer. The meter is public: `GET
+/api/stats` answers six figures with nobody named. The work is not: the job list
+is operator-only, a buyer sees their own jobs by signing a login message with
+their wallet, and a job fetched by id stays readable to anyone holding the id in
+the public meter shape, because a link to a job is a receipt a buyer may want to
+show someone.
 
-`--daemon` starts the same three processes under `nohup` with their output in
-`data/tunnel.log` and their pids in `data/tunnel.pid`, so closing the terminal
-does not take the agent down; `--stop` reads that file, stops them, and
-republishes an empty `config.js` so the page reads "agent offline".
+![bulb: the memory section](docs/screenshots/bulb.png)
 
-`tunnel.sh` runs with `PAYMENTS=base` and the real model, writes the tunnel
-URL into `web/config.js`, pushes only that file to `gh-pages`, and on Ctrl-C
-stops everything and publishes an empty `config.js` again. The API allows the
-Pages origin and localhost only, and takes at most `MAX_JOBS_PER_DAY` jobs
-(default 150) per UTC day; `/api/status` reports `remaining_today`.
-`scripts/pages.sh` republishes the whole page after a change to `web/`.
-
-## Paying
-
-There are two ways to settle an invoice, and the agent treats them as one.
-
-| | x402, gasless | receipts contract |
-| --- | --- | --- |
-| The buyer needs | USDC only | USDC and a little ETH |
-| The buyer signs | an EIP-3009 transfer authorisation | an `approve` (once) and a `pay` transaction |
-| Who submits it | a facilitator, which pays the gas | the buyer |
-| Evidence the agent keeps | the settlement transaction, recorded in memory | a `Paid` log on the receipts contract |
-| On the page | `Pay 0.50 USDC, no gas` | `Pay on chain` |
-
-Both move real USDC on Base Sepolia, and both end in the same place: the step is
-marked paid in the agent's memory with its settlement transaction, the worker
-runs it, and the agent commits the sha256 of what it delivered to the receipts
-contract exactly as before. `verify` checks that commit either way, and the
-report shows which rail paid each step.
-
-x402 is the default when the facilitator is reachable; the receipts contract is
-always there as the fallback, and is what the buyer uses if the facilitator is
-down. Protocol details, read from the package and observed on the wire, are in
-[docs/X402.md](docs/X402.md).
-
-```bash
-.venv/bin/python scripts/buyer_pay_x402.py <job_id> <step>     # gasless
-.venv/bin/python scripts/buyer_pay.py      <job_id> <step>     # on chain
-```
-
-## Buyer side
-
-The page is also where a buyer does business with the agent. Nothing here needs
-a terminal.
-
-- **Connect.** `Connect wallet` in the top bar asks the injected wallet (Rabby,
-  MetaMask) for an account and switches it to Base Sepolia, adding the network
-  if it is missing. Nothing is requested on page load; a reload reconnects
-  silently only if this tab connected before. The bar shows the address and
-  the wallet's USDC balance.
-- **Submit.** The `new audit` panel takes pasted Solidity or a dropped `.sol`
-  file. `Submit for scope (free)` posts it with the connected address; the
-  agent runs scope at once and invoices step 2. Submitting the same contract
-  again resumes the open job instead of starting another.
-- **Pay.** The open invoice shows `Pay <amount> USDC` when the connected
-  address is the job's buyer. It reads the USDC allowance, approves 100 USDC
-  once if needed, then calls `pay(memo, amount)` on the receipts contract and
-  waits for the receipt. The worker in the serving process runs the step the
-  moment the payment lands; no manual `job run`.
-- **Credit.** After three fully paid jobs the buyer is trusted and the next step
-  runs before its invoice clears: the job shows `started on credit, invoice
-  open`, and the amount is carried on the ledger until it is paid.
-- **Your jobs.** With a wallet connected, the list filters to that address,
-  and any job or ledger that belongs to it is marked `this is you`.
-- **Without a wallet.** With `PAYMENTS=fake` the Pay button becomes `Simulate
-  payment`, which calls `POST /api/jobs/{id}/pay` and marks the invoice settled
-  the way `turnstyl pay` does, so the whole flow runs locally.
-
-Serve with the worker so paid steps run themselves:
-
-```bash
-export PAYMENTS=fake MOCK_LLM=1                          # or PAYMENTS=base, MOCK_LLM unset
-.venv/bin/turnstyl serve --with-worker --db ./data/turnstyl.db
-```
-
-## What is real and what is simulated
-
-Everything the public site does is real. `MOCK_LLM` and `PAYMENTS=fake` are
-opt-in test switches for running the demo offline, and neither is on in
-anything served publicly.
-
-Real, always:
-
-- the model. The audits and test suites are written by `claude-haiku-4-5`; the
-  samples in `docs/` are verbatim output with their token counts and cost.
-- the memory. One Sibyl Memory SQLite file, and deleting it really does lose
-  everything, which is the point of the delete test.
-- the payments. Real USDC on Base Sepolia, on either rail, settled by real
-  wallet signatures. The commits are real transactions on a real contract.
-- the gates. `forge build` and `forge test` really run against the model's
-  answer, and a suite that fails to compile really is sent back.
-
-Simulated, and only when you ask for it:
-
-- `MOCK_LLM=1` serves canned step outputs so the offline demo needs no API key.
-- `PAYMENTS=fake` settles invoices in memory instead of on chain. Its
-  transaction hashes start with `0xfake` and are never rendered as explorer
-  links.
-- the `simulate payment` and `settle` endpoints exist only on the fake backend
-  and return 404 under `PAYMENTS=base`, as do the x402 endpoints, which have
-  nothing to settle when payments are fake.
-- the tamper test in the live demo edits a **copy** of the store, verifies the
-  copy, and discards it. The real store is never modified.
-- the rate and daily caps are in-process counters, so they reset when the
-  server restarts.
-
-Two things are worth saying plainly: the chain is Base Sepolia, a testnet, so
-the USDC has no value; and the agent runs on the operator's own machine behind
-a tunnel, so it is live only while that machine is on. When it is not, the page
-says so.
-
-## Sample audit
-
-[docs/sample_audit.md](docs/sample_audit.md): a real four-step run against
-`claude-haiku-4-5`, verbatim, with token counts, cost, and the mechanical
-verdicts. Memory implementation note: [docs/MEMORY.md](docs/MEMORY.md).
-
-Status: day 4: web UI, particle scene, brand.
+Status: two services live on the layer, MCP server working, evals reproducible,
+live on Base Sepolia behind a tunnel. Submission documentation in
+[docs/SUBMISSION.md](docs/SUBMISSION.md).

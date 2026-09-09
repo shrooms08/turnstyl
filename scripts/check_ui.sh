@@ -677,6 +677,34 @@ hasapp "and it says there is no list of everyone else's" "There is no list of ev
 hasapp "the public receipt line on someone else's job" "you are viewing the public receipt for this job"
 if grep -qF 'every job</h3>' "$APP"; then bad "the every-job section is gone" "an 'every job' section is still rendered"; else ok "the every-job section is gone"; fi
 
+echo "for agents (the MCP server on the site)"
+# The MCP server is a selling surface, not a footnote: an agent harness can buy
+# from this agent on the same rails a person does, and the page has to say so.
+hasapp "the app has a for-agents panel"        'id="agentsPanel"'
+hasapp "it sits below the new job panel"       '<div id="auditPanel"></div>'
+hasapp "it is a card like every other panel"   '<h3>for agents</h3>'
+hasapp "collapsed until asked for"             '<details class="agents">'
+hasapp "the summary says an agent can buy too" "an agent harness can buy this too"
+if grep -qF '<details class="agents" open>' "$APP"; then bad "the panel starts collapsed" "it is marked open"; else ok "the panel starts collapsed"; fi
+hasapp "it says a harness buys the way a person does" "exactly the way a person does on this page"
+hasapp "and that a program earns credit on the same terms" "same terms a human buyer does"
+for t in turnstyl_services turnstyl_status turnstyl_submit turnstyl_quote turnstyl_pay_and_run turnstyl_job turnstyl_verify turnstyl_report; do
+  hasapp "tool listed: $t" "<span class=\"mono\">$t</span>"
+done
+hasapp "the paying tool is called out"         "tool that moves value"
+hasapp "and its ceiling is required"           "required with no default"
+hasapp "install line for the mcp extra"        'uv pip install -e ".[mcp]"'
+hasapp "claude mcp add line"                   "claude mcp add turnstyl"
+hasapp "API url is a placeholder"              "TURNSTYL_API=&lt;the agent's API URL&gt;"
+hasapp "buyer key is a placeholder"            "BUYER_PRIVATE_KEY=&lt;your buyer key&gt;"
+hasapp "it warns the page is not the API"      "a published page answers no API calls"
+hasapp "no wallet still leaves the reads"      "the seven read-only tools still work"
+hasapp "it links docs/MCP.md in the repo"      "https://github.com/shrooms08/turnstyl/blob/master/docs/MCP.md"
+hasidx "the story strip says agents can buy too" "agents can buy from this too"
+hasidx "and it is part of the operator strip"   'id="agentsLine"'
+grep -qF ".agents summary{cursor:pointer" "$CSS" && ok "the stylesheet carries the panel rules" || bad "stylesheet carries the panel rules"
+grep -qF ".agents .atools{display:flex" "$CSS" && ok "and the tool chips" || bad "stylesheet carries the tool chips"
+
 echo
 if [ "$FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL - $FAILURES check(s) failed"

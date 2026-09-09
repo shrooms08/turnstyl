@@ -77,6 +77,78 @@ offline` rather than showing stale numbers. Start it with
 `scripts/tunnel.sh --daemon` before judging, and confirm with
 `scripts/tunnel_check.sh`.
 
+## Field: partner stacks
+
+**Exactly one stack is claimed: Base.** Tick Base and nothing else.
+
+| What | Evidence a judge can open |
+| --- | --- |
+| receipts contract | <https://sepolia.basescan.org/address/0xD2Bb3c9741D7c26A8B161895bb91471706B17477> |
+| x402 settlement, gasless for the buyer | <https://sepolia.basescan.org/tx/0x70d44a1431e3dd3614bb32965e6e5447b5b97bbe5064aa958b45b749f8b3394e> submitted by the facilitator `0xd407e409…f1bf`, not by the buyer |
+| payment on the receipts rail | <https://sepolia.basescan.org/tx/0xff0ad9caa24bed8c591f5010e8ce85683f8c0486aecad7bf9e564962c6d491af> `Paid` under memo `0xb206842b…ba74a` |
+| commit for that same step | <https://sepolia.basescan.org/tx/0xebce4ec085ce3d2c6ecbcfa1c877a25ead0a4c77bccb3dc1a815b627d6558629> `Committed` under the same memo, sent by the agent `0x4463aC72…FdA3` |
+| the check itself | `GET /api/jobs/{id}/verify` decodes `Committed(memo, outputHash)` and compares it with the sha256 of the output held in memory |
+
+**Virtuals is not claimed.** Do not tick it. turnstyl does not integrate it.
+
+## Field: PMF bonus
+
+**Not claimed.** Leave it blank and say so if asked:
+
+> No PMF bonus is claimed. turnstyl has no publicly verifiable usage evidence:
+> the buyers in the live store are the operator's own test wallets, and the
+> figures in the evals are runs of a harness, not customers. Manufacturing that
+> evidence would be a disqualification, and a metering layer that faked its own
+> meter would be self-refuting.
+
+## The demo video: the recall beat
+
+The one shot a judge will scrub back over is memory surviving a restart, so it
+has to be unfalsifiable on its face.
+
+**The recall beat must be a single continuous unedited segment.** No cut, no
+speed ramp, no dissolve between killing the process and the fresh one reading
+the store. Within that one take there must be something on screen that a cut
+would visibly break:
+
+- a running clock, either a wall clock in shot or `date -u` printing in the
+  terminal alongside the command, or
+- a commit hash or transaction hash visible before the restart and still on
+  screen after it, tying both halves to the same chain state.
+
+Everything else in the video may be edited normally. If the recall beat is cut,
+it proves nothing, and a judge is right to discount it.
+
+## Build in public: post 1
+
+274 characters, so it fits without a thread.
+
+> Built turnstyl for the @sibylcap hackathon: a metering and memory layer for
+> agents that sell work.
+>
+> Delete its memory file and it invoices a buyer again for work already paid
+> for. Both payments land on @base, 224s apart.
+>
+> The chain kept both receipts. Only the agent forgot.
+
+Attach the delete test link as the first reply, not in the post, so the post
+itself stays inside the limit:
+<https://sepolia.basescan.org/tx/0x6c5aa73f0e8d40a1f87a3a67a53f7d40d2caa29df75a007846c72dbf1ec06e34>
+
+## Build in public: post 2
+
+254 characters.
+
+> turnstyl prices every step out of memory, not a config file.
+>
+> Second audit of the same contract: 0 tokens, $0.0000, served from the store,
+> in 18 of 18 eval runs.
+>
+> Any agent can buy it over MCP: sign in, get quoted, pay USDC on @base.
+> Memory by @sibylcap.
+
+Attach the repo as the first reply: <https://github.com/shrooms08/turnstyl>
+
 ## Numbers a judge may ask about
 
 Each one is sourced. Evals are from [EVALS.md](EVALS.md), which

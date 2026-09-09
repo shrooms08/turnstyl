@@ -40,6 +40,58 @@ column is what it reads; the right is what reading it does.
 | cache | `findings/<type>/<hash>` | the step is served out of the store with no model call at all |
 | prompt-payer discount | `pattern/<addr>.pays_promptly`, written by the reflection pass from the journal | x0.9 on the price, applied last and floored at 0.05 USDC, and nothing else: credit and refusal never read it |
 
+## Where memory is written and read
+
+The critical path, by file and function, so the claim can be checked without
+reading the whole repo. Three groups: what writes to the store, what reads it
+back, and what turns a read into a decision.
+
+**Persist.** Everything the agent will need after this process exits.
+
+| Function | Where | What it writes |
+| --- | --- | --- |
+| `TurnstylStore.put_job_state` | [`memory.py:325`](src/turnstyl/memory.py#L325) | the HOT `job:<id>` document: current step, status, open invoice, buyer, contract hash |
+| `TurnstylStore.put_job_entity` | [`memory.py:411`](src/turnstyl/memory.py#L411) | the WARM `job/<id>` entity: per step, the output, its sha256, price, tokens, seconds and commit tx |
+| `TurnstylStore.put_buyer` | [`memory.py:365`](src/turnstyl/memory.py#L365) | the buyer ledger: paid steps, USDC paid, outstanding items, defaults, earn-back counters, trust tier |
+| `TurnstylStore.record_step_cost` | [`memory.py:437`](src/turnstyl/memory.py#L437) | folds this run's tokens and seconds into `step_cost/<type>/<n>`, which is what prices the step next time |
+| `TurnstylStore.put_findings` | [`memory.py:486`](src/turnstyl/memory.py#L486) | copies a finished job's outputs into `findings/<type>/<hash>`, the cache that makes a repeat cost nothing |
+| `TurnstylStore.journal` | [`memory.py:497`](src/turnstyl/memory.py#L497) | one COLD event per decision, naming the facts it rested on |
+| `Engine._execute` | [`engine.py:830`](src/turnstyl/engine.py#L830) | the write path for one step: runs it, records the entity and the cost, journals the outcome |
+| `Engine._complete` | [`engine.py:1241`](src/turnstyl/engine.py#L1241) | closes a job: consolidates outputs into `findings/`, archives the job entity, carries any debt as arrears |
+| `events.payment_seen` | [`events.py:42`](src/turnstyl/events.py#L42) | one event the moment any rail first sees an invoice settled, carrying the invoice's own `issued_at` |
+
+**Recall.** What a fresh process reads before it decides anything.
+
+| Function | Where | What it reads |
+| --- | --- | --- |
+| `Engine.run` | [`engine.py:340`](src/turnstyl/engine.py#L340) | the recall path itself: opens the store, reads state, job entity and ledger, with nothing carried in from the process it replaced |
+| `TurnstylStore.get_job_state` | [`memory.py:319`](src/turnstyl/memory.py#L319) | where the work stopped |
+| `TurnstylStore.get_job_entity` | [`memory.py:405`](src/turnstyl/memory.py#L405) | which steps already have output, so none is re-run or re-charged |
+| `TurnstylStore.get_buyer` | [`memory.py:355`](src/turnstyl/memory.py#L355) | the ledger every pricing, credit and refusal decision rests on |
+| `TurnstylStore.get_findings` | [`memory.py:458`](src/turnstyl/memory.py#L458) | a previous job's outputs for the same contract and service, which is the cache hit |
+| `TurnstylStore.search_findings` | [`memory.py:474`](src/turnstyl/memory.py#L474) | FTS5 over `findings/*` with the contract's own function names, called from `Engine._memory_hints` ([`engine.py:515`](src/turnstyl/engine.py#L515)) |
+| `TurnstylStore.read_journal` | [`memory.py:505`](src/turnstyl/memory.py#L505) | the decision history, newest first |
+| the API's GET routes | [`api.py:386`](src/turnstyl/api.py#L386) status, [`899`](src/turnstyl/api.py#L899) job, [`1232`](src/turnstyl/api.py#L1232) verify, [`1417`](src/turnstyl/api.py#L1417) ledger, [`2062`](src/turnstyl/api.py#L2062) journal | every read path opens the store per request and holds no state between them, which is why restarting the server changes nothing a caller can see |
+
+**Decide.** Where a read becomes a price, a refusal or a run.
+
+| Function | Where | What it decides |
+| --- | --- | --- |
+| `policy.price` | [`policy.py:42`](src/turnstyl/policy.py#L42) | the base price times the cache, cost and prompt-payer multipliers, floored, with the reason returned as a sentence |
+| `policy.decide` | [`policy.py:301`](src/turnstyl/policy.py#L301) | RUN_FREE, REFUSE, RUN_PAID, RUN_ON_CREDIT or WAIT_FOR_PAYMENT, from the ledger and the job state |
+| `policy.credit_jobs` | [`policy.py:119`](src/turnstyl/policy.py#L119) | how many fully paid jobs count toward credit right now, discounting those completed before a block |
+| `policy.recompute_trust_tier` | [`policy.py:257`](src/turnstyl/policy.py#L257) | new, trusted or blocked, recomputed from the counters rather than stored as an opinion |
+| `policy.arrears` and `policy.overdue` | [`policy.py:157`](src/turnstyl/policy.py#L157), [`168`](src/turnstyl/policy.py#L168) | which debts were carried past a job's close, and which have run out of grace |
+| `policy.unblock_terms` | [`policy.py:229`](src/turnstyl/policy.py#L229) | the one sentence a blocked buyer is told, written once so it cannot drift between the places it is quoted |
+| `Engine._advance` | [`engine.py:604`](src/turnstyl/engine.py#L604) | asks policy, then writes the journal event that names the facts the answer rested on |
+| `Engine.promote_arrears` | [`engine.py:77`](src/turnstyl/engine.py#L77) | the only place a default is ever written, and only after settlement has been checked |
+| `PaymentBackend.reconcile` | [`payments.py:119`](src/turnstyl/payments.py#L119) | reads `Paid` logs from the chain, settles the invoices they match, and writes the `PAYMENT_SEEN` event |
+| `Worker._reflect` | [`worker.py:129`](src/turnstyl/worker.py#L129) | the hourly reflection pass over the journal, writing the `pattern/<address>` entity that the x0.9 multiplier reads |
+
+`policy.py` is pure: no clock, no network, no memory client. Every fact arrives
+as an argument, so a decision is reproducible from the rows that produced it,
+which is exactly what the journal event records.
+
 ## Measured, not claimed
 
 Every number in this section comes from [docs/EVALS.md](docs/EVALS.md), produced
@@ -320,6 +372,60 @@ scripts/tunnel_check.sh      # from anywhere: is the published page reachable
 ```
 
 ![hero: the brain over the headline](docs/screenshots/hero.png)
+
+## Partner stacks
+
+**Exactly one stack is claimed: Base.** Everything below is on Base Sepolia
+(chain 84532) and can be opened in a block explorer without asking the operator
+for anything.
+
+| What | Where to see it |
+| --- | --- |
+| The receipts contract, `TurnstylReceipts.sol` | [`0xD2Bb3c9741D7c26A8B161895bb91471706B17477`](https://sepolia.basescan.org/address/0xD2Bb3c9741D7c26A8B161895bb91471706B17477) |
+| A real x402 settlement, gasless for the buyer | [`0x70d44a14…3394e`](https://sepolia.basescan.org/tx/0x70d44a1431e3dd3614bb32965e6e5447b5b97bbe5064aa958b45b749f8b3394e), submitted by the facilitator `0xd407e409…f1bf` and not by the buyer, which is what makes it gasless |
+| A real payment on the receipts rail | [`0xff0ad9ca…491af`](https://sepolia.basescan.org/tx/0xff0ad9caa24bed8c591f5010e8ce85683f8c0486aecad7bf9e564962c6d491af), a `Paid` log under memo `0xb206842b…ba74a` |
+| The commit for that same step | [`0xebce4ec0…58629`](https://sepolia.basescan.org/tx/0xebce4ec085ce3d2c6ecbcfa1c877a25ead0a4c77bccb3dc1a815b627d6558629), a `Committed` log under the same memo `0xb206842b…ba74a`, sent by the agent `0x4463aC72…FdA3` |
+| The endpoint that checks one against the other | `GET /api/jobs/{id}/verify` ([`api.py:1232`](src/turnstyl/api.py#L1232)) fetches each commit transaction's receipt, decodes `Committed(memo, outputHash)`, recomputes the sha256 of the output held in memory, and reports match or differ per step |
+
+Those last two rows are the pair worth opening: the same memo appears on a
+payment and on a commit, so a judge can see what was bought and the hash of what
+was delivered for it, without trusting the agent's own account of either.
+
+**Virtuals is not claimed.** turnstyl does not integrate it and nothing here
+should be read as claiming otherwise.
+
+**No PMF bonus is claimed.** There is no publicly verifiable usage evidence for
+turnstyl: the buyers in the live store are the operator's own test wallets, and
+the numbers under [Measured, not claimed](#measured-not-claimed) are eval runs
+rather than customers. Manufacturing that evidence would be a disqualification,
+and a metering layer that faked its own meter would be self-refuting.
+
+## Prior work
+
+turnstyl was built from scratch inside the 1 to 10 September build window. No
+turnstyl code existed before it: the repository's first commit is 4 September
+2026 and its history runs to 9 September, all of it inside the window and all of
+it in `git log`.
+
+Third-party work it stands on, none of it written here:
+
+| Library | Used for |
+| --- | --- |
+| Sibyl Memory SDK (`sibyl-memory-client`) | the entire memory layer: state, entities, journal, references, archive, FTS5 search |
+| web3.py | reading `Paid` and `Committed` logs and sending the commit transaction |
+| ethers | the browser side of both payment rails, in the page |
+| FastAPI | the HTTP API the page and the MCP server both call |
+| Foundry and forge-std | the mechanical gates: `forge build` for the patch, `forge test` for the suite, and the receipts contract's own tests |
+| three.js | the particle scene on the story page |
+| Remotion | the product video |
+| `x402` (Coinbase) | the gasless rail: EIP-3009 authorisation, the 402 headers, the facilitator round trip |
+| MCP Python SDK | the `turnstyl-mcp` server |
+| Anthropic SDK | the model calls behind every step |
+
+The story page's visual direction was informed by
+[dala.craftedbygc.com](https://dala.craftedbygc.com) as a reference for pacing
+and typography. No code and no assets were taken from it; the scene, the
+stylesheet and the markup are written here.
 
 ## Live
 

@@ -35,6 +35,39 @@
       <div class="meta" id="consoleMeta">polling every 3s</div>
     </div>
     <div id="auditPanel"></div>
+    <div id="agentsPanel">
+      <div class="card">
+        <h3>for agents</h3>
+        <details class="agents">
+          <summary>an agent harness can buy this too<span class="n">MCP</span></summary>
+          <div class="abody">
+            <p>turnstyl ships an MCP server, so any agent harness can buy from this
+            agent exactly the way a person does on this page: it signs in with its own
+            wallet, is quoted per step, pays in USDC, and collects only what it paid
+            for. The selling agent cannot tell the difference and does not try to, so a
+            program that pays for three jobs in full earns credit on the fourth on the
+            same terms a human buyer does.</p>
+            <div class="atools">
+              <span class="mono">turnstyl_services</span><span class="mono">turnstyl_status</span><span class="mono">turnstyl_submit</span><span class="mono">turnstyl_quote</span><span class="mono">turnstyl_pay_and_run</span><span class="mono">turnstyl_job</span><span class="mono">turnstyl_verify</span><span class="mono">turnstyl_report</span>
+            </div>
+            <p class="amuted"><span class="mono">turnstyl_pay_and_run</span> is the only
+            tool that moves value, and its <span class="mono">max_usdc</span> ceiling is
+            required with no default.</p>
+            <pre class="ainstall">uv pip install -e ".[mcp]"
+
+claude mcp add turnstyl \
+  --env TURNSTYL_API=&lt;the agent's API URL&gt; \
+  --env BUYER_PRIVATE_KEY=&lt;your buyer key&gt; \
+  -- turnstyl-mcp</pre>
+            <p class="amuted">Point <span class="mono">TURNSTYL_API</span> at the API
+            origin, not at this page: a published page answers no API calls. Without
+            <span class="mono">BUYER_PRIVATE_KEY</span> the paying tool is not registered
+            at all and the seven read-only tools still work.</p>
+            <div class="links"><a href="https://github.com/shrooms08/turnstyl/blob/master/docs/MCP.md" target="_blank" rel="noopener">docs/MCP.md</a></div>
+          </div>
+        </details>
+      </div>
+    </div>
     <div id="consoleBody">
       <div class="card"><div class="empty">connecting to memory…</div></div>
     </div>

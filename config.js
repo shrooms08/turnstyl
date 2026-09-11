@@ -1,1 +1,1 @@
-window.TURNSTYL_API = "https://afternoon-assure-program-nec.trycloudflare.com";
+window.TURNSTYL_API = "https://commands-normally-spies-parental.trycloudflare.com";

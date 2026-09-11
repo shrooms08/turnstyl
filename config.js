@@ -1,1 +1,1 @@
-window.TURNSTYL_API = "https://commands-normally-spies-parental.trycloudflare.com";
+window.TURNSTYL_API = "https://api.trycloudflare.com";

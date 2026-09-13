@@ -1,1 +1,1 @@
-window.TURNSTYL_API = "https://api.trycloudflare.com";
+window.TURNSTYL_API = "";

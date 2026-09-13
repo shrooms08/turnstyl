@@ -1,1 +1,1 @@
-window.TURNSTYL_API = "https://queensland-monica-marshall-spring.trycloudflare.com";
+window.TURNSTYL_API = "https://api.trycloudflare.com";
